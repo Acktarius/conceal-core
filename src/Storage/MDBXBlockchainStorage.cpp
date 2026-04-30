@@ -52,6 +52,7 @@ void MDBXBlockchainStorage::openDatabases(MDBX_txn *txn)
   mdbx_dbi_open(txn, "block_heights", MDBX_CREATE, &m_dbiBlockHeights);
   mdbx_dbi_open(txn, "spent_keys", MDBX_CREATE, &m_dbiSpentKeys);
   mdbx_dbi_open(txn, "meta", MDBX_CREATE, &m_dbiMeta);
+  mdbx_dbi_open(txn, "block_entries", MDBX_CREATE, &m_dbiBlockEntries);
 }
 
 // ---------- Reads ----------
@@ -283,4 +284,54 @@ void MDBXBlockchainStorage::commitWriteTransaction(bool force)
   }
   m_writeTxn = nullptr;
   m_opsSinceLastCommit = 0;
+}
+
+// ---------- BlockEntry storage (serialized to/from BinaryArray) ----------
+void MDBXBlockchainStorage::pushBlockEntry(uint32_t height, const cn::BinaryArray &serializedEntry)
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string key = "be_" + std::to_string(height);
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  MDBX_val mval{mdbx_cast(serializedEntry.data()), serializedEntry.size()};
+  int rc = mdbx_put(m_writeTxn, m_dbiBlockEntries, &mkey, &mval, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+    throw std::runtime_error("pushBlockEntry failed");
+
+  ++m_opsSinceLastCommit;
+  if (m_opsSinceLastCommit >= kCommitBatchSize)
+    commitWriteTransaction(false);
+}
+
+bool MDBXBlockchainStorage::getBlockEntry(uint32_t height, cn::BinaryArray &serializedEntry) const
+{
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  std::string key = "be_" + std::to_string(height);
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  MDBX_val mval;
+  int rc = mdbx_get(txn, m_dbiBlockEntries, &mkey, &mval);
+  if (rc == MDBX_SUCCESS)
+  {
+    serializedEntry.assign(
+        static_cast<const uint8_t *>(mval.iov_base),
+        static_cast<const uint8_t *>(mval.iov_base) + mval.iov_len);
+    mdbx_txn_abort(txn);
+    return true;
+  }
+  mdbx_txn_abort(txn);
+  return false;
+}
+
+void MDBXBlockchainStorage::popBlockEntry(uint32_t height)
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string key = "be_" + std::to_string(height);
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  mdbx_del(m_writeTxn, m_dbiBlockEntries, &mkey, nullptr);
+  ++m_opsSinceLastCommit;
 }

@@ -53,6 +53,50 @@ namespace cn
   public:
     Blockchain(const Currency &currency, tx_memory_pool &tx_pool, logging::ILogger &logger, bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled, bool useMdbx = false);
 
+    struct TransactionIndex
+    {
+      uint32_t block;
+      uint16_t transaction;
+
+      void serialize(ISerializer &s)
+      {
+        s(block, "block");
+        s(transaction, "tx");
+      }
+    };
+
+    struct TransactionEntry
+    {
+      Transaction tx;
+      std::vector<uint32_t> m_global_output_indexes;
+
+      void serialize(ISerializer &s)
+      {
+        s(tx, "tx");
+        s(m_global_output_indexes, "indexes");
+      }
+    };
+
+    struct BlockEntry
+    {
+      Block bl;
+      uint32_t height;
+      uint64_t block_cumulative_size;
+      difficulty_type cumulative_difficulty;
+      uint64_t already_generated_coins;
+      std::vector<TransactionEntry> transactions;
+
+      void serialize(ISerializer &s)
+      {
+        s(bl, "block");
+        s(height, "height");
+        s(block_cumulative_size, "block_cumulative_size");
+        s(cumulative_difficulty, "cumulative_difficulty");
+        s(already_generated_coins, "already_generated_coins");
+        s(transactions, "transactions");
+      }
+    };
+
     bool addObserver(IBlockchainStorageObserver *observer);
     bool removeObserver(IBlockchainStorageObserver *observer);
 
@@ -138,6 +182,13 @@ namespace cn
     uint64_t difficultyAtHeight(uint64_t height);
     bool isInCheckpointZone(const uint32_t height) const;
 
+    size_t blocksSize() const;
+    bool blocksEmpty() const;
+    const BlockEntry &blocksAt(size_t i) const;
+    BlockEntry &blocksAt(size_t i);
+    BlockEntry blocksBack() const;
+    void blocksClear();
+
     template <class visitor_t>
     bool scanOutputKeysForIndexes(const KeyInput &tx_in_to_key, visitor_t &vis, uint32_t *pmax_related_block_height = nullptr);
 
@@ -216,18 +267,6 @@ namespace cn
     void print_blockchain_index(bool print_all);
     void print_blockchain_outs(const std::string &file);
 
-    struct TransactionIndex
-    {
-      uint32_t block;
-      uint16_t transaction;
-
-      void serialize(ISerializer &s)
-      {
-        s(block, "block");
-        s(transaction, "tx");
-      }
-    };
-
     bool rollbackBlockchainTo(uint32_t height);
     bool have_tx_keyimg_as_spent(const crypto::KeyImage &key_im);
 
@@ -244,38 +283,6 @@ namespace cn
         s(transactionIndex, "txindex");
         s(outputIndex, "outindex");
         s(isUsed, "used");
-      }
-    };
-
-    struct TransactionEntry
-    {
-      Transaction tx;
-      std::vector<uint32_t> m_global_output_indexes;
-
-      void serialize(ISerializer &s)
-      {
-        s(tx, "tx");
-        s(m_global_output_indexes, "indexes");
-      }
-    };
-
-    struct BlockEntry
-    {
-      Block bl;
-      uint32_t height;
-      uint64_t block_cumulative_size;
-      difficulty_type cumulative_difficulty;
-      uint64_t already_generated_coins;
-      std::vector<TransactionEntry> transactions;
-
-      void serialize(ISerializer &s)
-      {
-        s(bl, "block");
-        s(height, "height");
-        s(block_cumulative_size, "block_cumulative_size");
-        s(cumulative_difficulty, "cumulative_difficulty");
-        s(already_generated_coins, "already_generated_coins");
-        s(transactions, "transactions");
       }
     };
 
@@ -302,7 +309,6 @@ namespace cn
     using Blocks = SwappedVector<BlockEntry>;
     using BlockMap = parallel_flat_hash_map<crypto::Hash, uint32_t>;
     using TransactionMap = parallel_flat_hash_map<crypto::Hash, TransactionIndex>;
-    using UpgradeDetector = BasicUpgradeDetector<Blocks>;
 
     friend class BlockCacheSerializer;
     friend class BlockchainIndicesSerializer;
@@ -313,16 +319,20 @@ namespace cn
 #ifdef HAVE_MDBX
     std::unique_ptr<CryptoNote::MDBXBlockchainStorage> m_mdbxStorage; // Optional MDBX backend
     bool m_useMdbx = false;
+    // Single-entry cache for MDBX reads
+    mutable BlockEntry m_cachedBlockEntry;
+    mutable size_t m_cachedHeight = (size_t)-1;
+    mutable bool m_cacheValid = false;
 #endif
 
     cn::DepositIndex m_depositIndex;
     TransactionMap m_transactionMap;
     MultisignatureOutputsContainer m_multisignatureOutputs;
-    UpgradeDetector m_upgradeDetectorV2;
-    UpgradeDetector m_upgradeDetectorV3;
-    UpgradeDetector m_upgradeDetectorV4;
-    UpgradeDetector m_upgradeDetectorV7;
-    UpgradeDetector m_upgradeDetectorV8;
+    BasicUpgradeDetector m_upgradeDetectorV2;
+    BasicUpgradeDetector m_upgradeDetectorV3;
+    BasicUpgradeDetector m_upgradeDetectorV4;
+    BasicUpgradeDetector m_upgradeDetectorV7;
+    BasicUpgradeDetector m_upgradeDetectorV8;
 
     bool m_blockchainIndexesEnabled;
     bool m_blockchainAutosaveEnabled;

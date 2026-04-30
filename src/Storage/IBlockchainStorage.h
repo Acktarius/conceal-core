@@ -34,6 +34,11 @@ namespace CryptoNote
     // ---------- Persistence & lifecycle ----------
     virtual void flush() = 0;
     virtual void close() = 0;
+
+    // ---------- BlockEntry storage (serialized to/from BinaryArray) ----------
+    virtual void pushBlockEntry(uint32_t height, const cn::BinaryArray &serializedEntry) = 0;
+    virtual bool getBlockEntry(uint32_t height, cn::BinaryArray &serializedEntry) const = 0;
+    virtual void popBlockEntry(uint32_t height) = 0;
   };
 
 } // namespace CryptoNote

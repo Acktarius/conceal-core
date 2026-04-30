@@ -32,6 +32,10 @@ namespace CryptoNote
     void flush() override;
     void close() override;
 
+    void pushBlockEntry(uint32_t height, const cn::BinaryArray &serializedEntry) override;
+    bool getBlockEntry(uint32_t height, cn::BinaryArray &serializedEntry) const override;
+    void popBlockEntry(uint32_t height) override;
+
   private:
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);
@@ -46,6 +50,7 @@ namespace CryptoNote
     MDBX_dbi m_dbiBlockHeights;
     MDBX_dbi m_dbiSpentKeys;
     MDBX_dbi m_dbiMeta;
+    MDBX_dbi m_dbiBlockEntries;
 
     // Transaction management
     mutable std::mutex m_txMutex;
