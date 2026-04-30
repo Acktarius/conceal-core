@@ -9,6 +9,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 
 #include <parallel_hashmap/phmap.h>
 
@@ -76,7 +77,7 @@ namespace cn
     bool getBlocks(uint32_t start_offset, uint32_t count, std::list<Block> &blocks, std::list<Transaction> &txs);
     bool getBlocks(uint32_t start_offset, uint32_t count, std::list<Block> &blocks);
     bool getAlternativeBlocks(std::list<Block> &blocks);
-    bool getTransactionsWithOutputGlobalIndexes(const std::vector<crypto::Hash>& txs_ids, std::list<crypto::Hash>& missed_txs, std::vector<std::pair<Transaction, std::vector<uint32_t>>>& txs);
+    bool getTransactionsWithOutputGlobalIndexes(const std::vector<crypto::Hash> &txs_ids, std::list<crypto::Hash> &missed_txs, std::vector<std::pair<Transaction, std::vector<uint32_t>>> &txs);
     uint32_t getAlternativeBlocksCount();
     crypto::Hash getBlockIdByHeight(uint32_t height);
     bool getBlockByHash(const crypto::Hash &h, Block &blk);
@@ -99,11 +100,18 @@ namespace cn
     bool resetAndSetGenesisBlock(const Block &b);
     bool haveBlock(const crypto::Hash &id);
     size_t getTotalTransactions();
+
+    // Optimized methods with reduced lock contention
     std::vector<crypto::Hash> buildSparseChain();
     std::vector<crypto::Hash> buildSparseChain(const crypto::Hash &startBlockId);
-    uint32_t findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids); // !!!!
+    uint32_t findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids);
     std::vector<crypto::Hash> findBlockchainSupplement(const std::vector<crypto::Hash> &remoteBlockIds, size_t maxCount,
                                                        uint32_t &totalBlockCount, uint32_t &startBlockIndex);
+
+    // Cache management for performance
+    void invalidateSparseChainCache();
+    std::vector<crypto::Hash> getCachedSparseChain();
+
     uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
     uint8_t blockMajorVersion;
     bool handleGetObjects(NOTIFY_REQUEST_GET_OBJECTS_request &arg, NOTIFY_RESPONSE_GET_OBJECTS_request &rsp); //Deprecated. Should be removed with CryptoNoteProtocolHandler.
@@ -168,7 +176,7 @@ namespace cn
     template <class t_ids_container, class t_tx_container, class t_missed_container>
     void getBlockchainTransactions(const t_ids_container &txs_ids, t_tx_container &txs, t_missed_container &missed_txs)
     {
-      std::lock_guard<decltype(m_blockchain_lock)> bcLock(m_blockchain_lock);
+      std::lock_guard<std::recursive_mutex> bcLock(m_blockchain_lock);
 
       for (const auto &tx_id : txs_ids)
       {
@@ -327,6 +335,16 @@ namespace cn
 
     logging::LoggerRef logger;
 
+    // Sparse chain cache for reducing rebuilds
+    mutable std::mutex m_sparseChainCacheMutex;
+    mutable std::vector<crypto::Hash> m_cachedSparseChain;
+    mutable uint32_t m_cachedSparseChainHeight;
+    mutable std::chrono::steady_clock::time_point m_lastSparseChainUpdate;
+    mutable bool m_sparseChainCacheValid;
+
+    // Constants for cache management
+    static constexpr uint32_t SPARSE_CHAIN_CACHE_DURATION_SECONDS = 10;
+    static constexpr uint32_t SPARSE_CHAIN_CACHE_BLOCK_DELTA = 100;
 
     bool switch_to_alternative_blockchain(const std::list<crypto::Hash> &alt_chain, bool discard_disconnected_chain);
     bool handle_alternative_block(const Block &b, const crypto::Hash &id, block_verification_context &bvc, bool sendNewAlternativeBlockMessage = true);
@@ -346,11 +364,13 @@ namespace cn
     bool checkBlockVersion(const Block &b, const crypto::Hash &blockHash);
     bool checkCumulativeBlockSize(const crypto::Hash &blockId, size_t cumulativeBlockSize, uint64_t height);
     std::vector<crypto::Hash> doBuildSparseChain(const crypto::Hash &startBlockId) const;
+    std::vector<crypto::Hash> doBuildSparseChainUnlocked(const crypto::Hash &startBlockId) const;
     bool getBlockCumulativeSize(const Block &block, size_t &cumulativeSize);
     bool update_next_comulative_size_limit();
     bool check_tx_input(const KeyInput &txin, const crypto::Hash &tx_prefix_hash, const std::vector<crypto::Signature> &sig, uint32_t *pmax_related_block_height = nullptr);
     bool checkTransactionInputs(const Transaction &tx, const crypto::Hash &tx_prefix_hash, uint32_t *pmax_used_block_height = nullptr);
     bool checkTransactionInputs(const Transaction &tx, uint32_t *pmax_used_block_height = nullptr);
+    uint32_t findBlockchainSupplementInternal(const std::vector<crypto::Hash> &qblock_ids) const;
 
     const TransactionEntry &transactionByIndex(TransactionIndex index);
     bool pushBlock(const Block &blockData, const crypto::Hash &id, block_verification_context &bvc, uint32_t height);

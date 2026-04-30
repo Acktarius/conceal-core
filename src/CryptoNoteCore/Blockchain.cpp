@@ -366,12 +366,14 @@ namespace cn
     m_upgradeDetectorV8(currency, m_blocks, BLOCK_MAJOR_VERSION_8, logger),
     m_blockchainIndexesEnabled(blockchainIndexesEnabled),
     m_blockchainAutosaveEnabled(blockchainAutosaveEnabled),
+    m_sparseChainCacheValid(false),
+    m_cachedSparseChainHeight(0),
     logger(logger, "Blockchain")
-
   {
 #ifdef HAVE_MDBX
     m_useMdbx = useMdbx;
 #endif
+    m_lastSparseChainUpdate = std::chrono::steady_clock::now();
   }
 
   bool Blockchain::addObserver(IBlockchainStorageObserver *observer)
@@ -457,19 +459,19 @@ namespace cn
 
   bool Blockchain::haveTransaction(const crypto::Hash &id)
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_transactionMap.find(id) != m_transactionMap.end();
   }
 
   bool Blockchain::have_tx_keyimg_as_spent(const crypto::KeyImage &key_im)
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_spent_keys.find(key_im) != m_spent_keys.end();
   }
 
   uint32_t Blockchain::getCurrentBlockchainHeight()
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return static_cast<uint32_t>(m_blocks.size());
   }
 
@@ -919,26 +921,73 @@ namespace cn
 
   crypto::Hash Blockchain::getTailId()
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_blocks.empty() ? NULL_HASH : m_blockIndex.getTailId();
   }
 
   std::vector<crypto::Hash> Blockchain::buildSparseChain()
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
-    assert(m_blockIndex.size() != 0);
-    return doBuildSparseChain(m_blockIndex.getTailId());
+    uint32_t currentHeight;
+    crypto::Hash tailId;
+
+    // Get current state with minimal lock time
+    {
+      std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+      assert(m_blockIndex.size() != 0);
+      currentHeight = static_cast<uint32_t>(m_blocks.size());
+      tailId = m_blockIndex.getTailId();
+    }
+
+    // Check cache
+    {
+      std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastSparseChainUpdate).count();
+      uint32_t heightDelta = currentHeight > m_cachedSparseChainHeight ? currentHeight - m_cachedSparseChainHeight : m_cachedSparseChainHeight - currentHeight;
+
+      if (m_sparseChainCacheValid &&
+          elapsed < SPARSE_CHAIN_CACHE_DURATION_SECONDS &&
+          heightDelta < SPARSE_CHAIN_CACHE_BLOCK_DELTA &&
+          !m_cachedSparseChain.empty())
+      {
+        return m_cachedSparseChain;
+      }
+    }
+
+    // Build new sparse chain
+    std::vector<crypto::Hash> result = doBuildSparseChainUnlocked(tailId);
+
+    // Update cache
+    {
+      std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
+      m_cachedSparseChain = result;
+      m_cachedSparseChainHeight = currentHeight;
+      m_lastSparseChainUpdate = std::chrono::steady_clock::now();
+      m_sparseChainCacheValid = true;
+    }
+
+    return result;
   }
 
   std::vector<crypto::Hash> Blockchain::buildSparseChain(const crypto::Hash &startBlockId)
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
-    assert(haveBlock(startBlockId));
-    return doBuildSparseChain(startBlockId);
+    // Verify we have the block without holding the lock for long
+    {
+      std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+      if (!haveBlock(startBlockId))
+      {
+        return std::vector<crypto::Hash>();
+      }
+    }
+
+    // Build sparse chain (this will lock internally)
+    return doBuildSparseChainUnlocked(startBlockId);
   }
 
   std::vector<crypto::Hash> Blockchain::doBuildSparseChain(const crypto::Hash &startBlockId) const
   {
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+
     assert(m_blockIndex.size() != 0);
 
     std::vector<crypto::Hash> sparseChain;
@@ -953,7 +1002,9 @@ namespace cn
 
       std::vector<crypto::Hash> alternativeChain;
       crypto::Hash blockchainAncestor;
-      for (auto it = m_alternative_chains.find(startBlockId); it != m_alternative_chains.end(); it = m_alternative_chains.find(blockchainAncestor))
+      for (auto it = m_alternative_chains.find(startBlockId);
+           it != m_alternative_chains.end();
+           it = m_alternative_chains.find(blockchainAncestor))
       {
         alternativeChain.emplace_back(it->first);
         blockchainAncestor = it->second.bl.previousBlockHash;
@@ -976,7 +1027,7 @@ namespace cn
 
   crypto::Hash Blockchain::getBlockIdByHeight(uint32_t height)
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     assert(height < m_blockIndex.size());
     return m_blockIndex.getBlockId(height);
   }
@@ -2001,12 +2052,21 @@ namespace cn
   uint32_t Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids)
   {
     assert(!qblock_ids.empty());
-    assert(qblock_ids.back() == m_blockIndex.getBlockId(0));
+    assert(qblock_ids.back() == getBlockIdByHeight(0));
 
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
-    uint32_t blockIndex;
-    // assert above guarantees that method returns true
-    m_blockIndex.findSupplement(qblock_ids, blockIndex);
+    uint32_t blockIndex = 0;
+
+    // Minimize critical section - only get the supplement
+    {
+      std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+
+      if (!m_blockIndex.findSupplement(qblock_ids, blockIndex))
+      {
+        // Fallback to sequential search if findSupplement fails
+        blockIndex = findBlockchainSupplementInternal(qblock_ids);
+      }
+    }
+
     return blockIndex;
   }
 
@@ -2096,23 +2156,32 @@ namespace cn
     }
   }
 
-  std::vector<crypto::Hash> Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &remoteBlockIds, size_t maxCount,
-                                                                 uint32_t &totalBlockCount, uint32_t &startBlockIndex)
+  std::vector<crypto::Hash> Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &remoteBlockIds, size_t maxCount, uint32_t &totalBlockCount, uint32_t &startBlockIndex)
   {
-
     assert(!remoteBlockIds.empty());
-    assert(remoteBlockIds.back() == m_blockIndex.getBlockId(0));
+    assert(remoteBlockIds.back() == getBlockIdByHeight(0));
 
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
-    totalBlockCount = getCurrentBlockchainHeight();
-    startBlockIndex = findBlockchainSupplement(remoteBlockIds);
+    uint32_t startIndex = 0;
+    uint32_t totalCount = 0;
 
-    return m_blockIndex.getBlockIds(startBlockIndex, static_cast<uint32_t>(maxCount));
+    // First critical section - just get the supplement
+    {
+      std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+      totalCount = getCurrentBlockchainHeight();
+      startIndex = findBlockchainSupplement(remoteBlockIds);
+    }
+
+    // Set output parameters
+    totalBlockCount = totalCount;
+    startBlockIndex = startIndex;
+
+    // Get block IDs - this will lock internally but for a shorter time
+    return getBlockIds(startIndex, static_cast<uint32_t>(maxCount));
   }
 
   bool Blockchain::haveBlock(const crypto::Hash &id)
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     if (m_blockIndex.hasBlock(id))
       return true;
 
@@ -3260,7 +3329,7 @@ namespace cn
 
   std::vector<crypto::Hash> Blockchain::getBlockIds(uint32_t startHeight, uint32_t maxCount)
   {
-    std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_blockIndex.getBlockIds(startHeight, maxCount);
   }
 
@@ -3512,4 +3581,43 @@ namespace cn
     return m_checkpoints.is_in_checkpoint_zone(height);
   }
 
+  uint32_t Blockchain::findBlockchainSupplementInternal(const std::vector<crypto::Hash> &qblock_ids) const
+  {
+    // This is called with the lock held, but we minimize work
+    uint32_t currentHeight = static_cast<uint32_t>(m_blocks.size());
+    uint32_t bestMatch = 0;
+
+    // Find the deepest common block
+    for (const auto &blockId : qblock_ids)
+    {
+      uint32_t height = 0;
+      if (m_blockIndex.getBlockHeight(blockId, height))
+      {
+        if (height + 1 > bestMatch && height < currentHeight)
+        {
+          bestMatch = height + 1;
+        }
+      }
+    }
+
+    return bestMatch;
+  }
+  void Blockchain::invalidateSparseChainCache()
+  {
+    std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
+    m_sparseChainCacheValid = false;
+    m_cachedSparseChain.clear();
+  }
+
+  std::vector<crypto::Hash> Blockchain::getCachedSparseChain()
+  {
+    return buildSparseChain(); // This will use the cache
+  }
+
+  // this is the same as doBuildSparseChain
+  // but called when we don't hold the lock (it acquires its own lock)
+  std::vector<crypto::Hash> Blockchain::doBuildSparseChainUnlocked(const crypto::Hash &startBlockId) const
+  {
+    return doBuildSparseChain(startBlockId);
+  }
 } // namespace cn
