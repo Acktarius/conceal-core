@@ -53,6 +53,7 @@ namespace
   const command_line::arg_descriptor<int>         arg_log_level   = {"log-level", "", 2};
   const command_line::arg_descriptor<bool>        arg_console     = {"no-console", "Disable daemon console commands"};
   const command_line::arg_descriptor<bool>        arg_print_genesis_tx = { "print-genesis-tx", "Prints genesis' block tx hex to insert it to config and exits" };
+  const command_line::arg_descriptor<bool>        arg_use_mdbx = {"use-mdbx", "Use MDBX database backend for faster sync", false};
 }
 
 void print_genesis_tx_hex() {
@@ -117,6 +118,7 @@ int main(int argc, char* argv[])
     command_line::add_arg(desc_cmd_sett, arg_console);
     command_line::add_arg(desc_cmd_sett, arg_set_view_key);
     command_line::add_arg(desc_cmd_sett, command_line::arg_testnet_on);
+    command_line::add_arg(desc_cmd_sett, arg_use_mdbx);
     command_line::add_arg(desc_cmd_sett, arg_print_genesis_tx);
 
     RpcServerConfig::initOptions(desc_cmd_sett);
@@ -131,6 +133,7 @@ int main(int argc, char* argv[])
     bool r = command_line::handle_error_helper(desc_options, [&]() {
       po::store(po::parse_command_line(argc, argv, desc_options), vm);
       coreConfig.init(vm);
+      coreConfig.useMdbx = command_line::get_arg(vm, arg_use_mdbx);
 
       // logger is not configured yet, std::cout is fine here
       if (command_line::get_arg(vm, command_line::arg_help))

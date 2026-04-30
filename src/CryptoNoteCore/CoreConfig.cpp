@@ -19,6 +19,7 @@ CoreConfig::CoreConfig() {
 void CoreConfig::init(const boost::program_options::variables_map &options)
 {
   testnet = options[command_line::arg_testnet_on.name].as<bool>();
+  useMdbx = options.count("use-mdbx") ? options["use-mdbx"].as<bool>() : false;
   if (options.count(command_line::arg_data_dir.name) != 0 &&
       !options[command_line::arg_data_dir.name].defaulted())
   {

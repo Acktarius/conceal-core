@@ -23,6 +23,7 @@ public:
   std::string configFolder;
   bool configFolderDefaulted = true;
   bool testnet = false;
+  bool useMdbx = false;
 };
 
 } //namespace cn

@@ -355,7 +355,7 @@ namespace cn
     bool m_loaded = false;
   };
 
-  Blockchain::Blockchain(const Currency &currency, tx_memory_pool &tx_pool, ILogger &logger, bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled) :
+  Blockchain::Blockchain(const Currency &currency, tx_memory_pool &tx_pool, ILogger &logger, bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled, bool useMdbx) :
     m_currency(currency),
     m_tx_pool(tx_pool),
     m_checkpoints(logger),
@@ -369,6 +369,9 @@ namespace cn
     logger(logger, "Blockchain")
 
   {
+#ifdef HAVE_MDBX
+    m_useMdbx = useMdbx;
+#endif
   }
 
   bool Blockchain::addObserver(IBlockchainStorageObserver *observer)

@@ -35,7 +35,7 @@ namespace cn {
 
   class core : public ICore, public IMinerHandler, public IBlockchainStorageObserver, public ITxPoolObserver {
    public:
-     core(const Currency &currency, i_cryptonote_protocol *pprotocol, logging::ILogger &logger, bool blockchainIndexesEnabled = false, bool blockchainAutosaveEnabled = false);
+     core(const Currency &currency, i_cryptonote_protocol *pprotocol, logging::ILogger &logger, bool blockchainIndexesEnabled = false, bool blockchainAutosaveEnabled = false, bool useMdbx = false);
      ~core();
 
      bool on_idle() override;

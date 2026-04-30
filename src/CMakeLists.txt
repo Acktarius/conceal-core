@@ -1,5 +1,14 @@
 add_definitions(-DMINIUPNP_STATICLIB)
-include_directories(${CMAKE_SOURCE_DIR}/external/parallel_hashmap)
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/external/parallel_hashmap)
+
+if(ENABLE_MDBX AND MDBX_INCLUDE_DIR)
+  include_directories(${MDBX_INCLUDE_DIR})
+  add_definitions(-DHAVE_MDBX)
+endif()
+
+if(ENABLE_MDBX)
+  file(GLOB_RECURSE MDBX_STORAGE_FILES Storage/*)
+endif()
 
 file(GLOB_RECURSE BlockchainExplorer BlockchainExplorer/*)
 file(GLOB_RECURSE Common Common/*)
@@ -32,7 +41,11 @@ else()
   file(GLOB_RECURSE System System/* Platform/Linux/System/*)
 endif()
 
-source_group("" FILES $${Common} ${crypto} ${CryptoNoteCore} ${CryptoNoteProtocol} ${Daemon} ${JsonRpcServer} ${Http} ${Logging} ${NodeRpcProxy} ${P2p} ${Rpc} ${Serialization} ${ConcealWallet} ${System} ${Transfers} ${Wallet} ${WalletLegacy})
+source_group("" FILES ${Common} ${ConcealWallet} ${crypto} ${CryptoNoteCore} ${CryptoNoteProtocol} ${Daemon} ${JsonRpcServer} ${Http} ${Logging} ${NodeRpcProxy} ${P2p} ${Rpc} ${Serialization} ${System} ${Transfers} ${Wallet} ${WalletLegacy})
+
+if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
+  source_group("Storage" FILES ${MDBX_STORAGE_FILES})
+endif()
 
 add_library(BlockchainExplorer STATIC ${BlockchainExplorer})
 add_library(Common STATIC ${Common})
@@ -52,6 +65,15 @@ add_library(Wallet STATIC ${Wallet} ${WalletLegacy})
 add_library(PaymentGate STATIC ${PaymentGate})
 add_library(JsonRpcServer STATIC ${JsonRpcServer})
 
+# Storage library (only when MDBX is enabled)
+if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
+  add_library(Storage STATIC ${MDBX_STORAGE_FILES})
+  add_dependencies(Storage version)
+  if(MDBX_LIBRARY_TARGET)
+    target_link_libraries(Storage PRIVATE ${MDBX_LIBRARY_TARGET})
+  endif()
+endif()
+
 add_executable(Daemon ${Daemon})
 add_executable(ConcealWallet ${ConcealWallet})
 add_executable(PaymentGateService ${PaymentGateService})
@@ -67,10 +89,79 @@ if (MINGW)
   target_link_libraries(System ws2_32)
 endif ()
 
-target_link_libraries(Daemon CryptoNoteCore P2P Rpc System Http Logging Common crypto libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
-target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc Http CryptoNoteCore System Logging Common crypto ${Boost_LIBRARIES} Serialization Mnemonics)
-target_link_libraries(PaymentGateService PaymentGate JsonRpcServer Wallet NodeRpcProxy Transfers CryptoNoteCore crypto P2P Rpc Http System Logging Common InProcessNode libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
-target_link_libraries(Optimizer PaymentGate Rpc Http CryptoNoteCore Logging Serialization crypto System Common ${Boost_LIBRARIES})
+target_link_libraries(Daemon CryptoNoteCore Storage P2P Rpc System Http Logging Common crypto libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
+target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc Http CryptoNoteCore Storage System Logging Common crypto ${Boost_LIBRARIES} Serialization Mnemonics)
+target_link_libraries(PaymentGateService PaymentGate JsonRpcServer Wallet NodeRpcProxy Transfers CryptoNoteCore Storage crypto P2P Rpc Http System Logging Common InProcessNode libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
+target_link_libraries(Optimizer PaymentGate Rpc Http CryptoNoteCore Storage Logging Serialization crypto System Common ${Boost_LIBRARIES})
+
+if(ENABLE_MDBX)
+    add_executable(mdbx_test Storage/MDBXTest.cpp)
+    
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(mdbx_test 
+            -Wl,--start-group
+            Storage
+            CryptoNoteCore
+            P2P 
+            Rpc 
+            System 
+            Http 
+            Logging 
+            Common 
+            crypto 
+            Serialization
+            ${Boost_LIBRARIES}
+            -Wl,--end-group
+        )
+    else()
+        target_link_libraries(mdbx_test 
+            Storage
+            CryptoNoteCore
+            P2P 
+            Rpc 
+            System 
+            Http 
+            Logging 
+            Common 
+            crypto 
+            Serialization
+            ${Boost_LIBRARIES}
+        )
+    endif()
+  
+    add_executable(mdbx_benchmark Storage/MDBXBenchmark.cpp)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(mdbx_benchmark 
+            -Wl,--start-group
+            Storage
+            CryptoNoteCore
+            P2P 
+            Rpc 
+            System 
+            Http 
+            Logging 
+            Common 
+            crypto 
+            Serialization
+            ${Boost_LIBRARIES}
+            -Wl,--end-group
+        )
+    else()
+        target_link_libraries(mdbx_benchmark 
+            Storage
+            CryptoNoteCore
+            P2P 
+            Rpc 
+            System 
+            Http 
+            Logging 
+            Common 
+            crypto 
+            Serialization
+            ${Boost_LIBRARIES}
+        )
+    endif()
+endif()
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
   target_link_libraries(ConcealWallet -lresolv)

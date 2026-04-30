@@ -32,6 +32,10 @@
 
 #include <Logging/LoggerRef.h>
 
+#ifdef HAVE_MDBX
+#include "Storage/MDBXBlockchainStorage.h"
+#endif
+
 #undef ERROR
 using phmap::parallel_flat_hash_map;
 namespace cn
@@ -46,7 +50,7 @@ namespace cn
   class Blockchain : public cn::ITransactionValidator
   {
   public:
-    Blockchain(const Currency &currency, tx_memory_pool &tx_pool, logging::ILogger &logger, bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled);
+    Blockchain(const Currency &currency, tx_memory_pool &tx_pool, logging::ILogger &logger, bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled, bool useMdbx = false);
 
     bool addObserver(IBlockchainStorageObserver *observer);
     bool removeObserver(IBlockchainStorageObserver *observer);
@@ -297,6 +301,12 @@ namespace cn
 
     Blocks m_blocks;
     cn::BlockIndex m_blockIndex;
+
+#ifdef HAVE_MDBX
+    std::unique_ptr<CryptoNote::MDBXBlockchainStorage> m_mdbxStorage; // Optional MDBX backend
+    bool m_useMdbx = false;
+#endif
+
     cn::DepositIndex m_depositIndex;
     TransactionMap m_transactionMap;
     MultisignatureOutputsContainer m_multisignatureOutputs;
