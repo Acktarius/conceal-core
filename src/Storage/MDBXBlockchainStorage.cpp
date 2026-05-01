@@ -63,6 +63,7 @@ void MDBXBlockchainStorage::openDatabases(MDBX_txn *txn)
   mdbx_dbi_open(txn, "spent_keys", MDBX_CREATE, &m_dbiSpentKeys);
   mdbx_dbi_open(txn, "meta", MDBX_CREATE, &m_dbiMeta);
   mdbx_dbi_open(txn, "block_entries", MDBX_CREATE, &m_dbiBlockEntries);
+  mdbx_dbi_open(txn, "block_headers", MDBX_CREATE, &m_dbiBlockHeaders);
 }
 
 // ---------- Reads ----------
@@ -368,4 +369,35 @@ bool MDBXBlockchainStorage::isInitialized() const
   int rc = mdbx_get(txn, m_dbiMeta, &mkey, &mval);
   mdbx_txn_abort(txn);
   return rc == MDBX_SUCCESS;
+}
+
+void MDBXBlockchainStorage::pushBlockHeader(uint32_t height, const cn::BlockHeaderPOD &hdr)
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+  std::string key = "hdr_" + std::to_string(height);
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  MDBX_val mval{mdbx_cast(&hdr), sizeof(hdr)};
+  int rc = mdbx_put(m_writeTxn, m_dbiBlockHeaders, &mkey, &mval, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+    throw std::runtime_error("pushBlockHeader failed");
+  ++m_opsSinceLastCommit;
+}
+
+bool MDBXBlockchainStorage::getBlockHeader(uint32_t height, cn::BlockHeaderPOD &hdr) const
+{
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+  std::string key = "hdr_" + std::to_string(height);
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  MDBX_val mval;
+  int rc = mdbx_get(txn, m_dbiBlockHeaders, &mkey, &mval);
+  if (rc == MDBX_SUCCESS && mval.iov_len == sizeof(cn::BlockHeaderPOD))
+  {
+    memcpy(&hdr, mval.iov_base, sizeof(hdr));
+    mdbx_txn_abort(txn);
+    return true;
+  }
+  mdbx_txn_abort(txn);
+  return false;
 }

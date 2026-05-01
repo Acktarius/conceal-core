@@ -6,6 +6,9 @@
 #pragma once
 
 #include "IBlockchainStorage.h"
+
+#include "CryptoNoteCore/CryptoNoteBasic.h"
+
 #include <mdbx.h>
 #include <mutex>
 #include <string>
@@ -44,6 +47,9 @@ namespace CryptoNote
     void setInitialized();
     bool isInitialized() const;
 
+    void pushBlockHeader(uint32_t height, const cn::BlockHeaderPOD &hdr);
+    bool getBlockHeader(uint32_t height, cn::BlockHeaderPOD &hdr) const;
+
   private:
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);
@@ -59,6 +65,7 @@ namespace CryptoNote
     MDBX_dbi m_dbiSpentKeys;
     MDBX_dbi m_dbiMeta;
     MDBX_dbi m_dbiBlockEntries;
+    MDBX_dbi m_dbiBlockHeaders;
 
     // Transaction management
     mutable std::mutex m_txMutex;

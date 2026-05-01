@@ -158,7 +158,7 @@ namespace cn
 
     uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
     uint8_t blockMajorVersion;
-    bool handleGetObjects(NOTIFY_REQUEST_GET_OBJECTS_request &arg, NOTIFY_RESPONSE_GET_OBJECTS_request &rsp); //Deprecated. Should be removed with CryptoNoteProtocolHandler.
+    bool handleGetObjects(NOTIFY_REQUEST_GET_OBJECTS_request &arg, NOTIFY_RESPONSE_GET_OBJECTS_request &rsp); // Deprecated. Should be removed with CryptoNoteProtocolHandler.
     bool getRandomOutsByAmount(const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_request &req, COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_response &res);
     bool getBackwardBlocksSize(size_t from_height, std::vector<size_t> &sz, size_t count);
     bool getTransactionOutputGlobalIndexes(const crypto::Hash &tx_id, std::vector<uint32_t> &indexs);
@@ -188,6 +188,9 @@ namespace cn
     BlockEntry &blocksAt(size_t i);
     BlockEntry blocksBack() const;
     void blocksClear();
+
+    // Lightweight header access (uses MDBX header DB when available, falls back to full block extraction)
+    BlockHeaderPOD getBlockHeader(uint32_t height) const;
 
     template <class visitor_t>
     bool scanOutputKeysForIndexes(const KeyInput &tx_in_to_key, visitor_t &vis, uint32_t *pmax_related_block_height = nullptr);
@@ -262,7 +265,7 @@ namespace cn
       }
     }
 
-    //debug functions
+    // debug functions
     void print_blockchain(uint64_t start_index, uint64_t end_index);
     void print_blockchain_index(bool print_all);
     void print_blockchain_outs(const std::string &file);
@@ -288,7 +291,7 @@ namespace cn
 
     using key_images_container = parallel_flat_hash_map<crypto::KeyImage, uint32_t>;
     using blocks_ext_by_hash = parallel_flat_hash_map<crypto::Hash, BlockEntry>;
-    using outputs_container = parallel_flat_hash_map<uint64_t, std::vector<std::pair<TransactionIndex, uint16_t>>>; //crypto::Hash - tx hash, size_t - index of out in transaction
+    using outputs_container = parallel_flat_hash_map<uint64_t, std::vector<std::pair<TransactionIndex, uint16_t>>>; // crypto::Hash - tx hash, size_t - index of out in transaction
     using MultisignatureOutputsContainer = parallel_flat_hash_map<uint64_t, std::vector<MultisignatureOutputUsage>>;
 
     const Currency &m_currency;

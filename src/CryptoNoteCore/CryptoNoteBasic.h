@@ -7,10 +7,24 @@
 
 #pragma once
 
+#include <cstdint>
 #include <boost/utility/value_init.hpp>
 #include <CryptoNote.h>
 
 namespace cn {
+  struct BlockHeaderPOD
+  {
+    uint32_t majorVersion;
+    uint32_t minorVersion;
+    uint64_t timestamp;
+    crypto::Hash previousBlockHash;
+    uint32_t nonce;
+    uint64_t blockCumulativeSize;
+    uint64_t cumulativeDifficulty;
+    uint64_t alreadyGeneratedCoins;
+    uint32_t height;
+  };
+
   const crypto::Hash NULL_HASH = boost::value_initialized<crypto::Hash>();
   const crypto::PublicKey NULL_PUBLIC_KEY = boost::value_initialized<crypto::PublicKey>();
   const crypto::SecretKey NULL_SECRET_KEY = boost::value_initialized<crypto::SecretKey>();
