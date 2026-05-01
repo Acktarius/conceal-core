@@ -443,10 +443,7 @@ namespace cn
     m_blocks.clear();
   }
 
-  // -----------------------------------------------------------------------
   // BasicUpgradeDetector (non‑template) implementation
-  // -----------------------------------------------------------------------
-
   BasicUpgradeDetector::BasicUpgradeDetector(const Currency &currency, Blockchain *blockchain,
                                              uint8_t targetVersion, logging::ILogger &log)
       : logger(log, "upgrade"),
@@ -790,74 +787,92 @@ namespace cn
         }
       }
 
-      if (load_existing && !blocksEmpty())
+      // Only load legacy cache when NOT using MDBX (MDBX rebuilds indices internally)
+#ifdef HAVE_MDBX
+      if (!m_useMdbx)
+#endif
       {
-        logger(INFO) << "Loading blockchain";
-        BlockCacheSerializer loader(*this, get_block_hash(blocksBack().bl), logger.getLogger());
-        const std::string &blocksCacheFileName = m_currency.blocksCacheFileName();
-
-        try
+        if (load_existing && !blocksEmpty())
         {
-          loader.load(appendPath(config_folder, blocksCacheFileName));
+          logger(INFO) << "Loading blockchain";
+          BlockCacheSerializer loader(*this, get_block_hash(blocksBack().bl), logger.getLogger());
+          const std::string &blocksCacheFileName = m_currency.blocksCacheFileName();
 
-          if (!loader.loaded())
+          try
           {
-            std::string blockCacheBkpFileName = blocksCacheFileName + ".bkp";
-            loader.load(appendPath(config_folder, blockCacheBkpFileName));
+            loader.load(appendPath(config_folder, blocksCacheFileName));
 
             if (!loader.loaded())
             {
-              logger(WARNING, BRIGHT_YELLOW) << " No actual blockchain cache found, rebuilding internal structures";
+              std::string blockCacheBkpFileName = blocksCacheFileName + ".bkp";
+              loader.load(appendPath(config_folder, blockCacheBkpFileName));
+
+              if (!loader.loaded())
+              {
+                logger(WARNING, BRIGHT_YELLOW) << " No actual blockchain cache found, rebuilding internal structures";
+                if (!rebuildCache())
+                {
+                  logger(ERROR, BRIGHT_RED) << "Failed to rebuild cache";
+                  return false;
+                }
+              }
+            }
+
+            uint64_t checkBlockHeight = 24732;
+            uint64_t checkMinimum = 13000000000000;
+            if (!m_testnet && blocksSize() > checkBlockHeight &&
+                blocksAt(checkBlockHeight).already_generated_coins < checkMinimum)
+            {
+              logger(WARNING, BRIGHT_YELLOW) << "Invalid blocks cache, rebuilding internal structures";
+              if (!rebuildBlocks())
+              {
+                logger(WARNING, BRIGHT_YELLOW) << "Impossible to rebuild";
+                return false;
+              }
+            }
+
+            if (m_blockchainIndexesEnabled)
+            {
+              loadBlockchainIndices();
+            }
+          }
+          catch (const std::exception &)
+          {
+            logger(ERROR, BRIGHT_RED) << "Error loading blockchain cache";
+
+            logger(WARNING, BRIGHT_YELLOW) << "Attempting to rebuild cache after load error";
+            try
+            {
               if (!rebuildCache())
               {
                 logger(ERROR, BRIGHT_RED) << "Failed to rebuild cache";
                 return false;
               }
             }
-          }
-
-          uint64_t checkBlockHeight = 24732;
-          uint64_t checkMinimum = 13000000000000;
-          if (!m_testnet && blocksSize() > checkBlockHeight &&
-              blocksAt(checkBlockHeight).already_generated_coins < checkMinimum)
-          {
-            logger(WARNING, BRIGHT_YELLOW) << "Invalid blocks cache, rebuilding internal structures";
-            if (!rebuildBlocks())
-            {
-              logger(WARNING, BRIGHT_YELLOW) << "Impossible to rebuild";
-              return false;
-            }
-          }
-
-          if (m_blockchainIndexesEnabled)
-          {
-            loadBlockchainIndices();
-          }
-        }
-        catch (const std::exception &)
-        {
-          logger(ERROR, BRIGHT_RED) << "Error loading blockchain cache";
-
-          logger(WARNING, BRIGHT_YELLOW) << "Attempting to rebuild cache after load error";
-          try
-          {
-            if (!rebuildCache())
+            catch (const std::exception &)
             {
               logger(ERROR, BRIGHT_RED) << "Failed to rebuild cache";
               return false;
             }
           }
-          catch (const std::exception &)
-          {
-            logger(ERROR, BRIGHT_RED) << "Failed to rebuild cache";
-            return false;
-          }
+        }
+        else
+        {
+          blocksClear();
         }
       }
-      else
+      // MDBX path: rebuild in-memory structures from MDBX data
+#ifdef HAVE_MDBX
+      if (m_useMdbx && load_existing && !blocksEmpty())
       {
-        blocksClear();
+        logger(INFO) << "Rebuilding in-memory structures from MDBX...";
+        if (!rebuildCache())
+        {
+          logger(ERROR, BRIGHT_RED) << "Failed to rebuild cache from MDBX";
+          return false;
+        }
       }
+#endif
 
       if (blocksEmpty())
       {
@@ -1122,6 +1137,18 @@ namespace cn
   bool Blockchain::storeCache()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      // MDBX handles persistence natively — just flush
+      if (m_mdbxStorage)
+        m_mdbxStorage->flush();
+      logger(INFO, BRIGHT_GREEN) << "MDBX storage flushed successfully.";
+      return true;
+    }
+#endif
+
     logger(INFO, BRIGHT_WHITE) << "Saving blockchain...";
     BlockCacheSerializer ser(*this, getTailId(), logger.getLogger());
     const std::string &blocksCacheFileName = m_currency.blocksCacheFileName();
