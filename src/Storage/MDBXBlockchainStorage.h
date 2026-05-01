@@ -1,3 +1,8 @@
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+//
+// Distributed under the MIT/X11 software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 #pragma once
 
 #include "IBlockchainStorage.h"
@@ -56,7 +61,7 @@ namespace CryptoNote
     mutable std::mutex m_txMutex;
     MDBX_txn *m_writeTxn = nullptr;
     size_t m_opsSinceLastCommit = 0;
-    static constexpr size_t kCommitBatchSize = 1000;
+    static constexpr size_t kCommitBatchSize = 5000;
     uint32_t m_cachedTopHeight = 0;
 
     std::string m_dataDir;

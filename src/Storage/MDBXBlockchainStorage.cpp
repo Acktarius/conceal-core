@@ -1,3 +1,8 @@
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+//
+// Distributed under the MIT/X11 software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 #include "MDBXBlockchainStorage.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Common/StringTools.h"
@@ -222,8 +227,8 @@ void MDBXBlockchainStorage::setTopBlockHeight(uint32_t height)
   std::lock_guard<std::mutex> lock(m_txMutex);
   ensureWriteTxn();
   setTopBlockHeightInternal(height);
-  // Always commit so the height persists immediately
-  commitWriteTransaction(true);
+  // Rely on batch commit counter instead of forcing a commit on every block
+  commitWriteTransaction(false);
 }
 
 void MDBXBlockchainStorage::setTopBlockHeightInternal(uint32_t height)
