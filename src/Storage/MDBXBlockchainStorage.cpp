@@ -34,11 +34,16 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   if (rc != MDBX_SUCCESS)
     throw std::runtime_error("mdbx_env_create failed");
 
+  mdbx_env_set_maxdbs(m_env, 10);
+
   mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 40, -1, -1, -1);
 
-  rc = mdbx_env_open(m_env, path.c_str(), MDBX_NOSUBDIR, 0664);
+  rc = mdbx_env_open(m_env, path.c_str(), MDBX_NOSUBDIR | MDBX_WRITEMAP, 0664);
+
   if (rc != MDBX_SUCCESS)
     throw std::runtime_error("mdbx_env_open failed");
+
+  mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
 
   MDBX_txn *txn;
   rc = mdbx_txn_begin(m_env, nullptr, MDBX_TXN_READWRITE, &txn);
@@ -339,4 +344,28 @@ void MDBXBlockchainStorage::popBlockEntry(uint32_t height)
   MDBX_val mkey{mdbx_cast(key.data()), key.size()};
   mdbx_del(m_writeTxn, m_dbiBlockEntries, &mkey, nullptr);
   ++m_opsSinceLastCommit;
+}
+
+void MDBXBlockchainStorage::setInitialized()
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+  std::string key = "initialized";
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  uint8_t val = 1;
+  MDBX_val mval{&val, sizeof(val)};
+  mdbx_put(m_writeTxn, m_dbiMeta, &mkey, &mval, MDBX_UPSERT);
+  commitWriteTransaction(true); // force commit
+}
+
+bool MDBXBlockchainStorage::isInitialized() const
+{
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+  std::string key = "initialized";
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  MDBX_val mval;
+  int rc = mdbx_get(txn, m_dbiMeta, &mkey, &mval);
+  mdbx_txn_abort(txn);
+  return rc == MDBX_SUCCESS;
 }

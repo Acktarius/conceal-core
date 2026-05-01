@@ -41,6 +41,9 @@ namespace CryptoNote
     bool getBlockEntry(uint32_t height, cn::BinaryArray &serializedEntry) const override;
     void popBlockEntry(uint32_t height) override;
 
+    void setInitialized();
+    bool isInitialized() const;
+
   private:
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);

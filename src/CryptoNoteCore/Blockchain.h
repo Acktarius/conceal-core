@@ -319,10 +319,19 @@ namespace cn
 #ifdef HAVE_MDBX
     std::unique_ptr<CryptoNote::MDBXBlockchainStorage> m_mdbxStorage; // Optional MDBX backend
     bool m_useMdbx = false;
-    // Single-entry cache for MDBX reads
-    mutable BlockEntry m_cachedBlockEntry;
-    mutable size_t m_cachedHeight = (size_t)-1;
-    mutable bool m_cacheValid = false;
+
+    // LRU cache for deserialised BlockEntry's
+    static constexpr size_t MDBX_CACHE_SIZE = 256;
+    struct CachedEntry
+    {
+      size_t height;
+      BlockEntry entry;
+    };
+    mutable std::vector<CachedEntry> m_cachedEntries;
+    mutable size_t m_cacheIndex = 0;
+
+    std::vector<crypto::Hash> m_blockHashes; // in‑memory block hashes for sparse chain
+    parallel_flat_hash_map<crypto::Hash, uint32_t> m_hashToHeight;
 #endif
 
     cn::DepositIndex m_depositIndex;
