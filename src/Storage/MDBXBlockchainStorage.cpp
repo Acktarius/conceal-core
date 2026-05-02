@@ -56,7 +56,7 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   if (rc != MDBX_SUCCESS)
     throw std::runtime_error("mdbx_env_open failed: " + std::string(mdbx_strerror(rc)));
 
-  mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
+  //mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
 
   MDBX_txn *txn;
   rc = mdbx_txn_begin(m_env, nullptr, MDBX_TXN_READWRITE, &txn);
@@ -191,7 +191,12 @@ void MDBXBlockchainStorage::markKeyImageSpent(const crypto::KeyImage &keyImage)
 
   MDBX_val key{mdbx_cast(keyImage.data), sizeof(keyImage)};
   MDBX_val empty{nullptr, 0};
-  mdbx_put(m_writeTxn, m_dbiSpentKeys, &key, &empty, MDBX_UPSERT);
+  int rc = mdbx_put(m_writeTxn, m_dbiSpentKeys, &key, &empty, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("markKeyImageSpent failed: " + std::string(mdbx_strerror(rc)));
+  }
   ++m_opsSinceLastCommit;
 }
 
@@ -204,8 +209,19 @@ void MDBXBlockchainStorage::addBlock(const cn::Block &block, const crypto::Hash 
   MDBX_val key{mdbx_cast(hash.data), sizeof(hash)};
   MDBX_val hkey{&height, sizeof(height)};
 
-  mdbx_put(m_writeTxn, m_dbiHeights, &hkey, &key, MDBX_UPSERT);
-  mdbx_put(m_writeTxn, m_dbiBlockHeights, &key, &hkey, MDBX_UPSERT);
+  int rc = mdbx_put(m_writeTxn, m_dbiHeights, &hkey, &key, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("addBlock heights failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  rc = mdbx_put(m_writeTxn, m_dbiBlockHeights, &key, &hkey, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("addBlock block_heights failed: " + std::string(mdbx_strerror(rc)));
+  }
 
   if (height > m_cachedTopHeight)
     m_cachedTopHeight = height;
@@ -265,7 +281,12 @@ void MDBXBlockchainStorage::setTopBlockHeightInternal(uint32_t height)
   std::string metaKey = "top_height";
   MDBX_val key{mdbx_cast(metaKey.data()), metaKey.size()};
   MDBX_val value{&height, sizeof(height)};
-  mdbx_put(m_writeTxn, m_dbiMeta, &key, &value, MDBX_UPSERT);
+  int rc = mdbx_put(m_writeTxn, m_dbiMeta, &key, &value, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("setTopBlockHeightInternal failed: " + std::string(mdbx_strerror(rc)));
+  }
 }
 
 // ---------- Helpers ----------
@@ -290,7 +311,9 @@ void MDBXBlockchainStorage::close()
   std::lock_guard<std::mutex> lock(m_txMutex);
   if (m_writeTxn)
   {
-    commitWriteTransaction(true);
+    mdbx_txn_abort(m_writeTxn);
+    m_writeTxn = nullptr;
+    m_opsSinceLastCommit = 0;
   }
   if (m_env)
   {
@@ -309,6 +332,8 @@ void MDBXBlockchainStorage::commitWriteTransaction(bool force)
     if (rc != MDBX_SUCCESS)
     {
       mdbx_txn_abort(m_writeTxn);
+      m_writeTxn = nullptr;
+      m_opsSinceLastCommit = 0;
       throw std::runtime_error("commit failed: " + std::string(mdbx_strerror(rc)));
     }
   }
@@ -331,7 +356,10 @@ void MDBXBlockchainStorage::pushBlockEntry(uint32_t height, const cn::BinaryArra
   MDBX_val mval{mdbx_cast(serializedEntry.data()), serializedEntry.size()};
   int rc = mdbx_put(m_writeTxn, m_dbiBlockEntries, &mkey, &mval, MDBX_UPSERT);
   if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
     throw std::runtime_error("pushBlockEntry failed: " + std::string(mdbx_strerror(rc)));
+  }
 
   ++m_opsSinceLastCommit;
   if (m_opsSinceLastCommit >= kCommitBatchSize)
@@ -378,7 +406,12 @@ void MDBXBlockchainStorage::setInitialized()
   MDBX_val mkey{mdbx_cast(key.data()), key.size()};
   uint8_t val = 1;
   MDBX_val mval{&val, sizeof(val)};
-  mdbx_put(m_writeTxn, m_dbiMeta, &mkey, &mval, MDBX_UPSERT);
+  int rc = mdbx_put(m_writeTxn, m_dbiMeta, &mkey, &mval, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("setInitialized failed: " + std::string(mdbx_strerror(rc)));
+  }
   commitWriteTransaction(true);
 }
 
@@ -403,7 +436,10 @@ void MDBXBlockchainStorage::pushBlockHeader(uint32_t height, const cn::BlockHead
   MDBX_val mval{mdbx_cast(&hdr), sizeof(hdr)};
   int rc = mdbx_put(m_writeTxn, m_dbiBlockHeaders, &mkey, &mval, MDBX_UPSERT);
   if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
     throw std::runtime_error("pushBlockHeader failed: " + std::string(mdbx_strerror(rc)));
+  }
   ++m_opsSinceLastCommit;
 }
 
@@ -431,7 +467,12 @@ void MDBXBlockchainStorage::putMeta(const std::string &key, const std::vector<ui
   ensureWriteTxn();
   MDBX_val mk{mdbx_cast(key.data()), key.size()};
   MDBX_val mv{mdbx_cast(value.data()), value.size()};
-  mdbx_put(m_writeTxn, m_dbiMeta, &mk, &mv, MDBX_UPSERT);
+  int rc = mdbx_put(m_writeTxn, m_dbiMeta, &mk, &mv, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("putMeta failed: " + std::string(mdbx_strerror(rc)));
+  }
 }
 
 bool MDBXBlockchainStorage::getMeta(const std::string &key, std::vector<uint8_t> &value) const
@@ -450,4 +491,14 @@ bool MDBXBlockchainStorage::getMeta(const std::string &key, std::vector<uint8_t>
   }
   mdbx_txn_abort(txn);
   return false;
+}
+
+void MDBXBlockchainStorage::abortWriteTxn()
+{
+  if (m_writeTxn)
+  {
+    mdbx_txn_abort(m_writeTxn);
+    m_writeTxn = nullptr;
+    m_opsSinceLastCommit = 0;
+  }
 }

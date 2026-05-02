@@ -53,6 +53,8 @@ namespace CryptoNote
     void putMeta(const std::string &key, const std::vector<uint8_t> &value);
     bool getMeta(const std::string &key, std::vector<uint8_t> &value) const;
 
+    void abortWriteTxn();
+
   private:
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);
