@@ -839,10 +839,9 @@ namespace cn
 
         auto mdbxStart = std::chrono::steady_clock::now();
 
-        // If the DB already has blocks, rebuild the in‑memory index
         if (load_existing && m_mdbxStorage->topBlockHeight() > 0)
         {
-          logger(INFO) << "Rebuilding in-memory structures from MDBX...";
+          logger(INFO) << "Loading in-memory structures from MDBX...";
 
           m_blockHashes.clear();
           m_hashToHeight.clear();
@@ -852,62 +851,209 @@ namespace cn
           m_outputs.clear();
           m_multisignatureOutputs.clear();
 
-          uint32_t topHeight = m_mdbxStorage->topBlockHeight();
-          for (uint32_t h = 0; h <= topHeight; ++h)
+          uint32_t topHeight = 0;
+          bool loadedFast = false;
+
+          std::vector<uint8_t> metaBuf;
+
+          if (m_mdbxStorage->getMeta("idx_hashes", metaBuf) && !metaBuf.empty())
           {
-            cn::BinaryArray ba;
-            if (m_mdbxStorage->getBlockEntry(h, ba))
+            size_t count = metaBuf.size() / sizeof(crypto::Hash);
+            m_blockHashes.resize(count);
+            memcpy(m_blockHashes.data(), metaBuf.data(), metaBuf.size());
+          }
+
+          if (m_mdbxStorage->getMeta("idx_hash2height", metaBuf))
+          {
+            const uint8_t *ptr = metaBuf.data();
+            const uint8_t *end = ptr + metaBuf.size();
+            while (ptr + sizeof(crypto::Hash) + sizeof(uint32_t) <= end)
             {
-              if (h % 10000 == 0)
-                logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
-              BlockEntry entry;
-              if (cn::fromBinaryArray(entry, ba))
-              {
-                crypto::Hash blockHash = get_block_hash(entry.bl);
-                m_blockHashes.push_back(blockHash);
-                m_hashToHeight[blockHash] = h;
-                m_blockIndex.push(blockHash);
-
-                for (uint32_t t = 0; t < entry.transactions.size(); ++t)
-                {
-                  crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
-                  TransactionIndex txIdx = {h, static_cast<uint16_t>(t)};
-                  m_transactionMap.insert(std::make_pair(txHash, txIdx));
-
-                  for (auto &input : entry.transactions[t].tx.inputs)
-                  {
-                    if (input.type() == typeid(KeyInput))
-                      m_spent_keys.insert(std::make_pair(
-                          boost::get<KeyInput>(input).keyImage, h));
-                    else if (input.type() == typeid(MultisignatureInput))
-                    {
-                      const auto &msInput = boost::get<MultisignatureInput>(input);
-                      m_multisignatureOutputs[msInput.amount][msInput.outputIndex].isUsed = true;
-                    }
-                  }
-
-                  for (uint32_t o = 0; o < entry.transactions[t].tx.outputs.size(); ++o)
-                  {
-                    const auto &out = entry.transactions[t].tx.outputs[o];
-                    if (out.target.type() == typeid(KeyOutput))
-                      m_outputs[out.amount].push_back(std::make_pair<>(txIdx, o));
-                    else if (out.target.type() == typeid(MultisignatureOutput))
-                    {
-                      MultisignatureOutputUsage usage = {txIdx, static_cast<uint16_t>(o), false};
-                      m_multisignatureOutputs[out.amount].push_back(usage);
-                    }
-                  }
-                }
-
-                uint64_t interest = 0;
-                for (const auto &tx : entry.transactions)
-                  interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
-                pushToDepositIndex(entry, interest);
-              }
+              crypto::Hash h;
+              memcpy(h.data, ptr, sizeof(h));
+              ptr += sizeof(h);
+              uint32_t height;
+              memcpy(&height, ptr, sizeof(height));
+              ptr += sizeof(height);
+              m_hashToHeight[h] = height;
             }
           }
 
-          logger(INFO) << "Loaded " << m_blockHashes.size() << " blocks from MDBX";
+          if (m_mdbxStorage->getMeta("idx_txmap", metaBuf))
+          {
+            const uint8_t *ptr = metaBuf.data();
+            const uint8_t *end = ptr + metaBuf.size();
+            while (ptr + sizeof(crypto::Hash) + sizeof(uint64_t) <= end)
+            {
+              crypto::Hash h;
+              memcpy(h.data, ptr, sizeof(h));
+              ptr += sizeof(h);
+              uint64_t packed;
+              memcpy(&packed, ptr, sizeof(packed));
+              ptr += sizeof(packed);
+              TransactionIndex idx;
+              idx.block = static_cast<uint32_t>(packed >> 16);
+              idx.transaction = static_cast<uint16_t>(packed & 0xFFFF);
+              m_transactionMap[h] = idx;
+            }
+          }
+
+          if (m_mdbxStorage->getMeta("idx_spentkeys", metaBuf))
+          {
+            const uint8_t *ptr = metaBuf.data();
+            const uint8_t *end = ptr + metaBuf.size();
+            while (ptr + sizeof(crypto::KeyImage) + sizeof(uint32_t) <= end)
+            {
+              crypto::KeyImage ki;
+              memcpy(ki.data, ptr, sizeof(ki));
+              ptr += sizeof(ki);
+              uint32_t height;
+              memcpy(&height, ptr, sizeof(height));
+              ptr += sizeof(height);
+              m_spent_keys[ki] = height;
+            }
+          }
+
+          if (m_mdbxStorage->getMeta("idx_topheight", metaBuf) && metaBuf.size() == sizeof(uint32_t))
+          {
+            memcpy(&topHeight, metaBuf.data(), sizeof(topHeight));
+            loadedFast = (m_blockHashes.size() == topHeight + 1);
+          }
+
+          if (loadedFast)
+          {
+            if (m_mdbxStorage->getMeta("idx_outputs", metaBuf))
+            {
+              const uint8_t *ptr = metaBuf.data();
+              const uint8_t *end = ptr + metaBuf.size();
+              while (ptr + sizeof(uint64_t) + sizeof(uint32_t) <= end)
+              {
+                uint64_t amount;
+                memcpy(&amount, ptr, sizeof(amount));
+                ptr += sizeof(amount);
+                uint32_t count;
+                memcpy(&count, ptr, sizeof(count));
+                ptr += sizeof(count);
+                std::vector<std::pair<TransactionIndex, uint16_t>> vec;
+                for (uint32_t i = 0; i < count && ptr + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) <= end; ++i)
+                {
+                  TransactionIndex txIdx;
+                  memcpy(&txIdx.block, ptr, sizeof(txIdx.block));
+                  ptr += sizeof(txIdx.block);
+                  memcpy(&txIdx.transaction, ptr, sizeof(txIdx.transaction));
+                  ptr += sizeof(txIdx.transaction);
+                  uint16_t outIdx;
+                  memcpy(&outIdx, ptr, sizeof(outIdx));
+                  ptr += sizeof(outIdx);
+                  vec.push_back({txIdx, outIdx});
+                }
+                m_outputs[amount] = std::move(vec);
+              }
+            }
+
+            if (m_mdbxStorage->getMeta("idx_msig", metaBuf))
+            {
+              const uint8_t *ptr = metaBuf.data();
+              const uint8_t *end = ptr + metaBuf.size();
+              while (ptr + sizeof(uint64_t) + sizeof(uint32_t) <= end)
+              {
+                uint64_t amount;
+                memcpy(&amount, ptr, sizeof(amount));
+                ptr += sizeof(amount);
+                uint32_t count;
+                memcpy(&count, ptr, sizeof(count));
+                ptr += sizeof(count);
+                std::vector<MultisignatureOutputUsage> vec;
+                for (uint32_t i = 0; i < count && ptr + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) + 1 <= end; ++i)
+                {
+                  MultisignatureOutputUsage usage;
+                  memcpy(&usage.transactionIndex.block, ptr, sizeof(usage.transactionIndex.block));
+                  ptr += sizeof(usage.transactionIndex.block);
+                  memcpy(&usage.transactionIndex.transaction, ptr, sizeof(usage.transactionIndex.transaction));
+                  ptr += sizeof(usage.transactionIndex.transaction);
+                  memcpy(&usage.outputIndex, ptr, sizeof(usage.outputIndex));
+                  ptr += sizeof(usage.outputIndex);
+                  usage.isUsed = (*ptr++ != 0);
+                  vec.push_back(usage);
+                }
+                m_multisignatureOutputs[amount] = std::move(vec);
+              }
+            }
+
+            for (const auto &h : m_blockHashes)
+              m_blockIndex.push(h);
+
+            logger(INFO) << "Fast index loaded: " << m_blockHashes.size() << " blocks";
+          }
+          else
+          {
+            logger(INFO) << "Fast index not available, doing full rebuild...";
+
+            m_blockHashes.clear();
+            m_hashToHeight.clear();
+            m_blockIndex.clear();
+            m_transactionMap.clear();
+            m_spent_keys.clear();
+            m_outputs.clear();
+            m_multisignatureOutputs.clear();
+
+            topHeight = m_mdbxStorage->topBlockHeight();
+            for (uint32_t h = 0; h <= topHeight; ++h)
+            {
+              cn::BinaryArray ba;
+              if (m_mdbxStorage->getBlockEntry(h, ba))
+              {
+                if (h % 10000 == 0)
+                  logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
+                BlockEntry entry;
+                if (cn::fromBinaryArray(entry, ba))
+                {
+                  crypto::Hash blockHash = get_block_hash(entry.bl);
+                  m_blockHashes.push_back(blockHash);
+                  m_hashToHeight[blockHash] = h;
+                  m_blockIndex.push(blockHash);
+
+                  for (uint32_t t = 0; t < entry.transactions.size(); ++t)
+                  {
+                    crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
+                    TransactionIndex txIdx = {h, static_cast<uint16_t>(t)};
+                    m_transactionMap.insert(std::make_pair(txHash, txIdx));
+
+                    for (auto &input : entry.transactions[t].tx.inputs)
+                    {
+                      if (input.type() == typeid(KeyInput))
+                        m_spent_keys.insert(std::make_pair(
+                            boost::get<KeyInput>(input).keyImage, h));
+                      else if (input.type() == typeid(MultisignatureInput))
+                      {
+                        const auto &msInput = boost::get<MultisignatureInput>(input);
+                        m_multisignatureOutputs[msInput.amount][msInput.outputIndex].isUsed = true;
+                      }
+                    }
+
+                    for (uint32_t o = 0; o < entry.transactions[t].tx.outputs.size(); ++o)
+                    {
+                      const auto &out = entry.transactions[t].tx.outputs[o];
+                      if (out.target.type() == typeid(KeyOutput))
+                        m_outputs[out.amount].push_back(std::make_pair<>(txIdx, o));
+                      else if (out.target.type() == typeid(MultisignatureOutput))
+                      {
+                        MultisignatureOutputUsage usage = {txIdx, static_cast<uint16_t>(o), false};
+                        m_multisignatureOutputs[out.amount].push_back(usage);
+                      }
+                    }
+                  }
+
+                  uint64_t interest = 0;
+                  for (const auto &tx : entry.transactions)
+                    interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
+                  pushToDepositIndex(entry, interest);
+                }
+              }
+            }
+
+            logger(INFO) << "Loaded " << m_blockHashes.size() << " blocks from MDBX (full rebuild)";
+          }
         }
 
         auto mdbxEnd = std::chrono::steady_clock::now();
@@ -917,10 +1063,6 @@ namespace cn
         m_cacheIndex = 0;
         m_cachedEntries.clear();
         m_cachedEntries.reserve(MDBX_CACHE_SIZE);
-
-        // MDBX is now fully initialised – skip the legacy code below
-        if (!m_blockHashes.empty())
-          goto mdbx_initialized;
       }
       else
 #endif
@@ -1298,10 +1440,94 @@ mdbx_initialized:
 #ifdef HAVE_MDBX
     if (m_useMdbx)
     {
-      // MDBX handles persistence natively — just flush
       if (m_mdbxStorage)
+      {
+        std::vector<uint8_t> buf;
+
+        // 1) hashes
+        m_mdbxStorage->putMeta("idx_hashes",
+                               std::vector<uint8_t>((uint8_t *)m_blockHashes.data(),
+                                                    (uint8_t *)m_blockHashes.data() + m_blockHashes.size() * sizeof(crypto::Hash)));
+
+        // 2) hash-to-height
+        buf.clear();
+        for (const auto &p : m_hashToHeight)
+        {
+          buf.insert(buf.end(), (uint8_t *)p.first.data, (uint8_t *)p.first.data + sizeof(crypto::Hash));
+          uint32_t h = p.second;
+          buf.insert(buf.end(), (uint8_t *)&h, (uint8_t *)&h + sizeof(h));
+        }
+        m_mdbxStorage->putMeta("idx_hash2height", buf);
+
+        // 3) transaction map (packed)
+        buf.clear();
+        for (const auto &kv : m_transactionMap)
+        {
+          buf.insert(buf.end(), (uint8_t *)kv.first.data, (uint8_t *)kv.first.data + sizeof(crypto::Hash));
+          uint64_t packed = (static_cast<uint64_t>(kv.second.block) << 16) | kv.second.transaction;
+          buf.insert(buf.end(), (uint8_t *)&packed, (uint8_t *)&packed + sizeof(packed));
+        }
+        m_mdbxStorage->putMeta("idx_txmap", buf);
+
+        // 4) spent keys
+        buf.clear();
+        for (const auto &p : m_spent_keys)
+        {
+          buf.insert(buf.end(), (uint8_t *)p.first.data, (uint8_t *)p.first.data + sizeof(crypto::KeyImage));
+          uint32_t h = p.second;
+          buf.insert(buf.end(), (uint8_t *)&h, (uint8_t *)&h + sizeof(h));
+        }
+        m_mdbxStorage->putMeta("idx_spentkeys", buf);
+
+        // 5) top height
+        uint32_t topHeight = static_cast<uint32_t>(m_blockHashes.size() - 1);
+        m_mdbxStorage->putMeta("idx_topheight",
+                               std::vector<uint8_t>((uint8_t *)&topHeight, (uint8_t *)&topHeight + sizeof(topHeight)));
+
+        // 6) outputs
+        buf.clear();
+        for (const auto &p : m_outputs)
+        {
+          uint64_t amount = p.first;
+          buf.insert(buf.end(), (uint8_t *)&amount, (uint8_t *)&amount + sizeof(amount));
+          uint32_t count = static_cast<uint32_t>(p.second.size());
+          buf.insert(buf.end(), (uint8_t *)&count, (uint8_t *)&count + sizeof(count));
+          for (const auto &pair : p.second)
+          {
+            uint32_t block = pair.first.block;
+            uint16_t tx = pair.first.transaction;
+            uint16_t outIdx = pair.second;
+            buf.insert(buf.end(), (uint8_t *)&block, (uint8_t *)&block + sizeof(block));
+            buf.insert(buf.end(), (uint8_t *)&tx, (uint8_t *)&tx + sizeof(tx));
+            buf.insert(buf.end(), (uint8_t *)&outIdx, (uint8_t *)&outIdx + sizeof(outIdx));
+          }
+        }
+        m_mdbxStorage->putMeta("idx_outputs", buf);
+
+        // 7) multisig outputs
+        buf.clear();
+        for (const auto &p : m_multisignatureOutputs)
+        {
+          uint64_t amount = p.first;
+          buf.insert(buf.end(), (uint8_t *)&amount, (uint8_t *)&amount + sizeof(amount));
+          uint32_t count = static_cast<uint32_t>(p.second.size());
+          buf.insert(buf.end(), (uint8_t *)&count, (uint8_t *)&count + sizeof(count));
+          for (const auto &usage : p.second)
+          {
+            uint32_t block = usage.transactionIndex.block;
+            uint16_t tx = usage.transactionIndex.transaction;
+            uint16_t outIdx = usage.outputIndex;
+            uint8_t used = usage.isUsed ? 1 : 0;
+            buf.insert(buf.end(), (uint8_t *)&block, (uint8_t *)&block + sizeof(block));
+            buf.insert(buf.end(), (uint8_t *)&tx, (uint8_t *)&tx + sizeof(tx));
+            buf.insert(buf.end(), (uint8_t *)&outIdx, (uint8_t *)&outIdx + sizeof(outIdx));
+            buf.push_back(used);
+          }
+        }
+        m_mdbxStorage->putMeta("idx_msig", buf);
         m_mdbxStorage->flush();
-      logger(INFO, BRIGHT_GREEN) << "MDBX storage flushed successfully.";
+      }
+      logger(INFO, BRIGHT_GREEN) << "MDBX index saved successfully.";
       return true;
     }
 #endif

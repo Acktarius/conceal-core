@@ -50,6 +50,9 @@ namespace CryptoNote
     void pushBlockHeader(uint32_t height, const cn::BlockHeaderPOD &hdr);
     bool getBlockHeader(uint32_t height, cn::BlockHeaderPOD &hdr) const;
 
+    void putMeta(const std::string &key, const std::vector<uint8_t> &value);
+    bool getMeta(const std::string &key, std::vector<uint8_t> &value) const;
+
   private:
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);
@@ -59,7 +62,6 @@ namespace CryptoNote
 
     // MDBX handles
     MDBX_env *m_env = nullptr;
-    MDBX_dbi m_dbiBlocks;
     MDBX_dbi m_dbiHeights;
     MDBX_dbi m_dbiBlockHeights;
     MDBX_dbi m_dbiSpentKeys;
@@ -71,7 +73,7 @@ namespace CryptoNote
     mutable std::mutex m_txMutex;
     MDBX_txn *m_writeTxn = nullptr;
     size_t m_opsSinceLastCommit = 0;
-    static constexpr size_t kCommitBatchSize = 5000;
+    static constexpr size_t kCommitBatchSize = 1000;
     uint32_t m_cachedTopHeight = 0;
 
     std::string m_dataDir;
