@@ -247,6 +247,11 @@ namespace cn
 
   uint64_t Currency::calculateInterest(uint64_t amount, uint32_t term, uint32_t lockHeight) const
   {
+    /* deposits 3.0 and investments 1.0, mathematically identical to v3.0, only differs by compute method and order */
+    if (term % m_depositMinTermV3 == 0 && lockHeight > m_depositHeightV4_1)
+    {
+      return calculateInterestV4(amount, term);
+    }
 
     /* deposits 3.0 and investments 1.0 */
     if (term % m_depositMinTermV3 == 0 && lockHeight > m_depositHeightV3)
@@ -404,6 +409,32 @@ namespace cn
 
     float interest = static_cast<float>(amount) * eir;
     return static_cast<uint64_t>(interest);
+  }
+
+  /* Interest v4.0 , mathematically identical to v3.0, only differs by compute method and order */
+  uint64_t Currency::calculateInterestV4(uint64_t amount, uint32_t term) const
+  {
+    // Get base APR in "tenths of percent" (29 <=> 2.9%)
+    uint32_t baseAprTenths;
+    uint64_t amount4Humans = amount / m_coin;
+    
+    if (amount4Humans >= 20000)
+      baseAprTenths = 49; /* 4.9% */
+    else if (amount4Humans >= 10000)
+      baseAprTenths = 39; /* 3.9% */
+    else
+      baseAprTenths = 29; /* 2.9% */
+
+    /* Consensus 2019 - Monthly deposits */
+    auto months = static_cast<float>(term / m_depositMinTermV3);
+    if (months > 12) months = 12;
+
+    // EARNED = P × M × (i + M - 1) / 12000
+    // where P = Principal amount, M = months, i = baseAprTenths
+    uint64_t numerator = amount * months * (baseAprTenths + months - 1);
+    uint64_t interest = numerator / 12000;
+    
+    return interest;
   }
 
   uint64_t Currency::getInterestForInput(const MultisignatureInput &input, uint32_t height) const
@@ -1377,6 +1408,7 @@ namespace cn
 
     depositHeightV3(parameters::DEPOSIT_HEIGHT_V3);
     depositHeightV4(parameters::DEPOSIT_HEIGHT_V4);
+    depositHeightV4_1(parameters::DEPOSIT_HEIGHT_V4_1);
 
     blockWithMissingInterest(parameters::BLOCK_WITH_MISSING_INTEREST);
 

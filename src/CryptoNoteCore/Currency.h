@@ -118,6 +118,7 @@ namespace cn
 
     uint32_t depositHeightV3() const { return m_depositHeightV3; }
     uint32_t depositHeightV4() const { return m_depositHeightV4; }
+    uint32_t depositHeightV4_1() const { return m_depositHeightV4_1; }
 
     size_t maxBlockSizeInitial() const { return m_maxBlockSizeInitial; }
     uint64_t maxBlockSizeGrowthSpeedNumerator() const { return m_maxBlockSizeGrowthSpeedNumerator; }
@@ -159,6 +160,7 @@ namespace cn
     uint64_t calculateInterest(uint64_t amount, uint32_t term, uint32_t lockHeight) const;
     uint64_t calculateInterestV2(uint64_t amount, uint32_t term) const;
     uint64_t calculateInterestV3(uint64_t amount, uint32_t term) const;
+    uint64_t calculateInterestV4(uint64_t amount, uint32_t term) const;
     uint64_t getInterestForInput(const MultisignatureInput &input, uint32_t height) const;
     uint64_t calculateTotalTransactionInterest(const Transaction &tx, uint32_t height) const;
     uint64_t getTransactionInputAmount(const TransactionInput &in, uint32_t height) const;
@@ -256,6 +258,7 @@ namespace cn
 
     uint32_t m_depositHeightV3;
     uint32_t m_depositHeightV4;
+    uint32_t m_depositHeightV4_1;
 
     uint32_t m_blockWithMissingInterest;
 
@@ -502,6 +505,11 @@ namespace cn
     CurrencyBuilder &depositHeightV4(uint32_t val)
     {
       m_currency.m_depositHeightV4 = val;
+      return *this;
+    }
+    CurrencyBuilder &depositHeightV4_1(uint32_t val)
+    {
+      m_currency.m_depositHeightV4_1 = val;
       return *this;
     }
 
