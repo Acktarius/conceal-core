@@ -76,6 +76,7 @@ namespace cn
 		const uint64_t DEPOSIT_MIN_TOTAL_RATE_FACTOR = 0;	 /* constant rate */
 		const uint64_t DEPOSIT_MAX_TOTAL_RATE = 4;			 /* legacy deposits */
 		const uint32_t DEPOSIT_HEIGHT_V4 = 1162162;			 /* enforce deposit terms */
+		const uint32_t DEPOSIT_HEIGHT_V4_1 = 2110000;			 /* enforce deposit v4.0, mathematically identical to v3.0, only differs by compute method and order */
 		const uint32_t BLOCK_WITH_MISSING_INTEREST = 425799; /*  */
 
 		static_assert(DEPOSIT_MIN_TERM > 0, "Bad DEPOSIT_MIN_TERM");

@@ -200,7 +200,7 @@ namespace cn
 
   bool client_helper::confirm_deposit(uint32_t term, uint64_t amount, bool is_testnet, const Currency &currency, const logging::LoggerRef &logger) const
   {
-    uint64_t interest = currency.calculateInterestV3(amount, term);
+    uint64_t interest = currency.calculateInterestV4(amount, term);
     uint64_t min_term = is_testnet ? parameters::TESTNET_DEPOSIT_MIN_TERM_V3 : parameters::DEPOSIT_MIN_TERM_V3;
 
     logger(logging::INFO) << "Confirm deposit details:\n"
