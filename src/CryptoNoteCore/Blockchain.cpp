@@ -850,6 +850,7 @@ namespace cn
           m_spent_keys.clear();
           m_outputs.clear();
           m_multisignatureOutputs.clear();
+          m_depositIndex = DepositIndex();
 
           uint32_t topHeight = 0;
           bool loadedFast = false;
@@ -980,6 +981,27 @@ namespace cn
               }
             }
 
+            m_depositIndex = DepositIndex();
+            for (uint32_t h = 0; h <= topHeight; ++h)
+            {
+              // faster reads can be spread to 50k blocks, slower at 10k
+              if (h % 50000 == 0)
+                logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
+
+              cn::BinaryArray ba;
+              if (m_mdbxStorage->getBlockEntry(h, ba))
+              {
+                BlockEntry entry;
+                if (cn::fromBinaryArray(entry, ba))
+                {
+                  uint64_t interest = 0;
+                  for (const auto &tx : entry.transactions)
+                    interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
+                  pushToDepositIndex(entry, interest);
+                }
+              }
+            }
+
             for (const auto &h : m_blockHashes)
               m_blockIndex.push(h);
 
@@ -996,6 +1018,7 @@ namespace cn
             m_spent_keys.clear();
             m_outputs.clear();
             m_multisignatureOutputs.clear();
+            m_depositIndex = DepositIndex();
 
             topHeight = m_mdbxStorage->topBlockHeight();
             for (uint32_t h = 0; h <= topHeight; ++h)
@@ -1005,6 +1028,7 @@ namespace cn
               {
                 if (h % 10000 == 0)
                   logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
+
                 BlockEntry entry;
                 if (cn::fromBinaryArray(entry, ba))
                 {
@@ -1075,7 +1099,6 @@ namespace cn
         }
       }
 
-      // Only load legacy cache when NOT using MDBX
 #ifdef HAVE_MDBX
       if (!m_useMdbx)
 #endif
@@ -1186,7 +1209,7 @@ namespace cn
       }
 
 #ifdef HAVE_MDBX
-mdbx_initialized:
+    mdbx_initialized:
 #endif
 
       try
@@ -1444,12 +1467,10 @@ mdbx_initialized:
       {
         std::vector<uint8_t> buf;
 
-        // 1) hashes
         m_mdbxStorage->putMeta("idx_hashes",
                                std::vector<uint8_t>((uint8_t *)m_blockHashes.data(),
                                                     (uint8_t *)m_blockHashes.data() + m_blockHashes.size() * sizeof(crypto::Hash)));
 
-        // 2) hash-to-height
         buf.clear();
         for (const auto &p : m_hashToHeight)
         {
@@ -1459,7 +1480,6 @@ mdbx_initialized:
         }
         m_mdbxStorage->putMeta("idx_hash2height", buf);
 
-        // 3) transaction map (packed)
         buf.clear();
         for (const auto &kv : m_transactionMap)
         {
@@ -1469,7 +1489,6 @@ mdbx_initialized:
         }
         m_mdbxStorage->putMeta("idx_txmap", buf);
 
-        // 4) spent keys
         buf.clear();
         for (const auto &p : m_spent_keys)
         {
@@ -1479,12 +1498,10 @@ mdbx_initialized:
         }
         m_mdbxStorage->putMeta("idx_spentkeys", buf);
 
-        // 5) top height
         uint32_t topHeight = static_cast<uint32_t>(m_blockHashes.size() - 1);
         m_mdbxStorage->putMeta("idx_topheight",
                                std::vector<uint8_t>((uint8_t *)&topHeight, (uint8_t *)&topHeight + sizeof(topHeight)));
 
-        // 6) outputs
         buf.clear();
         for (const auto &p : m_outputs)
         {
@@ -1504,7 +1521,6 @@ mdbx_initialized:
         }
         m_mdbxStorage->putMeta("idx_outputs", buf);
 
-        // 7) multisig outputs
         buf.clear();
         for (const auto &p : m_multisignatureOutputs)
         {
@@ -1525,6 +1541,15 @@ mdbx_initialized:
           }
         }
         m_mdbxStorage->putMeta("idx_msig", buf);
+
+        buf.clear();
+        buf.reserve(sizeof(uint64_t) * m_depositIndex.size());
+        for (size_t i = 0; i < m_depositIndex.size(); ++i)
+        {
+          uint64_t val = m_depositIndex.depositAmountAtHeight(static_cast<uint32_t>(i));
+          buf.insert(buf.end(), (uint8_t *)&val, (uint8_t *)&val + sizeof(val));
+        }
+        m_mdbxStorage->putMeta("idx_deposits", buf);
         m_mdbxStorage->flush();
       }
       logger(INFO, BRIGHT_GREEN) << "MDBX index saved successfully.";
@@ -1803,6 +1828,25 @@ mdbx_initialized:
   bool Blockchain::getBlockByHash(const crypto::Hash &blockHash, Block &b)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      auto it = m_hashToHeight.find(blockHash);
+      if (it != m_hashToHeight.end())
+      {
+        b = blocksAt(it->second).bl;
+        return true;
+      }
+      auto blockByHashIterator = m_alternative_chains.find(blockHash);
+      if (blockByHashIterator != m_alternative_chains.end())
+      {
+        b = blockByHashIterator->second.bl;
+        return true;
+      }
+      return false;
+    }
+#endif
 
     uint32_t height = 0;
     if (m_blockIndex.getBlockHeight(blockHash, height))
@@ -2344,7 +2388,23 @@ mdbx_initialized:
       }
 
       uint32_t mainPrevHeight = 0;
-      const bool mainPrev = m_blockIndex.getBlockHeight(b.previousBlockHash, mainPrevHeight);
+      bool mainPrev = false;
+#ifdef HAVE_MDBX
+      if (m_useMdbx)
+      {
+        auto it = m_hashToHeight.find(b.previousBlockHash);
+        if (it != m_hashToHeight.end())
+        {
+          mainPrev = true;
+          mainPrevHeight = it->second;
+        }
+      }
+      else
+#endif
+      {
+        mainPrev = m_blockIndex.getBlockHeight(b.previousBlockHash, mainPrevHeight);
+      }
+
       const auto it_prev = m_alternative_chains.find(b.previousBlockHash);
 
       if (it_prev != m_alternative_chains.end() || mainPrev)
@@ -2670,7 +2730,14 @@ mdbx_initialized:
     uint32_t blockIndex = 0;
     {
       std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-      if (!m_blockIndex.findSupplement(qblock_ids, blockIndex))
+#ifdef HAVE_MDBX
+      if (m_useMdbx)
+      {
+        blockIndex = findBlockchainSupplementInternal(qblock_ids);
+      }
+      else
+#endif
+          if (!m_blockIndex.findSupplement(qblock_ids, blockIndex))
         blockIndex = findBlockchainSupplementInternal(qblock_ids);
     }
     return blockIndex;
@@ -2726,21 +2793,42 @@ mdbx_initialized:
 
   void Blockchain::print_blockchain_index(bool print_all)
   {
-    std::stringstream ss;
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
-    if (print_all == false)
+
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
     {
-      uint32_t height = getCurrentBlockchainHeight() - 1;
-      std::string id = common::podToHex(m_blockIndex.getBlockId(height));
-      logger(INFO) << "Current blockchain index: id: " << id << " height: " << height;
+      if (!print_all)
+      {
+        uint32_t height = getCurrentBlockchainHeight() - 1;
+        std::string id = common::podToHex(m_blockHashes[height]);
+        logger(INFO) << "Current blockchain index: id: " << id << " height: " << height;
+      }
+      else
+      {
+        logger(INFO) << "Blockchain indexes:";
+        size_t height = 0;
+        for (const auto &id : m_blockHashes)
+          logger(INFO) << "id: " << id << " height: " << height++;
+      }
     }
     else
+#endif
     {
-      std::vector<crypto::Hash> blockIds = m_blockIndex.getBlockIds(0, std::numeric_limits<uint32_t>::max());
-      logger(INFO) << "Blockchain indexes:";
-      size_t height = 0;
-      for (auto i = blockIds.begin(); i != blockIds.end(); ++i, ++height)
-        logger(INFO) << "id: " << *i << " height: " << height;
+      if (!print_all)
+      {
+        uint32_t height = getCurrentBlockchainHeight() - 1;
+        std::string id = common::podToHex(m_blockIndex.getBlockId(height));
+        logger(INFO) << "Current blockchain index: id: " << id << " height: " << height;
+      }
+      else
+      {
+        std::vector<crypto::Hash> blockIds = m_blockIndex.getBlockIds(0, std::numeric_limits<uint32_t>::max());
+        logger(INFO) << "Blockchain indexes:";
+        size_t height = 0;
+        for (auto i = blockIds.begin(); i != blockIds.end(); ++i, ++height)
+          logger(INFO) << "id: " << *i << " height: " << height;
+      }
     }
   }
 
@@ -3190,7 +3278,19 @@ mdbx_initialized:
     auto blockProcessingStart = std::chrono::steady_clock::now();
     crypto::Hash blockHash = id;
 
-    if (m_blockIndex.hasBlock(blockHash))
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      if (m_hashToHeight.count(blockHash) > 0)
+      {
+        logger(ERROR, BRIGHT_RED) << "Block " << blockHash << " already exists";
+        bvc.m_verification_failed = true;
+        return false;
+      }
+    }
+    else
+#endif
+        if (m_blockIndex.hasBlock(blockHash))
     {
       logger(ERROR, BRIGHT_RED) << "Block " << blockHash << " already exists";
       bvc.m_verification_failed = true;
@@ -3204,7 +3304,23 @@ mdbx_initialized:
 
     uint32_t height = 0;
     TransactionExtraMergeMiningTag mmTag;
-    if (m_blockIndex.getBlockHeight(blockHash, height))
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      auto it = m_hashToHeight.find(blockHash);
+      if (it != m_hashToHeight.end())
+      {
+        height = it->second;
+        if (getMergeMiningTagFromExtra(blockData.baseTransaction.extra, mmTag) && height >= cn::parameters::UPGRADE_HEIGHT_V6)
+        {
+          logger(ERROR, BRIGHT_RED) << "Merge mining tag found";
+          return false;
+        }
+      }
+    }
+    else
+#endif
+        if (m_blockIndex.getBlockHeight(blockHash, height))
     {
       if (getMergeMiningTagFromExtra(blockData.baseTransaction.extra, mmTag) && height >= cn::parameters::UPGRADE_HEIGHT_V6)
       {
@@ -3270,7 +3386,6 @@ mdbx_initialized:
     block.transactions[0].tx = blockData.baseTransaction;
 
 #ifdef HAVE_MDBX
-    // Early store for MDBX so genesis is visible before pushTransaction
     if (m_useMdbx)
     {
       pushBlock(block);
@@ -3334,7 +3449,6 @@ mdbx_initialized:
 
     int64_t emissionChange = 0;
     uint64_t reward = 0;
-    // genesis‑safe calculation, does NOT read the nonexistent block
     uint64_t already_generated_coins = (block.height == 0) ? 0 : getBlockHeader(block.height - 1).alreadyGeneratedCoins;
     if (!validate_miner_transaction(blockData, block.height, cumulative_block_size, already_generated_coins, fee_summary, reward, emissionChange))
     {
@@ -3369,7 +3483,6 @@ mdbx_initialized:
       m_mdbxStorage->pushBlockHeader(block.height, hdr);
       m_mdbxStorage->flush();
 
-      // Force the LRU cache to pick up the final data
       blocksAt(block.height);
     }
 #endif
@@ -3770,6 +3883,26 @@ mdbx_initialized:
   bool Blockchain::getAlreadyGeneratedCoins(const crypto::Hash &hash, uint64_t &generatedCoins)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      auto it = m_hashToHeight.find(hash);
+      if (it != m_hashToHeight.end())
+      {
+        generatedCoins = getBlockHeader(it->second).alreadyGeneratedCoins;
+        return true;
+      }
+      auto altIt = m_alternative_chains.find(hash);
+      if (altIt != m_alternative_chains.end())
+      {
+        generatedCoins = altIt->second.already_generated_coins;
+        return true;
+      }
+      return false;
+    }
+#endif
+
     uint32_t height = 0;
     if (m_blockIndex.getBlockHeight(hash, height))
     {
@@ -3788,6 +3921,26 @@ mdbx_initialized:
   bool Blockchain::getBlockSize(const crypto::Hash &hash, size_t &size)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      auto it = m_hashToHeight.find(hash);
+      if (it != m_hashToHeight.end())
+      {
+        size = getBlockHeader(it->second).blockCumulativeSize;
+        return true;
+      }
+      auto altIt = m_alternative_chains.find(hash);
+      if (altIt != m_alternative_chains.end())
+      {
+        size = altIt->second.block_cumulative_size;
+        return true;
+      }
+      return false;
+    }
+#endif
+
     uint32_t height = 0;
     if (m_blockIndex.getBlockHeight(hash, height))
     {
@@ -3937,7 +4090,15 @@ mdbx_initialized:
       iter->push(message);
   }
 
-  bool Blockchain::isBlockInMainChain(const crypto::Hash &blockId) const { return m_blockIndex.hasBlock(blockId); }
+  bool Blockchain::isBlockInMainChain(const crypto::Hash &blockId) const
+  {
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+      return m_hashToHeight.count(blockId) > 0;
+#endif
+    return m_blockIndex.hasBlock(blockId);
+  }
+
   bool Blockchain::isInCheckpointZone(const uint32_t height) const { return m_checkpoints.is_in_checkpoint_zone(height); }
 
   uint32_t Blockchain::findBlockchainSupplementInternal(const std::vector<crypto::Hash> &qblock_ids) const
@@ -3946,7 +4107,21 @@ mdbx_initialized:
     for (const auto &blockId : qblock_ids)
     {
       uint32_t height = 0;
-      if (m_blockIndex.getBlockHeight(blockId, height) && height + 1 > bestMatch && height < currentHeight)
+
+#ifdef HAVE_MDBX
+      if (m_useMdbx)
+      {
+        auto it = m_hashToHeight.find(blockId);
+        if (it != m_hashToHeight.end())
+          height = it->second;
+      }
+      else
+#endif
+      {
+        m_blockIndex.getBlockHeight(blockId, height);
+      }
+
+      if (height + 1 > bestMatch && height < currentHeight)
         bestMatch = height + 1;
     }
     return bestMatch;
