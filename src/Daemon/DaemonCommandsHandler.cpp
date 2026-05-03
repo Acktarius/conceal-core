@@ -1,6 +1,6 @@
 // Copyright (c) 2011-2017 The Cryptonote developers
 // Copyright (c) 2017-2018 The Circle Foundation & Conceal Devs
-// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 //
 //
 // Distributed under the MIT/X11 software license, see the accompanying
@@ -349,12 +349,17 @@ bool DaemonCommandsHandler::print_block_by_hash(const std::string &arg)
   return true;
 }
 
-uint64_t DaemonCommandsHandler::calculatePercent(const cn::Currency &currency, uint64_t value, uint64_t total)
+std::string DaemonCommandsHandler::calculatePercent(const cn::Currency &currency, uint64_t value, uint64_t total)
 {
   logger(logging::DEBUGGING) << "Attempting: calculatePercent";
-  double to_calc = (double)currency.coin() * static_cast<double>(value) / static_cast<double>(total);
+
+  double percent = 100.0 * static_cast<double>(value) / static_cast<double>(total);
+
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(2) << percent << "%";
+
   logger(logging::DEBUGGING) << "Finished: calculatePercent";
-  return static_cast<uint64_t>(100.0 * to_calc);
+  return oss.str();
 }
 
 bool DaemonCommandsHandler::print_stat(const std::vector<std::string> &args)
@@ -362,10 +367,10 @@ bool DaemonCommandsHandler::print_stat(const std::vector<std::string> &args)
   logger(logging::DEBUGGING) << "Attempting: print_stat";
 
   uint32_t height = 0;
-  uint32_t maxHeight = m_core.get_current_blockchain_height() - 1;
+  uint32_t max_height = m_core.get_current_blockchain_height() - 1;
   if (args.empty())
   {
-    height = maxHeight;
+    height = max_height;
   }
   else
   {
@@ -381,27 +386,40 @@ bool DaemonCommandsHandler::print_stat(const std::vector<std::string> &args)
         return false;
       }
     }
-    if (height > maxHeight)
+    if (height > max_height)
     {
-      logger(logging::INFO) << "printing for last available block: " << maxHeight;
-      height = maxHeight;
+      logger(logging::INFO) << "printing for last available block: " << max_height;
+      height = max_height;
     }
   }
 
-  uint64_t totalCoinsInNetwork = m_core.coinsEmittedAtHeight(height);
-  uint64_t totalCoinsOnDeposits = m_core.depositAmountAtHeight(height);
-  uint64_t amountOfActiveCoins = totalCoinsInNetwork - totalCoinsOnDeposits;
   const auto &currency = m_core.currency();
 
-  std::string print_status = "\n";
-  print_status += "Block Height: " + std::to_string(height) + "\n";
-  print_status += "Block Difficulty: " + std::to_string(m_core.difficultyAtHeight(height)) + "\n";
-  print_status += "Coins Minted (Total Supply):  " + currency.formatAmount(totalCoinsInNetwork) + "\n";
-  print_status += "Deposits (Locked Coins): " + currency.formatAmount(totalCoinsOnDeposits) + " (" + currency.formatAmount(calculatePercent(currency, totalCoinsOnDeposits, totalCoinsInNetwork)) + "%)\n";
-  print_status += "Active Coins (Circulation Supply):  " + currency.formatAmount(amountOfActiveCoins) + " (" + currency.formatAmount(calculatePercent(currency, amountOfActiveCoins, totalCoinsInNetwork)) + "%)\n";
-  print_status += "Rewards (Paid Interest): " + currency.formatAmount(m_core.depositInterestAtHeight(height)) + "\n";
+  uint64_t block_difficulty = m_core.difficultyAtHeight(height);
+  uint64_t total_coins_in_network = m_core.coinsEmittedAtHeight(height);
+  uint64_t total_coins_on_deposits = m_core.depositAmountAtHeight(height);
+  uint64_t amount_of_active_coins = total_coins_in_network - total_coins_on_deposits;
+  std::string coins_minted = currency.formatAmount(total_coins_in_network) + " (" + calculatePercent(currency, total_coins_in_network, cn::parameters::MONEY_SUPPLY) + ")";
+  std::string staked_coins = currency.formatAmount(total_coins_on_deposits) + " (" + calculatePercent(currency, total_coins_on_deposits, total_coins_in_network) + ")";
+  std::string active_coins = currency.formatAmount(amount_of_active_coins) + " (" + calculatePercent(currency, amount_of_active_coins, total_coins_in_network) + ")";
+  std::string rewards_paid = currency.formatAmount(m_core.depositInterestAtHeight(height));
 
-  logger(logging::INFO) << print_status;
+  std::string database_stats = m_core.printDatabaseStats();
+
+  std::ostringstream oss;
+
+  oss << "\n=== Network Status ===\n";
+  oss << "Block Height: " << height << "\n";
+  oss << "Block Difficulty: " << block_difficulty << "\n";
+  oss << "Coins Minted:  " << coins_minted << "\n";
+  oss << "Staked Coins: " << staked_coins << "\n";
+  oss << "Circulation Supply:  " << active_coins << "\n";
+  oss << "Staked Rewards Paid: " << rewards_paid << "\n\n";
+
+  oss << "=== Database Status ===\n";
+  oss << database_stats;
+
+  logger(logging::INFO) << oss.str();
 
   logger(logging::DEBUGGING) << "Finished: print_stat";
   return true;

@@ -1,4 +1,6 @@
 // Copyright (c) 2011-2018, The CryptoNote developers, The Circle Foundation, Conceal Devs
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+//
 // Distributed under the MIT/X11 software license.
 
 #pragma once

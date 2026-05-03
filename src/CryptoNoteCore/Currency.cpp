@@ -1,6 +1,6 @@
 // Copyright (c) 2011-2017 The Cryptonote developers
 // Copyright (c) 2017-2018 The Circle Foundation & Conceal Devs
-// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 //
 //
 // Distributed under the MIT/X11 software license, see the accompanying
@@ -759,7 +759,26 @@ namespace cn
       s.insert(0, m_numberOfDecimalPlaces + 1 - s.size(), '0');
     }
 
-    s.insert(s.size() - m_numberOfDecimalPlaces, ".");
+    if (m_numberOfDecimalPlaces > 0 && s.size() > m_numberOfDecimalPlaces)
+    {
+      s.insert(s.size() - m_numberOfDecimalPlaces, ".");
+    }
+
+    size_t dotPos = s.find('.');
+    if (dotPos == std::string::npos)
+      dotPos = s.size();
+
+    int count = 0;
+    for (size_t i = dotPos; i > 0; i--)
+    {
+      count++;
+      if (count == 3 && i > 1)
+      {
+        s.insert(i - 1, ",");
+        count = 0;
+      }
+    }
+
     return s;
   }
 

@@ -22,7 +22,6 @@ namespace CryptoNote
     explicit MDBXBlockchainStorage(const std::string &dataDir);
     ~MDBXBlockchainStorage() override;
 
-    // IBlockchainStorage interface
     bool blockExists(const crypto::Hash &hash) const override;
     bool getBlock(const crypto::Hash &hash, cn::Block &block) const override;
     uint32_t getBlockHeight(const crypto::Hash &hash) const override;
@@ -55,6 +54,8 @@ namespace CryptoNote
 
     void abortWriteTxn();
 
+    std::string printDatabaseStats() const;
+
   private:
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);
@@ -62,16 +63,13 @@ namespace CryptoNote
     void ensureWriteTxn();
     void setTopBlockHeightInternal(uint32_t height);
 
-    // MDBX handles
     MDBX_env *m_env = nullptr;
     MDBX_dbi m_dbiHeights;
     MDBX_dbi m_dbiBlockHeights;
-    MDBX_dbi m_dbiSpentKeys;
     MDBX_dbi m_dbiMeta;
     MDBX_dbi m_dbiBlockEntries;
     MDBX_dbi m_dbiBlockHeaders;
 
-    // Transaction management
     mutable std::mutex m_txMutex;
     MDBX_txn *m_writeTxn = nullptr;
     size_t m_opsSinceLastCommit = 0;

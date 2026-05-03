@@ -40,15 +40,15 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
 
   auto envGuard = std::unique_ptr<MDBX_env, decltype(&mdbx_env_close)>(m_env, mdbx_env_close);
 
-  mdbx_env_set_maxdbs(m_env, 9);
+  mdbx_env_set_maxdbs(m_env, 8);
 
   mdbx_env_set_geometry(m_env,
-                        -1,                // size_lower: minimum file size (-1 = auto)
-                        -1,                // size_now: current file size (-1 = auto)
-                        (intptr_t)1 << 35, // size_upper: max file size (32 GB)
-                        16 << 20,          // growth_step: extend in 16 MB chunks
-                        -1,                // shrink_threshold: when to shrink (-1 = auto)
-                        -1);               // pagesize: default 4 KB
+                        -1,
+                        -1,
+                        (intptr_t)1 << 35,
+                        16 << 20,
+                        -1,
+                        -1);
 
   const MDBX_env_flags_t openFlags = MDBX_NOSUBDIR | MDBX_NORDAHEAD | MDBX_COALESCE | MDBX_LIFORECLAIM;
 
@@ -56,7 +56,7 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   if (rc != MDBX_SUCCESS)
     throw std::runtime_error("mdbx_env_open failed: " + std::string(mdbx_strerror(rc)));
 
-  //mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
+  // mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
 
   MDBX_txn *txn;
   rc = mdbx_txn_begin(m_env, nullptr, MDBX_TXN_READWRITE, &txn);
@@ -81,7 +81,6 @@ void MDBXBlockchainStorage::openDatabases(MDBX_txn *txn)
 {
   mdbx_dbi_open(txn, "heights", MDBX_CREATE, &m_dbiHeights);
   mdbx_dbi_open(txn, "block_heights", MDBX_CREATE, &m_dbiBlockHeights);
-  mdbx_dbi_open(txn, "spent_keys", MDBX_CREATE, &m_dbiSpentKeys);
   mdbx_dbi_open(txn, "meta", MDBX_CREATE, &m_dbiMeta);
   mdbx_dbi_open(txn, "block_entries", MDBX_CREATE, &m_dbiBlockEntries);
   mdbx_dbi_open(txn, "block_headers", MDBX_CREATE, &m_dbiBlockHeaders);
@@ -101,7 +100,6 @@ bool MDBXBlockchainStorage::blockExists(const crypto::Hash &hash) const
 
 bool MDBXBlockchainStorage::getBlock(const crypto::Hash &hash, cn::Block &block) const
 {
-  // Step 1: find height from hash
   MDBX_txn *txn;
   mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
   MDBX_val key{mdbx_cast(hash.data), sizeof(hash)};
@@ -115,7 +113,6 @@ bool MDBXBlockchainStorage::getBlock(const crypto::Hash &hash, cn::Block &block)
   uint32_t height = *static_cast<const uint32_t *>(value.iov_base);
   mdbx_txn_abort(txn);
 
-  // Step 2: fetch full block from block_entries
   MDBX_txn *txn2;
   mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn2);
   std::string heightKey = "be_" + std::to_string(height);
@@ -175,29 +172,12 @@ crypto::Hash MDBXBlockchainStorage::getBlockHash(uint32_t height) const
 
 bool MDBXBlockchainStorage::isSpentKeyImage(const crypto::KeyImage &keyImage) const
 {
-  MDBX_txn *txn;
-  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
-  MDBX_val key{mdbx_cast(keyImage.data), sizeof(keyImage)};
-  MDBX_val value;
-  int rc = mdbx_get(txn, m_dbiSpentKeys, &key, &value);
-  mdbx_txn_abort(txn);
-  return rc == MDBX_SUCCESS;
+  return false;
 }
 
 void MDBXBlockchainStorage::markKeyImageSpent(const crypto::KeyImage &keyImage)
 {
-  std::lock_guard<std::mutex> lock(m_txMutex);
-  ensureWriteTxn();
-
-  MDBX_val key{mdbx_cast(keyImage.data), sizeof(keyImage)};
-  MDBX_val empty{nullptr, 0};
-  int rc = mdbx_put(m_writeTxn, m_dbiSpentKeys, &key, &empty, MDBX_UPSERT);
-  if (rc != MDBX_SUCCESS)
-  {
-    abortWriteTxn();
-    throw std::runtime_error("markKeyImageSpent failed: " + std::string(mdbx_strerror(rc)));
-  }
-  ++m_opsSinceLastCommit;
+  // handled in-memory via m_spent_keys and persisted to meta by storeCache
 }
 
 // ---------- Write operations ----------
@@ -501,4 +481,34 @@ void MDBXBlockchainStorage::abortWriteTxn()
     m_writeTxn = nullptr;
     m_opsSinceLastCommit = 0;
   }
+}
+
+std::string MDBXBlockchainStorage::printDatabaseStats() const
+{
+  std::string result;
+
+  MDBX_txn *txn;
+  if (mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS)
+    return "error: failed to begin transaction";
+
+  MDBX_dbi dbis[] = {m_dbiHeights, m_dbiBlockHeights,
+                     m_dbiMeta, m_dbiBlockEntries, m_dbiBlockHeaders};
+  const char *names[] = {"heights", "block_heights",
+                         "meta", "block_entries", "block_headers"};
+
+  for (int i = 0; i < 5; i++)
+  {
+    MDBX_stat stat;
+    if (mdbx_dbi_stat(txn, dbis[i], &stat, sizeof(stat)) == MDBX_SUCCESS)
+    {
+      size_t dataMB = (stat.ms_leaf_pages * 4096) >> 20;
+      char line[128];
+      snprintf(line, sizeof(line), "  %-18s %8lu entries  %6zu MB\n",
+               names[i], (unsigned long)stat.ms_entries, dataMB);
+      result += line;
+    }
+  }
+
+  mdbx_txn_abort(txn);
+  return result;
 }

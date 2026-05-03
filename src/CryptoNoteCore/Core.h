@@ -1,6 +1,6 @@
 // Copyright (c) 2011-2017 The Cryptonote developers
 // Copyright (c) 2017-2018 The Circle Foundation & Conceal Devs
-// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 //
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -155,6 +155,8 @@ namespace cn {
     uint64_t depositInterestAtHeight(size_t height) const;
 
     bool is_key_image_spent(const crypto::KeyImage &key_im);
+
+    std::string printDatabaseStats() const;
 
   private:
     bool add_new_tx(const Transaction &tx, const crypto::Hash &tx_hash, size_t blob_size, tx_verification_context &tvc, bool keeped_by_block, uint32_t height);

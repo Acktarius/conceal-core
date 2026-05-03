@@ -273,6 +273,8 @@ namespace cn
     bool rollbackBlockchainTo(uint32_t height);
     bool have_tx_keyimg_as_spent(const crypto::KeyImage &key_im);
 
+    std::string printDatabaseStats() const;
+
   private:
     bool m_testnet = false;
     struct MultisignatureOutputUsage

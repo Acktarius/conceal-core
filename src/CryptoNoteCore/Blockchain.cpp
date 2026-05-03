@@ -985,7 +985,7 @@ namespace cn
             for (uint32_t h = 0; h <= topHeight; ++h)
             {
               // faster reads can be spread to 50k blocks, slower at 10k
-              if (h % 50000 == 0)
+              if (h % 10000 == 0)
                 logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
 
               cn::BinaryArray ba;
@@ -3646,13 +3646,16 @@ namespace cn
 
     for (size_t i = 0; i < transaction.tx.inputs.size(); ++i)
       if (transaction.tx.inputs[i].type() == typeid(KeyInput))
-        if (!m_spent_keys.insert(std::make_pair(::boost::get<KeyInput>(transaction.tx.inputs[i]).keyImage, block.height)).second)
+      {
+        const auto &keyImage = ::boost::get<KeyInput>(transaction.tx.inputs[i]).keyImage;
+        if (!m_spent_keys.insert(std::make_pair(keyImage, block.height)).second)
         {
           for (size_t j = 0; j < i; ++j)
             m_spent_keys.erase(::boost::get<KeyInput>(transaction.tx.inputs[i - 1 - j]).keyImage);
           m_transactionMap.erase(transactionHash);
           return false;
         }
+      }
 
     for (const auto &inv : transaction.tx.inputs)
       if (inv.type() == typeid(MultisignatureInput))
@@ -4136,4 +4139,12 @@ namespace cn
   std::vector<crypto::Hash> Blockchain::getCachedSparseChain() { return buildSparseChain(); }
   std::vector<crypto::Hash> Blockchain::doBuildSparseChainUnlocked(const crypto::Hash &startBlockId) const { return doBuildSparseChain(startBlockId); }
 
+  std::string Blockchain::printDatabaseStats() const
+  {
+#ifdef HAVE_MDBX
+    if (m_useMdbx && m_mdbxStorage)
+      return m_mdbxStorage->printDatabaseStats();
+#endif
+    return "MDBX not enabled";
+  }
 } // namespace cn
