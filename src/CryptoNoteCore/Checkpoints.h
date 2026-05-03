@@ -1,6 +1,6 @@
 // Copyright (c) 2011-2017 The Cryptonote developers
 // Copyright (c) 2017-2018 The Circle Foundation & Conceal Devs
-// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 //
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -27,7 +27,12 @@ namespace cn
     bool is_alternative_block_allowed(uint32_t blockchain_height, uint32_t block_height) const;
     std::vector<uint32_t> getCheckpointHeights() const;
     void set_testnet(bool testnet);
-    
+
+    bool save_checkpoints_to_file(const std::string &fileName) const;
+    bool load_self_generated_checkpoints();
+    const std::map<uint32_t, crypto::Hash> &get_points() const { return m_points; }
+    uint32_t getMaxHeight() const;
+
   private:
     bool m_testnet = false;
     std::map<uint32_t, crypto::Hash> m_points;

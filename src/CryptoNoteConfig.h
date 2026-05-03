@@ -208,6 +208,13 @@ namespace cn
 	const size_t P2P_DEFAULT_HANDSHAKE_INVOKE_TIMEOUT = 5000;  // 5 seconds
 	const char P2P_STAT_TRUSTED_PUB_KEY[] = "f7061e9a5f0d30549afde49c9bfbaa52ac60afdc46304642b460a9ea34bf7a4e";
 
+	// A checkpoint is generated every CHECKPOINT_INTERVAL blocks, but only for
+	// heights that are at least CHECKPOINT_VERIFICATION_BUFFER blocks behind the
+	// current chain tip. This ensures the most recent blocks are always fully
+	// verified, protecting against chain splits and reorgs.
+	const uint32_t CHECKPOINT_INTERVAL = 50000;
+	const uint32_t CHECKPOINT_VERIFICATION_BUFFER = 50000;
+
 	// Seed Nodes
 	const std::initializer_list<const char *> SEED_NODES = {
 	  "seed1.conceal.network:15000",

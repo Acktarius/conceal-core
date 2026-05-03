@@ -1,6 +1,6 @@
 // Copyright (c) 2011-2017 The Cryptonote developers
 // Copyright (c) 2017-2018 The Circle Foundation & Conceal Devs
-// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 //
 // Copyright (c) 2016-2019, The Karbo developers
 
@@ -200,4 +200,47 @@ bool Checkpoints::load_checkpoints_from_file(const std::string& fileName) {
 
 void Checkpoints::set_testnet(bool testnet) { m_testnet = testnet; }
 
+bool Checkpoints::save_checkpoints_to_file(const std::string &fileName) const
+{
+  std::ofstream file(fileName);
+  if (!file.is_open())
+  {
+    logger(ERROR, BRIGHT_RED) << "Failed to open checkpoints file for writing: "
+                              << fileName;
+    return false;
+  }
+
+  size_t count = 0;
+  for (const auto &[height, hash] : m_points)
+  {
+    file << height << "," << common::podToHex(hash) << "\n";
+    ++count;
+  }
+
+  logger(INFO, BRIGHT_GREEN) << "Exported " << count
+                             << " checkpoints to " << fileName;
+  return true;
 }
+
+// This is a no-op at this level. Self-generated checkpoints are loaded by
+// Blockchain during initialisation via the MDBX storage layer (guarded by
+// #ifdef HAVE_MDBX) and fed into m_points through add_checkpoint(). This
+// method exists so the loading sequence can be expressed uniformly at the
+// call site regardless of storage backend.
+bool Checkpoints::load_self_generated_checkpoints()
+{
+  // Actual loading happens in Blockchain::init() where the MDBX
+  // handle is accessible.
+  return true;
+}
+
+uint32_t Checkpoints::getMaxHeight() const
+{
+  if (m_points.empty())
+  {
+    return 0;
+  }
+  return m_points.rbegin()->first;
+}
+
+} // cn

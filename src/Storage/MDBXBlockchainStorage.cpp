@@ -11,6 +11,8 @@
 #include <functional>
 #include <stdexcept>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 using namespace CryptoNote;
 using namespace common;
@@ -92,9 +94,10 @@ void MDBXBlockchainStorage::openDatabases(MDBX_txn *txn)
   mdbx_dbi_open(txn, "meta", MDBX_CREATE, &m_dbiMeta);
   mdbx_dbi_open(txn, "block_entries", MDBX_CREATE, &m_dbiBlockEntries);
   mdbx_dbi_open(txn, "block_headers", MDBX_CREATE, &m_dbiBlockHeaders);
+  mdbx_dbi_open(txn, "checkpoints", MDBX_CREATE, &m_dbiCheckpoints);
 }
 
-// ---------- Reads ----------
+// Reads
 bool MDBXBlockchainStorage::blockExists(const crypto::Hash &hash) const
 {
   MDBX_txn *txn;
@@ -188,7 +191,7 @@ void MDBXBlockchainStorage::markKeyImageSpent(const crypto::KeyImage &keyImage)
   // handled in-memory via m_spent_keys and persisted to meta by storeCache
 }
 
-// ---------- Write operations ----------
+// Write operations
 void MDBXBlockchainStorage::addBlock(const cn::Block &block, const crypto::Hash &hash, uint32_t height)
 {
   std::lock_guard<std::mutex> lock(m_txMutex);
@@ -238,7 +241,7 @@ void MDBXBlockchainStorage::removeBlock(const crypto::Hash &hash)
   ++m_opsSinceLastCommit;
 }
 
-// ---------- Global state ----------
+// Global state
 uint32_t MDBXBlockchainStorage::topBlockHeight() const
 {
   MDBX_txn *txn;
@@ -278,7 +281,7 @@ void MDBXBlockchainStorage::setTopBlockHeightInternal(uint32_t height)
   }
 }
 
-// ---------- Helpers ----------
+// Helpers
 void MDBXBlockchainStorage::ensureWriteTxn()
 {
   if (!m_writeTxn)
@@ -334,7 +337,7 @@ void MDBXBlockchainStorage::commitWriteTransaction(bool force)
   m_opsSinceLastCommit = 0;
 }
 
-// ---------- BlockEntry storage (serialized to/from BinaryArray) ----------
+// BlockEntry storage (serialized to/from BinaryArray)
 void MDBXBlockchainStorage::pushBlockEntry(uint32_t height, const cn::BinaryArray &serializedEntry)
 {
   std::lock_guard<std::mutex> lock(m_txMutex);
@@ -482,6 +485,84 @@ bool MDBXBlockchainStorage::getMeta(const std::string &key, std::vector<uint8_t>
   return false;
 }
 
+// Checkpoint storage
+void MDBXBlockchainStorage::storeCheckpoint(uint32_t height, const crypto::Hash &hash)
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  // Build a zero-padded key so lexical ordering equals numeric ordering.
+  // Format: "checkpoint_0050000"
+  std::ostringstream keyStream;
+  keyStream << "checkpoint_" << std::setw(7) << std::setfill('0') << height;
+  std::string key = keyStream.str();
+
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  MDBX_val mval{mdbx_cast(&hash), sizeof(crypto::Hash)};
+
+  int rc = mdbx_put(m_writeTxn, m_dbiCheckpoints, &mkey, &mval, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("storeCheckpoint failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  ++m_opsSinceLastCommit;
+  if (m_opsSinceLastCommit >= kCommitBatchSize)
+    commitWriteTransaction(false);
+}
+
+std::vector<std::pair<uint32_t, crypto::Hash>> MDBXBlockchainStorage::getCheckpoints() const
+{
+  std::vector<std::pair<uint32_t, crypto::Hash>> result;
+
+  MDBX_txn *txn;
+  int rc = mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+  if (rc != MDBX_SUCCESS)
+    return result;
+
+  MDBX_cursor *cursor;
+  rc = mdbx_cursor_open(txn, m_dbiCheckpoints, &cursor);
+  if (rc != MDBX_SUCCESS)
+  {
+    mdbx_txn_abort(txn);
+    return result;
+  }
+
+  MDBX_val key, value;
+  while (mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT) == MDBX_SUCCESS)
+  {
+    std::string keyStr(static_cast<const char *>(key.iov_base), key.iov_len);
+
+    // Keys must start with "checkpoint_"
+    if (keyStr.rfind("checkpoint_", 0) != 0)
+      continue;
+
+    // Parse height from the numeric portion after the underscore
+    uint32_t height = 0;
+    try
+    {
+      height = std::stoi(keyStr.substr(11));
+    }
+    catch (...)
+    {
+      continue;
+    }
+
+    if (value.iov_len == sizeof(crypto::Hash))
+    {
+      crypto::Hash hash;
+      std::memcpy(&hash, value.iov_base, sizeof(crypto::Hash));
+      result.emplace_back(height, hash);
+    }
+  }
+
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
+  return result;
+}
+
+// Error handling
 void MDBXBlockchainStorage::abortWriteTxn()
 {
   if (m_writeTxn)
@@ -501,11 +582,11 @@ std::string MDBXBlockchainStorage::printDatabaseStats() const
     return "error: failed to begin transaction";
 
   MDBX_dbi dbis[] = {m_dbiHeights, m_dbiBlockHeights,
-                     m_dbiMeta, m_dbiBlockEntries, m_dbiBlockHeaders};
+                     m_dbiMeta, m_dbiBlockEntries, m_dbiBlockHeaders, m_dbiCheckpoints};
   const char *names[] = {"heights", "block_heights",
-                         "meta", "block_entries", "block_headers"};
+                         "meta", "block_entries", "block_headers", "checkpoints"};
 
-  for (int i = 0; i < 5; i++)
+  for (int i = 0; i < 6; i++)
   {
     MDBX_stat stat;
     if (mdbx_dbi_stat(txn, dbis[i], &stat, sizeof(stat)) == MDBX_SUCCESS)

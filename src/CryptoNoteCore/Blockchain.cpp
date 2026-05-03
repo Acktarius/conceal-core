@@ -1228,6 +1228,30 @@ namespace cn
         return false;
       }
 
+      // Load self-generated checkpoints from previous sync sessions.
+      // These are trusted because this node verified every block itself.
+#ifdef HAVE_MDBX
+      if (m_useMdbx && m_mdbxStorage)
+      {
+        auto selfCheckpoints = m_mdbxStorage->getCheckpoints();
+        size_t added = 0;
+        for (const auto &[height, hash] : selfCheckpoints)
+        {
+          if (m_checkpoints.add_checkpoint(height, common::podToHex(hash)))
+          {
+            ++added;
+          }
+        }
+        logger(INFO, BRIGHT_GREEN) << "Loaded " << added
+                                   << " self-generated checkpoints from MDBX";
+      }
+#endif
+
+      logger(INFO, BRIGHT_WHITE) << "Checkpoint zone covers heights 0 to "
+                                 << m_checkpoints.getMaxHeight()
+                                 << " (" << m_checkpoints.get_points().size()
+                                 << " checkpoints total)";
+
       try
       {
         if (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
@@ -3496,6 +3520,31 @@ namespace cn
     m_upgradeDetectorV7.blockPushed();
     m_upgradeDetectorV8.blockPushed();
     update_next_comulative_size_limit();
+
+    // Auto-generate checkpoints
+    const uint32_t blockHeight = block.height;
+    const uint32_t networkHeight = static_cast<uint32_t>(blocksSize());
+
+    if ((blockHeight > 0) && (blockHeight % cn::CHECKPOINT_INTERVAL == 0) &&
+        (blockHeight <= networkHeight - cn::CHECKPOINT_VERIFICATION_BUFFER))
+    {
+      // Persist to MDBX if the backend is active
+#ifdef HAVE_MDBX
+      if (m_useMdbx && m_mdbxStorage)
+      {
+        m_mdbxStorage->storeCheckpoint(blockHeight, blockHash);
+      }
+#endif
+
+      // Always register in the in-memory checkpoint map so this node
+      // benefits from fast-sync for this range on the next restart
+      m_checkpoints.add_checkpoint(blockHeight, common::podToHex(blockHash));
+
+      logger(INFO, BRIGHT_GREEN) << "Auto-generated checkpoint at height " << blockHeight
+                                 << " (buffer: " << (networkHeight - blockHeight)
+                                 << " blocks behind tip)";
+    }
+
     return true;
   }
 

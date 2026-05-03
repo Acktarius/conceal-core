@@ -52,6 +52,8 @@ namespace CryptoNote
     void putMeta(const std::string &key, const std::vector<uint8_t> &value);
     bool getMeta(const std::string &key, std::vector<uint8_t> &value) const;
 
+    void storeCheckpoint(uint32_t height, const crypto::Hash &hash);
+    std::vector<std::pair<uint32_t, crypto::Hash>> getCheckpoints() const;
     void abortWriteTxn();
 
     std::string printDatabaseStats() const;
@@ -69,6 +71,7 @@ namespace CryptoNote
     MDBX_dbi m_dbiMeta;
     MDBX_dbi m_dbiBlockEntries;
     MDBX_dbi m_dbiBlockHeaders;
+    MDBX_dbi m_dbiCheckpoints;
 
     mutable std::mutex m_txMutex;
     MDBX_txn *m_writeTxn = nullptr;
