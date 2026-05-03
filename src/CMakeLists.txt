@@ -94,6 +94,26 @@ target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc Http Crypt
 target_link_libraries(PaymentGateService PaymentGate JsonRpcServer Wallet NodeRpcProxy Transfers CryptoNoteCore Storage crypto P2P Rpc Http System Logging Common InProcessNode libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
 target_link_libraries(Optimizer PaymentGate Rpc Http CryptoNoteCore Storage Logging Serialization crypto System Common ${Boost_LIBRARIES})
 
+if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
+  file(GLOB_RECURSE MIGRATION_TOOL_FILES MigrationTool/*)
+  add_executable(MigrationTool ${MIGRATION_TOOL_FILES})
+  target_link_libraries(MigrationTool
+    CryptoNoteCore
+    Storage
+    P2P
+    Rpc
+    System
+    Http
+    Logging
+    Common
+    crypto
+    Serialization
+    ${Boost_LIBRARIES}
+  )
+  add_dependencies(MigrationTool version)
+  set_property(TARGET MigrationTool PROPERTY OUTPUT_NAME "conceald-migrate")
+endif()
+
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
   target_link_libraries(ConcealWallet -lresolv)
   target_link_libraries(Daemon -lresolv)

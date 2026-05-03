@@ -19,7 +19,7 @@ namespace CryptoNote
   class MDBXBlockchainStorage : public IBlockchainStorage
   {
   public:
-    explicit MDBXBlockchainStorage(const std::string &dataDir);
+    explicit MDBXBlockchainStorage(const std::string &dataDir, bool bulkSyncMode = false);
     ~MDBXBlockchainStorage() override;
 
     bool blockExists(const crypto::Hash &hash) const override;
@@ -77,6 +77,7 @@ namespace CryptoNote
     uint32_t m_cachedTopHeight = 0;
 
     std::string m_dataDir;
+    bool m_bulkSyncMode = false;
   };
 
 } // namespace CryptoNote

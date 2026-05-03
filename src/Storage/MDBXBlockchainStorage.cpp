@@ -21,9 +21,10 @@ static inline void *mdbx_cast(const void *ptr)
   return const_cast<void *>(ptr);
 }
 
-MDBXBlockchainStorage::MDBXBlockchainStorage(const std::string &dataDir)
+MDBXBlockchainStorage::MDBXBlockchainStorage(const std::string &dataDir, bool bulkSyncMode)
     : m_dataDir(dataDir)
 {
+  m_bulkSyncMode = bulkSyncMode;
   openEnvironment(dataDir);
 }
 
@@ -56,7 +57,9 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   if (rc != MDBX_SUCCESS)
     throw std::runtime_error("mdbx_env_open failed: " + std::string(mdbx_strerror(rc)));
 
-  // mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
+  // 3x faster migration, never to be used elsewhere!
+  if (m_bulkSyncMode)
+    mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
 
   MDBX_txn *txn;
   rc = mdbx_txn_begin(m_env, nullptr, MDBX_TXN_READWRITE, &txn);
