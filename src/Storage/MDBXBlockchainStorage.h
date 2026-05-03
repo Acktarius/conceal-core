@@ -73,7 +73,10 @@ namespace CryptoNote
     mutable std::mutex m_txMutex;
     MDBX_txn *m_writeTxn = nullptr;
     size_t m_opsSinceLastCommit = 0;
+
     static constexpr size_t kCommitBatchSize = 1000;
+    static constexpr size_t kCommitBatchSizeBulk = 50000;
+
     uint32_t m_cachedTopHeight = 0;
 
     std::string m_dataDir;

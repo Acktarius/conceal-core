@@ -43,13 +43,10 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
 
   mdbx_env_set_maxdbs(m_env, 8);
 
-  mdbx_env_set_geometry(m_env,
-                        -1,
-                        -1,
-                        (intptr_t)1 << 35,
-                        16 << 20,
-                        -1,
-                        -1);
+  if (m_bulkSyncMode)
+    mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 37, 16 << 20, -1, -1); // 128 GB
+  else
+    mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 35, 16 << 20, -1, -1); // 32 GB
 
   const MDBX_env_flags_t openFlags = MDBX_NOSUBDIR | MDBX_NORDAHEAD | MDBX_COALESCE | MDBX_LIFORECLAIM;
 
@@ -211,7 +208,8 @@ void MDBXBlockchainStorage::addBlock(const cn::Block &block, const crypto::Hash 
   setTopBlockHeightInternal(height);
 
   ++m_opsSinceLastCommit;
-  if (m_opsSinceLastCommit >= kCommitBatchSize)
+  size_t batchSize = m_bulkSyncMode ? kCommitBatchSizeBulk : kCommitBatchSize;
+  if (m_opsSinceLastCommit >= batchSize)
     commitWriteTransaction(false);
 }
 
