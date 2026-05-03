@@ -34,6 +34,7 @@ namespace
   const command_line::arg_descriptor<size_t> arg_batch_size = {"batch-size", "Blocks per commit", 5000};
   const command_line::arg_descriptor<uint64_t> arg_size_limit = {"size-limit", "Maximum database size in GB (0 = no limit, default: 128)", 128};
   const command_line::arg_descriptor<bool> arg_no_limit = {"no-limit", "Remove upper size limit entirely. Use with caution. (cannot be used with --size-limit)", false};
+  const command_line::arg_descriptor<bool> arg_safe_mode = {"safe-mode", "Disable bulk mode for crash-safe migration (slower but survives interruptions)", false};
 }
 
 // Helper: join a directory path with a file name
@@ -56,6 +57,7 @@ int main(int argc, char *argv[])
   command_line::add_arg(desc, arg_batch_size);
   command_line::add_arg(desc, arg_size_limit);
   command_line::add_arg(desc, arg_no_limit);
+  command_line::add_arg(desc, arg_safe_mode);
 
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -158,10 +160,11 @@ int main(int argc, char *argv[])
 
   // Convert user input
   uint64_t sizeLimitBytes = sizeLimitGB > 0 ? (sizeLimitGB << 30) : 0;
+  bool safeMode = command_line::get_arg(vm, arg_safe_mode);
 
   std::string mdbxPath = appendPath(newDir, "mdbx_blocks");
 
-  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, true, sizeLimitBytes);
+  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, !safeMode, sizeLimitBytes);
 
   // In-memory index structures built during migration.
   // These will be serialized to the MDBX meta database at the end
