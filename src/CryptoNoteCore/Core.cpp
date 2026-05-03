@@ -694,8 +694,9 @@ uint64_t core::coinsEmittedAtHeight(uint64_t height) {
   return m_blockchain.coinsEmittedAtHeight(height);
 }
 
-uint64_t core::difficultyAtHeight(uint64_t height) {
-  return m_blockchain.difficultyAtHeight(height);
+uint64_t core::blockDifficulty(uint64_t height)
+{
+  return m_blockchain.blockDifficulty(height);
 }
 
 //void core::get_all_known_block_ids(std::list<crypto::Hash> &main, std::list<crypto::Hash> &alt, std::list<crypto::Hash> &invalid) {

@@ -395,7 +395,7 @@ bool DaemonCommandsHandler::print_stat(const std::vector<std::string> &args)
 
   const auto &currency = m_core.currency();
 
-  uint64_t block_difficulty = m_core.difficultyAtHeight(height);
+  uint64_t block_difficulty = m_core.blockDifficulty(height);
   uint64_t total_coins_in_network = m_core.coinsEmittedAtHeight(height);
   uint64_t total_coins_on_deposits = m_core.depositAmountAtHeight(height);
   uint64_t amount_of_active_coins = total_coins_in_network - total_coins_on_deposits;

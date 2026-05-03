@@ -114,7 +114,7 @@ namespace cn {
     bool get_alternative_blocks(std::list<Block> &blocks);
     size_t get_alternative_blocks_count();
     uint64_t coinsEmittedAtHeight(uint64_t height);
-    uint64_t difficultyAtHeight(uint64_t height);
+    uint64_t blockDifficulty(uint64_t height);
 
     void set_cryptonote_protocol(i_cryptonote_protocol *pprotocol);
     void set_checkpoints(Checkpoints &&chk_pts);
