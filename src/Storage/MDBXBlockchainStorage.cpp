@@ -21,8 +21,8 @@ static inline void *mdbx_cast(const void *ptr)
   return const_cast<void *>(ptr);
 }
 
-MDBXBlockchainStorage::MDBXBlockchainStorage(const std::string &dataDir, bool bulkSyncMode)
-    : m_dataDir(dataDir)
+MDBXBlockchainStorage::MDBXBlockchainStorage(const std::string &dataDir, bool bulkSyncMode, uint64_t sizeLimitBytes)
+    : m_dataDir(dataDir), m_sizeLimitBytes(sizeLimitBytes)
 {
   m_bulkSyncMode = bulkSyncMode;
   openEnvironment(dataDir);
@@ -44,9 +44,17 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   mdbx_env_set_maxdbs(m_env, 8);
 
   if (m_bulkSyncMode)
-    mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 37, 16 << 20, -1, -1); // 128 GB
+  {
+    if (m_sizeLimitBytes > 0)
+      mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)m_sizeLimitBytes, 16 << 20, -1, -1);
+    else
+      mdbx_env_set_geometry(m_env, -1, -1, -1, 16 << 20, -1, -1);
+    mdbx_env_set_flags(m_env, MDBX_SAFE_NOSYNC, true);
+  }
   else
-    mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 35, 16 << 20, -1, -1); // 32 GB
+  {
+    mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 35, 16 << 20, -1, -1);
+  }
 
   const MDBX_env_flags_t openFlags = MDBX_NOSUBDIR | MDBX_NORDAHEAD | MDBX_COALESCE | MDBX_LIFORECLAIM;
 

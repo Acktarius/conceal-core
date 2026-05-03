@@ -32,6 +32,8 @@ namespace
   const command_line::arg_descriptor<std::string> arg_new_data_dir = {"new-dir", "Path where the new MDBX database will be created", ""};
   const command_line::arg_descriptor<bool> arg_testnet = {"testnet", "Use testnet parameters", false};
   const command_line::arg_descriptor<size_t> arg_batch_size = {"batch-size", "Blocks per commit", 5000};
+  const command_line::arg_descriptor<uint64_t> arg_size_limit = {"size-limit", "Maximum database size in GB (0 = no limit, default: 128)", 128};
+  const command_line::arg_descriptor<bool> arg_no_limit = {"no-limit", "Remove upper size limit entirely. Use with caution. (cannot be used with --size-limit)", false};
 }
 
 // Helper: join a directory path with a file name
@@ -52,6 +54,8 @@ int main(int argc, char *argv[])
   command_line::add_arg(desc, arg_new_data_dir);
   command_line::add_arg(desc, arg_testnet);
   command_line::add_arg(desc, arg_batch_size);
+  command_line::add_arg(desc, arg_size_limit);
+  command_line::add_arg(desc, arg_no_limit);
 
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -61,6 +65,17 @@ int main(int argc, char *argv[])
   std::string newDir = command_line::get_arg(vm, arg_new_data_dir);
   bool testnet = command_line::get_arg(vm, arg_testnet);
   size_t batchSize = command_line::get_arg(vm, arg_batch_size);
+  uint64_t sizeLimitGB = command_line::get_arg(vm, arg_size_limit);
+  bool noLimit = command_line::get_arg(vm, arg_no_limit);
+
+  if (sizeLimitGB != 256 && noLimit)
+  {
+    std::cerr << "Error: --size-limit and --no-limit cannot be used together" << std::endl;
+    return 1;
+  }
+
+  if (noLimit)
+    sizeLimitGB = 0;
 
   // Validate arguments
   if (oldDir.empty() || newDir.empty())
@@ -140,9 +155,13 @@ int main(int argc, char *argv[])
   // which gives ~3x faster writes during this one-time migration.
   // This is safe because we write each block exactly once and never overwrite.
   std::cout << "Initializing MDBX storage backend..." << std::endl;
+
+  // Convert user input
+  uint64_t sizeLimitBytes = sizeLimitGB > 0 ? (sizeLimitGB << 30) : 0;
+
   std::string mdbxPath = appendPath(newDir, "mdbx_blocks");
 
-  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, true);
+  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, true, sizeLimitBytes);
 
   // In-memory index structures built during migration.
   // These will be serialized to the MDBX meta database at the end
