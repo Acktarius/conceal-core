@@ -3521,28 +3521,37 @@ namespace cn
     m_upgradeDetectorV8.blockPushed();
     update_next_comulative_size_limit();
 
-    // Auto-generate checkpoints
-    const uint32_t blockHeight = block.height;
+    // Auto-generate checkpoints for any milestone heights that have
+    // now fallen outside the verification buffer
     const uint32_t networkHeight = static_cast<uint32_t>(blocksSize());
 
-    if ((blockHeight > 0) && (blockHeight % cn::CHECKPOINT_INTERVAL == 0) &&
-        (blockHeight <= networkHeight - cn::CHECKPOINT_VERIFICATION_BUFFER))
+    if (networkHeight > cn::CHECKPOINT_VERIFICATION_BUFFER)
     {
-      // Persist to MDBX if the backend is active
-#ifdef HAVE_MDBX
-      if (m_useMdbx && m_mdbxStorage)
+      const uint32_t maxCheckpointHeight = networkHeight - cn::CHECKPOINT_VERIFICATION_BUFFER;
+      const uint32_t lastCheckpoint = m_checkpoints.getMaxHeight();
+
+      // Find the next milestone at or after the last checkpoint we have
+      uint32_t nextMilestone = ((lastCheckpoint / cn::CHECKPOINT_INTERVAL) + 1) * cn::CHECKPOINT_INTERVAL;
+
+      while (nextMilestone <= maxCheckpointHeight)
       {
-        m_mdbxStorage->storeCheckpoint(blockHeight, blockHash);
-      }
+        crypto::Hash milestoneHash = getBlockIdByHeight(nextMilestone);
+
+#ifdef HAVE_MDBX
+        if (m_useMdbx && m_mdbxStorage)
+        {
+          m_mdbxStorage->storeCheckpoint(nextMilestone, milestoneHash);
+        }
 #endif
 
-      // Always register in the in-memory checkpoint map so this node
-      // benefits from fast-sync for this range on the next restart
-      m_checkpoints.add_checkpoint(blockHeight, common::podToHex(blockHash));
+        m_checkpoints.add_checkpoint(nextMilestone, common::podToHex(milestoneHash));
 
-      logger(INFO, BRIGHT_GREEN) << "Auto-generated checkpoint at height " << blockHeight
-                                 << " (buffer: " << (networkHeight - blockHeight)
-                                 << " blocks behind tip)";
+        logger(INFO, BRIGHT_GREEN) << "Auto-generated checkpoint at height " << nextMilestone
+                                   << " (buffer: " << (networkHeight - nextMilestone)
+                                   << " blocks behind tip)";
+
+        nextMilestone += cn::CHECKPOINT_INTERVAL;
+      }
     }
 
     return true;
