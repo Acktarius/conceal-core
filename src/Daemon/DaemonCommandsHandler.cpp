@@ -303,19 +303,9 @@ bool DaemonCommandsHandler::rollback_chain(const std::vector<std::string> &args)
 
   const std::string &arg = args.front();
   uint32_t height = boost::lexical_cast<uint32_t>(arg);
-  rollbackchainto(height);
-
-  logger(logging::DEBUGGING) << "Finished: rollback_chain";
-  return true;
-}
-
-bool DaemonCommandsHandler::rollbackchainto(uint32_t height)
-{
-  logger(logging::DEBUGGING) << "Attempting: rollbackchainto";
-
   m_core.rollback_chain_to(height);
 
-  logger(logging::DEBUGGING) << "Finished: rollbackchainto";
+  logger(logging::DEBUGGING) << "Finished: rollback_chain";
   return true;
 }
 

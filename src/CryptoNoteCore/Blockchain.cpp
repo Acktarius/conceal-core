@@ -854,6 +854,7 @@ namespace cn
 
           uint32_t topHeight = 0;
           bool loadedFast = false;
+          bool fastIndexesLoaded = false;
 
           std::vector<uint8_t> metaBuf;
 
@@ -923,6 +924,9 @@ namespace cn
 
           if (loadedFast)
           {
+            bool outputsLoaded = false;
+            bool msigLoaded = false;
+
             if (m_mdbxStorage->getMeta("idx_outputs", metaBuf))
             {
               const uint8_t *ptr = metaBuf.data();
@@ -950,6 +954,7 @@ namespace cn
                 }
                 m_outputs[amount] = std::move(vec);
               }
+              outputsLoaded = !m_outputs.empty();
             }
 
             if (m_mdbxStorage->getMeta("idx_msig", metaBuf))
@@ -979,12 +984,14 @@ namespace cn
                 }
                 m_multisignatureOutputs[amount] = std::move(vec);
               }
+              msigLoaded = !m_multisignatureOutputs.empty();
             }
+
+            fastIndexesLoaded = outputsLoaded && msigLoaded && !m_spent_keys.empty() && !m_transactionMap.empty();
 
             m_depositIndex = DepositIndex();
             for (uint32_t h = 0; h <= topHeight; ++h)
             {
-              // faster reads can be spread to 50k blocks, slower at 10k
               if (h % 10000 == 0)
                 logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
 
@@ -994,6 +1001,42 @@ namespace cn
                 BlockEntry entry;
                 if (cn::fromBinaryArray(entry, ba))
                 {
+                  if (!fastIndexesLoaded)
+                  {
+                    crypto::Hash blockHash = get_block_hash(entry.bl);
+
+                    for (uint32_t t = 0; t < entry.transactions.size(); ++t)
+                    {
+                      crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
+                      TransactionIndex txIdx = {h, static_cast<uint16_t>(t)};
+                      m_transactionMap.insert(std::make_pair(txHash, txIdx));
+
+                      for (auto &input : entry.transactions[t].tx.inputs)
+                      {
+                        if (input.type() == typeid(KeyInput))
+                          m_spent_keys.insert(std::make_pair(
+                              boost::get<KeyInput>(input).keyImage, h));
+                        else if (input.type() == typeid(MultisignatureInput))
+                        {
+                          const auto &msInput = boost::get<MultisignatureInput>(input);
+                          m_multisignatureOutputs[msInput.amount][msInput.outputIndex].isUsed = true;
+                        }
+                      }
+
+                      for (uint32_t o = 0; o < entry.transactions[t].tx.outputs.size(); ++o)
+                      {
+                        const auto &out = entry.transactions[t].tx.outputs[o];
+                        if (out.target.type() == typeid(KeyOutput))
+                          m_outputs[out.amount].push_back(std::make_pair<>(txIdx, o));
+                        else if (out.target.type() == typeid(MultisignatureOutput))
+                        {
+                          MultisignatureOutputUsage usage = {txIdx, static_cast<uint16_t>(o), false};
+                          m_multisignatureOutputs[out.amount].push_back(usage);
+                        }
+                      }
+                    }
+                  }
+
                   uint64_t interest = 0;
                   for (const auto &tx : entry.transactions)
                     interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);

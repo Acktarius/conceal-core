@@ -498,9 +498,9 @@ int CryptoNoteProtocolHandler::handle_response_get_objects(int command, NOTIFY_R
   }
 
   if (context.m_requested_objects.size()) {
-    logger(logging::ERROR, logging::BRIGHT_RED) << context <<
-      "returned not all requested objects (context.m_requested_objects.size()="
-      << context.m_requested_objects.size() << "), dropping connection";
+    logger(INFO) << context << "disconnected during sync (received "
+                 << context.m_requested_objects.size() << " of requested objects), switching to another peer";
+
     context.m_state = CryptoNoteConnectionContext::state_shutdown;
     return 1;
   }
