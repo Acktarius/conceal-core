@@ -3384,32 +3384,26 @@ namespace cn
 
     bvc.m_added_to_main_chain = true;
 
-    // Check if we've reached a chunk boundary and need to create a new chunk hash
-    // This happens every chunk_size blocks (10,000 for mainnet, 25,000 for testnet)
-    // SIMPLIFIED: Block 0 (genesis) is excluded from chunks, all chunks are uniform
+    // Check if we've reached a chunk boundary and need to create or verify a chunk hash.
+    // This happens every chunk_size blocks (10,000 for mainnet, 25,000 for testnet).
+    // Block 0 (genesis) is excluded from chunks, all chunks are uniform.
     uint32_t current_height = block.height;
     uint32_t chunk_size = m_checkpoints.get_chunk_size();
-    uint32_t current_covered_height = m_checkpoints.get_covered_height();
-    
-    // Skip block 0 (genesis) - it's validated separately and not part of any chunk
-    if (current_height > 0 && current_height > current_covered_height)
+
+    if (current_height > 0 && current_height % chunk_size == 0)
     {
-      // SIMPLIFIED: Calculate which chunk this height belongs to
-      // All chunks are uniform: chunk_size blocks each
-      // chunk[0]: blocks 1 to chunk_size
-      // chunk[1]: blocks (chunk_size + 1) to (2 * chunk_size)
-      // chunk[n]: blocks (n * chunk_size + 1) to ((n + 1) * chunk_size)
       uint32_t chunk_index = (current_height - 1) / chunk_size;
       uint32_t chunk_start_height = chunk_index * chunk_size + 1;
-      uint32_t chunk_end_height = (chunk_index + 1) * chunk_size;
-      
-      // If we've reached the end of a chunk, create the chunk hash
-      // Only create if we haven't already created this chunk
-      if (current_height == chunk_end_height && current_height > current_covered_height)
+      uint32_t chunk_end_height = (chunk_index + 1) * chunk_size; // == current_height
+
+      // Enter if this chunk hasn't been locally computed yet, OR if it was prefetched
+      // and needs local verification.  A prefetched chunk raises get_covered_height() to
+      // include this boundary, so we can't use that as the sole guard.
+      bool chunk_is_prefetched = m_checkpoints.is_chunk_prefetched(chunk_index);
+      uint32_t current_covered_height = m_checkpoints.get_covered_height();
+      if (current_height > current_covered_height || chunk_is_prefetched)
       {
-        // Check if chunk already exists (might have been created during initial generation
-        // or as a prefetched placeholder).  A prefetched chunk must be verified here.
-        bool chunk_is_prefetched = m_checkpoints.is_chunk_prefetched(chunk_index);
+        // chunk_is_prefetched already evaluated above.
         crypto::Hash existing_chunk_hash = m_checkpoints.get_chunk_hash(chunk_index);
 
         if (existing_chunk_hash == NULL_HASH || chunk_is_prefetched)
@@ -3423,25 +3417,14 @@ namespace cn
             return m_blockIndex.getBlockIds(startHeight, maxCount);
           };
 
-          bool prefetch_mismatch = false;
-          if (!m_checkpoints.add_chunk_from_block_ids(getBlockIdsFunc, chunk_start_height, &prefetch_mismatch))
+          // On a prefetch mismatch add_chunk_from_block_ids returns true (chunk is stored
+          // as unverified so validate_unverified_chunks() can run M-of-K consensus and
+          // trigger a rollback if the network confirms divergence).  The mismatch is
+          // already logged in red inside add_chunk_from_block_ids itself.
+          if (!m_checkpoints.add_chunk_from_block_ids(getBlockIdsFunc, chunk_start_height))
           {
-            if (prefetch_mismatch)
-            {
-              // Local chain diverges from the prefetched network consensus hash.
-              // The chunk has been re-queued as unverified; validate_unverified_chunks()
-              // will run M-of-K consensus and trigger a rollback if the network confirms
-              // the divergence.
-              logger(ERROR, BRIGHT_RED)
-                << "Chunk " << chunk_index << " PREFETCH MISMATCH at height " << current_height
-                << "! Local hash differs from prefetched network consensus. "
-                << "Consensus validation will trigger rollback if network confirms divergence.";
-            }
-            else
-            {
-              logger(WARNING, BRIGHT_YELLOW) << "Failed to compute chunk " << chunk_index
-                                             << " hash at height " << current_height;
-            }
+            logger(WARNING, BRIGHT_YELLOW) << "Failed to compute chunk " << chunk_index
+                                           << " hash at height " << current_height;
           }
         }
         else
