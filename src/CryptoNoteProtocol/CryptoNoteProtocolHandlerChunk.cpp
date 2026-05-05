@@ -147,11 +147,17 @@ bool ChunkValidationManager::is_chunk_being_validated(uint32_t chunk_index) cons
 
 bool ChunkValidationManager::validate_unverified_chunks()
 {
-  // Check if we have unverified chunks first (fast check)
+  // Check if we have unverified chunks first (fast check).
+  // Exclude prefetched chunks: they are auto-confirmed by local computation when
+  // add_chunk_from_block_ids() fires at the chunk boundary — no peer round needed.
   std::vector<uint32_t> unverified_chunks = m_core.getCheckpointList().get_unverified_chunks();
+  unverified_chunks.erase(
+    std::remove_if(unverified_chunks.begin(), unverified_chunks.end(),
+      [this](uint32_t idx) { return m_core.getCheckpointList().is_chunk_prefetched(idx); }),
+    unverified_chunks.end());
   if (unverified_chunks.empty())
   {
-    return false; // No unverified chunks - nothing to validate
+    return false;
   }
   
   // We need at least some peers to validate (but don't require full synchronization)
@@ -575,7 +581,15 @@ void ChunkValidationManager::check_pending_chunk_validations()
         cleanup_chunk_responses(chunk_index, peers_to_cleanup);
 
         // Store the prefetched hash (extends checkpoint zone immediately)
-        if (!m_core.getCheckpointList().add_prefetched_chunk(chunk_index, prefetch_hash))
+        if (m_core.getCheckpointList().add_prefetched_chunk(chunk_index, prefetch_hash))
+        {
+          uint32_t verify_at = (chunk_index + 1) * m_core.getCheckpointList().get_chunk_size();
+          logger(INFO, BRIGHT_CYAN)
+            << "[Chunk Prefetch] Chunk " << chunk_index << " stored."
+            << " Local chain will verify it at block " << verify_at
+            << " — blockchain will rollback if it disagrees.";
+        }
+        else
         {
           logger(WARNING) << "[Chunk Prefetch] add_prefetched_chunk(" << chunk_index << ") failed "
                           << "(chunk may already be locally computed — this is fine)";

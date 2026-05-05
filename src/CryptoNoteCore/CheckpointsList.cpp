@@ -656,7 +656,7 @@ namespace cn {
         m_chunks[chunk_index] = local_hash;
         logger(INFO) << "Computed chunk " << chunk_index
                      << " hash (blocks " << chunk_start_height << "-" << chunk_end_height << ")"
-                     << " - stored in memory (pending peer consensus)";
+                     << " - stored in memory";
       }
     } // m_chunks_lock released
 
