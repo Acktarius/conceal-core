@@ -208,11 +208,39 @@ namespace cn
       for (const auto &bl_id : block_ids)
       {
         uint32_t height = 0;
-        if (!m_blockIndex.getBlockHeight(bl_id, height))
+
+#ifdef HAVE_MDBX
+        if (m_useMdbx)
         {
-          missed_bs.push_back(bl_id);
+          auto it = m_hashToHeight.find(bl_id);
+          if (it == m_hashToHeight.end())
+          {
+            missed_bs.push_back(bl_id);
+            continue;
+          }
+          height = it->second;
         }
         else
+#endif
+            if (!m_blockIndex.getBlockHeight(bl_id, height))
+        {
+          missed_bs.push_back(bl_id);
+          continue;
+        }
+
+#ifdef HAVE_MDBX
+        if (m_useMdbx)
+        {
+          if (!(height < blocksSize()))
+          {
+            logger(logging::ERROR, logging::BRIGHT_RED) << "Internal error: bl_id=" << common::podToHex(bl_id)
+                                                        << " have index record with offset=" << height << ", bigger then blocksSize()=" << blocksSize();
+            return false;
+          }
+          blocks.push_back(blocksAt(height).bl);
+        }
+        else
+#endif
         {
           if (!(height < m_blocks.size()))
           {
