@@ -1035,6 +1035,14 @@ void CryptoNoteProtocolHandler::updateObservedHeight(uint32_t peerHeight, const 
   {
     logger(TRACE) << "Observed height updated: " << m_observedHeight;
     m_observerManager.notify(&ICryptoNoteProtocolObserver::lastKnownBlockHeightUpdated, m_observedHeight);
+
+    // Kick prefetch immediately when we learn the network is ahead.
+    // This avoids the latency of waiting for the next on_idle timer tick.
+    if (cn::P2P_CURRENT_VERSION >= cn::P2P_CHECKPOINT_LIST_VERSION)
+    {
+      uint32_t net_tip = (m_observedHeight > 0) ? (m_observedHeight - 1) : 0;
+      m_chunkValidationManager->prefetch_missing_chunks(net_tip);
+    }
   }
 }
 

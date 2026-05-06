@@ -799,40 +799,28 @@ void ChunkValidationManager::check_pending_chunk_validations()
 
 bool ChunkValidationManager::prefetch_missing_chunks(uint32_t network_height)
 {
-  // Derive the actual network tip: peers advertise local_tip + 1, so subtract 1.
-  uint32_t net_tip = (network_height > 0) ? (network_height - 1) : 0;
+  if (network_height == 0 || m_peersCount.load() == 0)
+    return false;
 
-  // Ask CheckpointList for the next chunk index we should prefetch.
-  uint32_t chunk_index = m_core.getCheckpointList().get_next_prefetchable_chunk_index(net_tip);
+  // Find the next chunk we need (first gap the network already has).
+  uint32_t chunk_index = m_core.getCheckpointList().get_next_prefetchable_chunk_index(network_height);
   if (chunk_index == UINT32_MAX)
-    return false; // Nothing to prefetch
+    return false; // nothing to prefetch
 
-  // Don't duplicate an in-flight request.
-  if (is_chunk_being_validated(chunk_index))
+  // Skip if a request for this chunk is already in flight.
+  if (is_chunk_being_validated(chunk_index) || m_core.getCheckpointList().is_chunk_prefetched(chunk_index))
     return false;
 
-  // Already prefetched?
-  if (m_core.getCheckpointList().is_chunk_prefetched(chunk_index))
-    return false;
-
-  // Rate-limit: attempt at most once every 60 seconds.
+  // Rate-limit: at most once every 10 seconds.
   uint64_t time_now = time(nullptr);
   {
     std::lock_guard<std::mutex> lock(m_chunk_validation_mutex);
-    if (time_now - m_last_prefetch_attempt < 60)
+    if (time_now - m_last_prefetch_attempt < 10)
       return false;
     m_last_prefetch_attempt = time_now;
   }
 
-  if (m_peersCount.load() == 0)
-    return false;
-
-  // Collect eligible peers (same rules as validate_unverified_chunks).
-  uint32_t current_height;
-  crypto::Hash top_id;
-  m_core.get_blockchain_top(current_height, top_id);
-  uint32_t block_time       = m_currency.difficultyTarget();
-  uint32_t min_uptime_blocks = m_core.getCheckpointList().get_min_peer_uptime_blocks();
+  uint32_t chunk_end_height = (chunk_index + 1) * m_core.getCheckpointList().get_chunk_size();
 
   std::vector<uint64_t> eligible_peers;
   std::map<uint64_t, uint32_t> peer_network_16;
@@ -842,10 +830,7 @@ bool ChunkValidationManager::prefetch_missing_chunks(uint32_t network_height)
     if (ctx.m_state != CryptoNoteConnectionContext::state_normal
         && ctx.m_state != CryptoNoteConnectionContext::state_idle
         && ctx.m_state != CryptoNoteConnectionContext::state_synchronizing) return;
-    time_t duration = time_now - ctx.m_started;
-    if (duration < 0) return;
-    uint32_t uptime_blocks = static_cast<uint32_t>(duration / block_time);
-    if (uptime_blocks < min_uptime_blocks) return;
+    if (ctx.m_remote_blockchain_height < chunk_end_height) return;
     eligible_peers.push_back(peer_id);
     peer_network_16[peer_id] = CheckpointList::get_network_16(ctx.m_remote_ip);
   });
@@ -889,7 +874,6 @@ bool ChunkValidationManager::prefetch_missing_chunks(uint32_t network_height)
     return false;
   }
 
-  // Send async requests.
   std::vector<uint64_t> sent_peers;
   std::map<uint64_t, uint32_t> sent_networks;
   for (uint64_t pid : sampling.sampled_peers)
@@ -919,7 +903,7 @@ bool ChunkValidationManager::prefetch_missing_chunks(uint32_t network_height)
     pending.attempt_number     = 1;
     pending.requested_peers    = sent_peers;
     pending.peer_network_16    = sent_networks;
-    pending.local_hash         = NULL_HASH; // no local hash yet
+    pending.local_hash         = NULL_HASH;
     pending.is_first_attempt   = true;
     pending.is_prefetch        = true;
     m_pending_validations[chunk_index] = pending;
@@ -928,7 +912,7 @@ bool ChunkValidationManager::prefetch_missing_chunks(uint32_t network_height)
   logger(INFO, BRIGHT_CYAN)
     << "[Chunk Prefetch] Requested chunk " << chunk_index
     << " from " << sent_peers.size() << " peers across " << distinct_networks
-    << " networks. Will check consensus in 60 seconds.";
+    << " networks. Consensus check in 60 seconds.";
 
   return true;
 }
