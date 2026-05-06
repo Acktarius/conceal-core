@@ -30,6 +30,10 @@
 #include "Rpc/RpcServerConfig.h"
 #include "version.h"
 
+#ifdef HAVE_MDBX
+#include "Storage/MDBXBlockchainStorage.h"
+#endif
+
 #include "Logging/ConsoleLogger.h"
 #include <Logging/LoggerManager.h>
 
@@ -46,54 +50,222 @@ namespace po = boost::program_options;
 namespace
 {
   const command_line::arg_descriptor<std::string> arg_config_file = {"config-file", "Specify configuration file", "conceal.conf"};
-  const command_line::arg_descriptor<bool>        arg_os_version  = {"os-version", ""};
-  const command_line::arg_descriptor<std::string> arg_log_file    = {"log-file", "", ""};
-  const command_line::arg_descriptor<std::string> arg_set_fee_address = { "fee-address", "Set a fee address for remote nodes", "" };
-  const command_line::arg_descriptor<std::string> arg_set_view_key = { "view-key", "Set secret view-key for remote node fee confirmation", "" };
-  const command_line::arg_descriptor<int>         arg_log_level   = {"log-level", "", 2};
-  const command_line::arg_descriptor<bool>        arg_console     = {"no-console", "Disable daemon console commands"};
-  const command_line::arg_descriptor<bool>        arg_print_genesis_tx = { "print-genesis-tx", "Prints genesis' block tx hex to insert it to config and exits" };
-  const command_line::arg_descriptor<bool>        arg_use_mdbx = {"use-mdbx", "Use MDBX database backend for faster sync", false};
+  const command_line::arg_descriptor<bool> arg_os_version = {"os-version", ""};
+  const command_line::arg_descriptor<std::string> arg_log_file = {"log-file", "", ""};
+  const command_line::arg_descriptor<std::string> arg_set_fee_address = {"fee-address", "Set a fee address for remote nodes", ""};
+  const command_line::arg_descriptor<std::string> arg_set_view_key = {"view-key", "Set secret view-key for remote node fee confirmation", ""};
+  const command_line::arg_descriptor<int> arg_log_level = {"log-level", "", 2};
+  const command_line::arg_descriptor<bool> arg_console = {"no-console", "Disable daemon console commands"};
+  const command_line::arg_descriptor<bool> arg_print_genesis_tx = {"print-genesis-tx", "Prints genesis' block tx hex to insert it to config and exits"};
+  const command_line::arg_descriptor<bool> arg_use_mdbx = {"use-mdbx", "Use MDBX database backend for faster sync", false};
+  const command_line::arg_descriptor<bool> arg_export_snapshot = {"export-snapshot", "Export blockchain headers snapshot to file", ""};
+  const command_line::arg_descriptor<std::string> arg_import_snapshot = {"import-snapshot", "Import blockchain headers snapshot from file", ""};
 }
 
-void print_genesis_tx_hex() {
+void print_genesis_tx_hex()
+{
   logging::ConsoleLogger logger;
   cn::Transaction tx = cn::CurrencyBuilder(logger).generateGenesisTransaction();
   cn::BinaryArray txb = cn::toBinaryArray(tx);
   std::string tx_hex = common::toHex(txb);
 
-  /**
-   * Someone who knows what to do with this will find it helpful,
-   * if not, it't not our job to teach.
-  **/
   std::cout << "Random genesis hex: " << tx_hex << std::endl;
   return;
 }
 
-JsonValue buildLoggerConfiguration(Level level, const std::string& logfile) {
+JsonValue buildLoggerConfiguration(Level level, const std::string &logfile)
+{
   JsonValue loggerConfiguration(JsonValue::OBJECT);
   loggerConfiguration.insert("globalLevel", static_cast<int64_t>(level));
 
-  JsonValue& cfgLoggers = loggerConfiguration.insert("loggers", JsonValue::ARRAY);
+  JsonValue &cfgLoggers = loggerConfiguration.insert("loggers", JsonValue::ARRAY);
 
-  JsonValue& fileLogger = cfgLoggers.pushBack(JsonValue::OBJECT);
+  JsonValue &fileLogger = cfgLoggers.pushBack(JsonValue::OBJECT);
   fileLogger.insert("type", "file");
   fileLogger.insert("filename", logfile);
   fileLogger.insert("level", static_cast<int64_t>(TRACE));
 
-  JsonValue& consoleLogger = cfgLoggers.pushBack(JsonValue::OBJECT);
+  JsonValue &consoleLogger = cfgLoggers.pushBack(JsonValue::OBJECT);
   consoleLogger.insert("type", "console");
   consoleLogger.insert("level", static_cast<int64_t>(TRACE));
   consoleLogger.insert("pattern", "%T %L ");
 
   return loggerConfiguration;
 }
+#ifdef HAVE_MDBX
+bool exportSnapshot(const std::string &dataDir, const std::string &outputFile, logging::LoggerRef &logger)
+{
+  logger(INFO) << "Exporting blockchain snapshot to " << outputFile;
 
-int main(int argc, char* argv[])
+  std::string dbPath = dataDir;
+  if (!dbPath.empty() && dbPath.back() != '/')
+    dbPath += '/';
+  dbPath += "mdbx_blocks";
+
+  CryptoNote::MDBXBlockchainStorage storage(dbPath, 0);
+  uint32_t topHeight = storage.topBlockHeight();
+
+  if (topHeight == 0)
+  {
+    logger(ERROR) << "Blockchain is empty, nothing to export";
+    return false;
+  }
+
+  logger(INFO) << "Blockchain height: " << topHeight;
+
+  std::ofstream file(outputFile, std::ios::binary);
+  if (!file)
+  {
+    logger(ERROR) << "Failed to open output file: " << outputFile;
+    return false;
+  }
+
+  const uint32_t magic = 0x43434E58;
+  const uint32_t version = 1;
+  file.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
+  file.write(reinterpret_cast<const char *>(&version), sizeof(version));
+  file.write(reinterpret_cast<const char *>(&topHeight), sizeof(topHeight));
+
+  for (uint32_t h = 1; h <= topHeight; ++h)
+  {
+    if (h % 100000 == 0)
+      logger(INFO) << "Exporting block " << h << "/" << topHeight;
+
+    cn::BlockHeaderPOD hdr;
+    if (!storage.getBlockHeader(h, hdr))
+    {
+      logger(WARNING) << "No POD header for block " << h << ", skipping";
+      continue;
+    }
+
+    crypto::Hash blockHash = storage.getBlockHash(h);
+    file.write(reinterpret_cast<const char *>(&hdr), sizeof(cn::BlockHeaderPOD));
+    file.write(reinterpret_cast<const char *>(blockHash.data), sizeof(crypto::Hash));
+  }
+
+  auto checkpoints = storage.getCheckpoints();
+  uint32_t checkpointCount = static_cast<uint32_t>(checkpoints.size());
+  file.write(reinterpret_cast<const char *>(&checkpointCount), sizeof(checkpointCount));
+  for (size_t i = 0; i < checkpoints.size(); ++i)
+  {
+    uint32_t height = checkpoints[i].first;
+    crypto::Hash hash = checkpoints[i].second;
+    file.write(reinterpret_cast<const char *>(&height), sizeof(height));
+    file.write(reinterpret_cast<const char *>(hash.data), sizeof(crypto::Hash));
+  }
+
+  file.close();
+
+  uint64_t fileSize = topHeight * (sizeof(cn::BlockHeaderPOD) + sizeof(crypto::Hash));
+  logger(INFO, BRIGHT_GREEN) << "Snapshot exported: " << outputFile
+                             << " (" << (fileSize / 1024 / 1024) << " MB approx, " << checkpointCount << " checkpoints)";
+
+  return true;
+}
+
+bool importSnapshot(const std::string &dataDir, const std::string &inputFile, logging::LoggerRef &logger)
+{
+  logger(INFO) << "Importing blockchain snapshot from " << inputFile;
+
+  std::ifstream file(inputFile, std::ios::binary);
+  if (!file)
+  {
+    logger(ERROR) << "Failed to open input file: " << inputFile;
+    return false;
+  }
+
+  uint32_t magic, version, topHeight;
+  file.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+  file.read(reinterpret_cast<char *>(&version), sizeof(version));
+  file.read(reinterpret_cast<char *>(&topHeight), sizeof(topHeight));
+
+  if (magic != 0x43434E58)
+  {
+    logger(ERROR) << "Invalid snapshot file (bad magic)";
+    return false;
+  }
+  if (version != 1)
+  {
+    logger(ERROR) << "Unsupported snapshot version: " << version;
+    return false;
+  }
+
+  logger(INFO) << "Snapshot contains " << topHeight << " blocks";
+
+  if (!tools::directoryExists(dataDir))
+  {
+    if (!tools::create_directories_if_necessary(dataDir))
+    {
+      logger(ERROR) << "Failed to create data directory: " << dataDir;
+      return false;
+    }
+  }
+
+  std::string dbPath = dataDir;
+  if (!dbPath.empty() && dbPath.back() != '/')
+    dbPath += '/';
+  dbPath += "mdbx_blocks";
+
+  boost::system::error_code ec;
+  boost::filesystem::remove_all(dbPath, ec);
+
+  CryptoNote::MDBXBlockchainStorage storage(dbPath, true, 0);
+
+  for (uint32_t h = 1; h <= topHeight; ++h)
+  {
+    if (h % 100000 == 0)
+      logger(INFO) << "Importing block " << h << "/" << topHeight;
+
+    cn::BlockHeaderPOD hdr;
+    crypto::Hash blockHash;
+
+    file.read(reinterpret_cast<char *>(&hdr), sizeof(cn::BlockHeaderPOD));
+    file.read(reinterpret_cast<char *>(blockHash.data), sizeof(crypto::Hash));
+
+    if (!file)
+    {
+      logger(ERROR) << "Failed to read block at height " << h << " from snapshot";
+      return false;
+    }
+
+    storage.pushBlockHeader(h, hdr);
+    storage.addBlock(cn::Block(), blockHash, h);
+  }
+
+  storage.setTopBlockHeight(topHeight);
+
+  uint32_t checkpointCount;
+  file.read(reinterpret_cast<char *>(&checkpointCount), sizeof(checkpointCount));
+
+  for (uint32_t i = 0; i < checkpointCount; ++i)
+  {
+    uint32_t height;
+    crypto::Hash hash;
+    file.read(reinterpret_cast<char *>(&height), sizeof(height));
+    file.read(reinterpret_cast<char *>(hash.data), sizeof(crypto::Hash));
+    storage.storeCheckpoint(height, hash);
+  }
+
+  storage.setInitialized();
+  storage.flush();
+  storage.close();
+  file.close();
+
+  logger(INFO, BRIGHT_GREEN) << "Snapshot imported successfully!";
+  logger(INFO) << "  Blocks: " << topHeight;
+  logger(INFO) << "  Checkpoints: " << checkpointCount;
+  logger(INFO) << "  Database created at: " << dbPath;
+  logger(INFO) << "  Start daemon normally to begin syncing remaining blocks.";
+
+  return true;
+}
+#endif
+
+int main(int argc, char *argv[])
 {
 
 #ifdef _WIN32
-  _CrtSetDbgFlag ( _CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF );
+  _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
   LoggerManager logManager;
@@ -120,6 +292,8 @@ int main(int argc, char* argv[])
     command_line::add_arg(desc_cmd_sett, command_line::arg_testnet_on);
     command_line::add_arg(desc_cmd_sett, arg_use_mdbx);
     command_line::add_arg(desc_cmd_sett, arg_print_genesis_tx);
+    command_line::add_arg(desc_cmd_sett, arg_export_snapshot);
+    command_line::add_arg(desc_cmd_sett, arg_import_snapshot);
 
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
@@ -130,16 +304,15 @@ int main(int argc, char* argv[])
 
     po::variables_map vm;
     CoreConfig coreConfig;
-    bool r = command_line::handle_error_helper(desc_options, [&]() {
+    bool r = command_line::handle_error_helper(desc_options, [&]()
+                                               {
       po::store(po::parse_command_line(argc, argv, desc_options), vm);
       coreConfig.init(vm);
       coreConfig.useMdbx = command_line::get_arg(vm, arg_use_mdbx);
 
-      // logger is not configured yet, std::cout is fine here
       if (command_line::get_arg(vm, command_line::arg_help))
       {
-        std::cout << CCX_RELEASE_VERSION << std::endl
-                  << std::endl;
+        std::cout << CCX_RELEASE_VERSION << std::endl << std::endl;
         std::cout << desc_options;
         return false;
       }
@@ -176,8 +349,7 @@ int main(int argc, char* argv[])
       }
 
       po::notify(vm);
-      return true;
-    });
+      return true; });
 
     if (!r)
     {
@@ -198,13 +370,22 @@ int main(int argc, char* argv[])
     }
 
     auto cfgLogLevel = static_cast<Level>(static_cast<int>(logging::ERROR) + command_line::get_arg(vm, arg_log_level));
-
-    // configure logging
     logManager.configure(buildLoggerConfiguration(cfgLogLevel, cfgLogFile));
 
     logger(INFO, BRIGHT_YELLOW) << CCX_RELEASE_VERSION;
-
     logger(INFO) << "Module folder: " << argv[0];
+
+#ifdef HAVE_MDBX
+    if (command_line::get_arg(vm, arg_export_snapshot))
+    {
+      std::string dataDir = command_line::get_arg(vm, command_line::arg_data_dir);
+      boost::filesystem::path snapPath = boost::filesystem::current_path();
+      snapPath /= "conceal-snapshot.dat";
+      std::string exportFile = snapPath.string();
+      bool ok = exportSnapshot(dataDir, exportFile, logger);
+      return ok ? 0 : 1;
+    }
+#endif
 
     logger(INFO) << "Blockchain and configuration folder: " << coreConfig.configFolder;
     if (coreConfig.testnet)
@@ -212,7 +393,7 @@ int main(int argc, char* argv[])
       logger(INFO, MAGENTA) << "/!\\ Starting in testnet mode /!\\";
     }
 
-    //create objects and link them
+    // create objects and link them
     cn::CurrencyBuilder currencyBuilder(logManager);
     currencyBuilder.testnet(coreConfig.testnet);
 
@@ -220,7 +401,7 @@ int main(int argc, char* argv[])
     {
       currencyBuilder.currency();
     }
-    catch (const std::exception&)
+    catch (const std::exception &)
     {
       logger(ERROR) << "Incorrect genesis hash! Please do not change the genesis hash: " << cn::GENESIS_COINBASE_TX_HEX;
       return 1;
@@ -294,53 +475,42 @@ int main(int argc, char* argv[])
       dch.start_handling();
 
     logger(INFO) << "Starting core rpc server on address " << rpcConfig.getBindAddress();
-  
-    /**
-     * Set address for remote node fee.
-    **/
-  	if (command_line::has_arg(vm, arg_set_fee_address))
+
+    if (command_line::has_arg(vm, arg_set_fee_address))
     {
-	    std::string addr_str = command_line::get_arg(vm, arg_set_fee_address);
-      
+      std::string addr_str = command_line::get_arg(vm, arg_set_fee_address);
+
       if (!addr_str.empty())
       {
         AccountPublicAddress acc = boost::value_initialized<AccountPublicAddress>();
-
         if (!currency.parseAccountAddressString(addr_str, acc))
         {
           logger(ERROR, BRIGHT_RED) << "Bad fee address: " << addr_str;
           return 1;
         }
-
         rpcServer.setFeeAddress(addr_str, acc);
         logger(INFO, BRIGHT_YELLOW) << "Remote node fee address set: " << addr_str;
       }
-	  }
-  
-    /**
-     * This sets the view-key so we can confirm that the fee 
-     * is part of the transaction blob.
-     **/       
+    }
+
     if (command_line::has_arg(vm, arg_set_view_key))
     {
       std::string vk_str = command_line::get_arg(vm, arg_set_view_key);
-
-	    if (!vk_str.empty())
+      if (!vk_str.empty())
       {
         rpcServer.setViewKey(vk_str);
         logger(INFO, BRIGHT_YELLOW) << "Secret view key set: " << vk_str;
       }
     }
- 
+
     rpcServer.start(rpcConfig.bindIp, rpcConfig.bindPort);
     rpcServer.enableCors(rpcConfig.enableCors);
     logger(INFO) << "Core rpc server started ok";
 
     tools::SignalHandler::install([&dch, &p2psrv]
-    {
+                                  {
       dch.stop_handling();
-      p2psrv.sendStopSignal();
-    });
+      p2psrv.sendStopSignal(); });
 
     logger(INFO) << "Starting p2p net loop...";
     p2psrv.run();
@@ -348,11 +518,9 @@ int main(int argc, char* argv[])
 
     dch.stop_handling();
 
-    //stop components
     logger(INFO) << "Stopping core rpc server...";
     rpcServer.stop();
 
-    //deinitialize components
     logger(INFO) << "Deinitializing core...";
     ccore.deinit();
     logger(INFO) << "Deinitializing p2p...";
@@ -361,7 +529,7 @@ int main(int argc, char* argv[])
     ccore.set_cryptonote_protocol(nullptr);
     cprotocol.set_p2p_endpoint(nullptr);
   }
-  catch (const std::exception& e)
+  catch (const std::exception &e)
   {
     logger(ERROR, BRIGHT_RED) << "Exception: " << e.what();
     return 1;

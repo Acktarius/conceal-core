@@ -65,4 +65,8 @@ private:
 
   bool start_mining(const std::vector<std::string>& args);
   bool stop_mining(const std::vector<std::string>& args);
+
+  #ifdef HAVE_MDBX
+  bool export_snapshot(const std::vector<std::string> &args);
+#endif
 };

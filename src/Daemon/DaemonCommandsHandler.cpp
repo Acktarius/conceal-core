@@ -8,6 +8,7 @@
 
 #include "DaemonCommandsHandler.h"
 
+#include <boost/filesystem.hpp>
 #include "P2p/NetNode.h"
 #include "Common/Util.h"
 #include "CryptoNoteCore/Miner.h"
@@ -16,6 +17,10 @@
 #include "CryptoNoteProtocol/CryptoNoteProtocolHandler.h"
 #include "Serialization/SerializationTools.h"
 #include "version.h"
+
+#ifdef HAVE_MDBX
+#include "Storage/MDBXBlockchainStorage.h"
+#endif
 
 namespace
 {
@@ -47,6 +52,9 @@ DaemonCommandsHandler::DaemonCommandsHandler(cn::core &core, cn::NodeServer &srv
   m_consoleHandler.setHandler("show_hr", boost::bind(&DaemonCommandsHandler::show_hr, this, boost::arg<1>()), "Start showing hash rate");
   m_consoleHandler.setHandler("hide_hr", boost::bind(&DaemonCommandsHandler::hide_hr, this, boost::arg<1>()), "Stop showing hash rate");
   m_consoleHandler.setHandler("set_log", boost::bind(&DaemonCommandsHandler::set_log, this, boost::arg<1>()), "set_log <level> - Change current log level, <level> is a number 0-4");
+#ifdef HAVE_MDBX
+  m_consoleHandler.setHandler("export_snapshot", boost::bind(&DaemonCommandsHandler::export_snapshot, this, boost::arg<1>()), "Export blockchain snapshot to file, export_snapshot <file_path>");
+#endif
 }
 
 const std::string DaemonCommandsHandler::get_commands_str()
@@ -101,7 +109,7 @@ bool DaemonCommandsHandler::save(const std::vector<std::string> &args)
   }
   logger(logging::DEBUGGING) << "Attempting: save";
 
-  if(!m_core.saveBlockchain())
+  if (!m_core.saveBlockchain())
   {
     logger(logging::ERROR) << "Could not save the blockchain data!";
     return false;
@@ -265,7 +273,6 @@ bool DaemonCommandsHandler::set_log(const std::vector<std::string> &args)
   return true;
 }
 
-
 bool DaemonCommandsHandler::print_block_by_height(uint32_t height)
 {
   logger(logging::DEBUGGING) << "Attempting: print_block_by_height";
@@ -284,7 +291,7 @@ bool DaemonCommandsHandler::print_block_by_height(uint32_t height)
     crypto::Hash top_id;
     m_core.get_blockchain_top(current_height, top_id);
     logger(logging::ERROR) << "block wasn't found. Current block chain height: "
-      << current_height << ", requested: " << height;
+                           << current_height << ", requested: " << height;
     return false;
   }
 
@@ -478,7 +485,8 @@ bool DaemonCommandsHandler::print_pool(const std::vector<std::string> &args)
   }
   logger(logging::DEBUGGING) << "Attempting: print_pool";
 
-  logger(logging::INFO) << "Pool state: \n" << m_core.print_pool(false);
+  logger(logging::INFO) << "Pool state: \n"
+                        << m_core.print_pool(false);
 
   logger(logging::DEBUGGING) << "Finished: print_pool";
   return true;
@@ -493,7 +501,8 @@ bool DaemonCommandsHandler::print_pool_sh(const std::vector<std::string> &args)
   }
   logger(logging::DEBUGGING) << "Attempting: print_pool_sh";
 
-  logger(logging::INFO) << "Pool state: \n" << m_core.print_pool(true);
+  logger(logging::INFO) << "Pool state: \n"
+                        << m_core.print_pool(true);
 
   logger(logging::DEBUGGING) << "Finished: print_pool_sh";
   return true;
@@ -542,3 +551,91 @@ bool DaemonCommandsHandler::stop_mining(const std::vector<std::string> &args)
   logger(logging::DEBUGGING) << "Finished: stop_mining";
   return true;
 }
+
+#ifdef HAVE_MDBX
+bool DaemonCommandsHandler::export_snapshot(const std::vector<std::string> &args)
+{
+  logger(logging::INFO) << "Exporting blockchain snapshot...";
+
+  std::string outputFile;
+
+  if (args.empty())
+  {
+    // Auto-generate filename in current directory if no path given
+    boost::filesystem::path snapPath = boost::filesystem::current_path();
+    snapPath /= "conceal-snapshot.dat";
+    outputFile = snapPath.string();
+  }
+  else
+  {
+    outputFile = args.front();
+  }
+
+  std::string dataDir = m_core.get_config_folder();
+
+  std::string dbPath = dataDir;
+  if (!dbPath.empty() && dbPath.back() != '/')
+    dbPath += '/';
+  dbPath += "mdbx_blocks";
+
+  CryptoNote::MDBXBlockchainStorage storage(dbPath, 0);
+  uint32_t topHeight = storage.topBlockHeight();
+
+  if (topHeight == 0)
+  {
+    logger(logging::ERROR) << "Blockchain is empty, nothing to export";
+    return true;
+  }
+
+  logger(logging::INFO) << "Blockchain height: " << topHeight;
+
+  std::ofstream file(outputFile, std::ios::binary);
+  if (!file)
+  {
+    logger(logging::ERROR) << "Failed to open output file: " << outputFile;
+    return true;
+  }
+
+  const uint32_t magic = 0x43434E58;
+  const uint32_t version = 1;
+  file.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
+  file.write(reinterpret_cast<const char *>(&version), sizeof(version));
+  file.write(reinterpret_cast<const char *>(&topHeight), sizeof(topHeight));
+
+  for (uint32_t h = 1; h <= topHeight; ++h)
+  {
+    if (h % 100000 == 0)
+      logger(logging::INFO) << "Exporting block " << h << "/" << topHeight;
+
+    cn::BlockHeaderPOD hdr;
+    if (!storage.getBlockHeader(h, hdr))
+    {
+      logger(logging::WARNING) << "No POD header for block " << h << ", skipping";
+      continue;
+    }
+
+    crypto::Hash blockHash = storage.getBlockHash(h);
+    file.write(reinterpret_cast<const char *>(&hdr), sizeof(cn::BlockHeaderPOD));
+    file.write(reinterpret_cast<const char *>(blockHash.data), sizeof(crypto::Hash));
+  }
+
+  auto checkpoints = storage.getCheckpoints();
+  uint32_t checkpointCount = static_cast<uint32_t>(checkpoints.size());
+  file.write(reinterpret_cast<const char *>(&checkpointCount), sizeof(checkpointCount));
+  for (size_t i = 0; i < checkpoints.size(); ++i)
+  {
+    uint32_t height = checkpoints[i].first;
+    crypto::Hash hash = checkpoints[i].second;
+    file.write(reinterpret_cast<const char *>(&height), sizeof(height));
+    file.write(reinterpret_cast<const char *>(hash.data), sizeof(crypto::Hash));
+  }
+
+  file.close();
+
+  uint64_t fileSize = topHeight * (sizeof(cn::BlockHeaderPOD) + sizeof(crypto::Hash));
+  logger(logging::INFO, logging::BRIGHT_GREEN) << "Snapshot exported: " << outputFile
+                                               << " (" << (fileSize / 1024 / 1024) << " MB approx, " << checkpointCount << " checkpoints)";
+
+  return true;
+}
+#endif

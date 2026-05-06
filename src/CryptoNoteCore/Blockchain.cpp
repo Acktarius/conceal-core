@@ -1271,30 +1271,6 @@ namespace cn
         return false;
       }
 
-      // Load self-generated checkpoints from previous sync sessions.
-      // These are trusted because this node verified every block itself.
-#ifdef HAVE_MDBX
-      if (m_useMdbx && m_mdbxStorage)
-      {
-        auto selfCheckpoints = m_mdbxStorage->getCheckpoints();
-        size_t added = 0;
-        for (const auto &[height, hash] : selfCheckpoints)
-        {
-          if (m_checkpoints.add_checkpoint(height, common::podToHex(hash)))
-          {
-            ++added;
-          }
-        }
-        logger(INFO, BRIGHT_GREEN) << "Loaded " << added
-                                   << " self-generated checkpoints from MDBX";
-      }
-#endif
-
-      logger(INFO, BRIGHT_WHITE) << "Checkpoint zone covers heights 0 to "
-                                 << m_checkpoints.getMaxHeight()
-                                 << " (" << m_checkpoints.get_points().size()
-                                 << " checkpoints total)";
-
       try
       {
         if (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||

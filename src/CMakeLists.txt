@@ -32,7 +32,10 @@ file(GLOB_RECURSE WalletLegacy WalletLegacy/*)
 file(GLOB_RECURSE JsonRpcServer JsonRpcServer/*)
 file(GLOB_RECURSE PaymentGate PaymentGate/*)
 file(GLOB_RECURSE PaymentGateService PaymentGateService/*)
-file(GLOB_RECURSE WALLET_INIT_FILES WalletInit/*)
+file(GLOB_RECURSE BOLTSYNC_FILES BoltSync/*)
+file(GLOB_RECURSE BOLTCORE_FILES BoltCore/*)
+file(GLOB_RECURSE BOLT_TUI_FILES BoltClientWallet/*)
+file(GLOB_RECURSE BOLTRPC_FILES BoltRPC/*)
 
 if(MSVC OR MINGW)
   file(GLOB_RECURSE System System/* Platform/Windows/System/*)
@@ -65,6 +68,8 @@ add_library(Transfers STATIC ${Transfers})
 add_library(Wallet STATIC ${Wallet} ${WalletLegacy})
 add_library(PaymentGate STATIC ${PaymentGate})
 add_library(JsonRpcServer STATIC ${JsonRpcServer})
+add_library(BoltSync STATIC ${BOLTSYNC_FILES})
+add_library(BoltCore STATIC ${BOLTCORE_FILES})
 
 # Storage library (only when MDBX is enabled)
 if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
@@ -79,7 +84,8 @@ add_executable(Daemon ${Daemon})
 add_executable(ConcealWallet ${ConcealWallet})
 add_executable(PaymentGateService ${PaymentGateService})
 add_executable(Optimizer ${Optimizer})
-add_executable(WalletInit ${WALLET_INIT_FILES})
+add_executable(BoltClientWallet ${BOLT_TUI_FILES})
+add_executable(BoltRPC ${BOLTRPC_FILES})
 
 if (MSVC)
   target_link_libraries(System ws2_32)
@@ -96,49 +102,54 @@ target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc Http Crypt
 target_link_libraries(PaymentGateService PaymentGate JsonRpcServer Wallet NodeRpcProxy Transfers CryptoNoteCore Storage crypto P2P Rpc Http System Logging Common InProcessNode libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
 target_link_libraries(Optimizer PaymentGate Rpc Http CryptoNoteCore Storage Logging Serialization crypto System Common ${Boost_LIBRARIES})
 
-# WalletInit - matches ConcealWallet's link libraries exactly
-target_link_libraries(WalletInit
-    Wallet
-    NodeRpcProxy
-    Transfers
+target_link_libraries(BoltSync PUBLIC CryptoNoteCore Storage Common crypto Serialization ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(BoltCore PUBLIC CryptoNoteCore Common crypto ${Boost_LIBRARIES})
+
+target_link_libraries(BoltClientWallet 
+    BoltSync 
+    BoltCore 
+    NodeRpcProxy 
     Rpc
     Http
-    CryptoNoteCore
-    Storage
     System
-    Logging
-    Common
-    crypto
-    ${Boost_LIBRARIES}
+    CryptoNoteCore 
     Serialization
-    Mnemonics
+    -Wl,--start-group
+        Common 
+        Logging 
+        crypto
+    -Wl,--end-group
+    ${Boost_LIBRARIES} 
+    ${CMAKE_THREAD_LIBS_INIT}
 )
 
-if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
-  file(GLOB_RECURSE MIGRATION_TOOL_FILES MigrationTool/*)
-  add_executable(MigrationTool ${MIGRATION_TOOL_FILES})
-  target_link_libraries(MigrationTool
-    CryptoNoteCore
-    Storage
-    P2P
+target_link_libraries(BoltRPC
+    BoltSync
+    BoltCore
+    NodeRpcProxy
     Rpc
-    System
     Http
-    Logging
-    Common
-    crypto
+    System
+    CryptoNoteCore
     Serialization
+    Logging
+    -Wl,--start-group
+        Common
+        crypto
+    -Wl,--end-group
     ${Boost_LIBRARIES}
-  )
-  add_dependencies(MigrationTool version)
-  set_property(TARGET MigrationTool PROPERTY OUTPUT_NAME "conceald-migrate")
-endif()
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+# Tools (ColdSync + MigrationTool)
+add_subdirectory(Tools)
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
   target_link_libraries(ConcealWallet -lresolv)
   target_link_libraries(Daemon -lresolv)
   target_link_libraries(PaymentGateService -lresolv)
-  target_link_libraries(WalletInit -lresolv)
+  target_link_libraries(BoltClientWallet -lresolv)
+  target_link_libraries(BoltRPC -lresolv)
 endif ()
 
 add_dependencies(Rpc version)
@@ -146,10 +157,10 @@ add_dependencies(Daemon version)
 add_dependencies(ConcealWallet version)
 add_dependencies(PaymentGateService version)
 add_dependencies(P2P version)
-add_dependencies(WalletInit version)
+add_dependencies(BoltRPC version)
 
 set_property(TARGET ConcealWallet PROPERTY OUTPUT_NAME "concealwallet")
 set_property(TARGET PaymentGateService PROPERTY OUTPUT_NAME "walletd")
 set_property(TARGET Daemon PROPERTY OUTPUT_NAME "conceald")
 set_property(TARGET Optimizer PROPERTY OUTPUT_NAME "optimizer")
-set_property(TARGET WalletInit PROPERTY OUTPUT_NAME "conceal-wallet-init")
+set_property(TARGET BoltRPC PROPERTY OUTPUT_NAME "conceal-rpc")
