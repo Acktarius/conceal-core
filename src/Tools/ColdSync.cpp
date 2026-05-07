@@ -1,6 +1,3 @@
-// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
-// Distributed under the MIT/X11 software license
-//
 // conceal-wallet-init – CLI wrapper around BoltSync scanner
 // Produces a fully synced encrypted wallet container ready for walletd or GUI.
 

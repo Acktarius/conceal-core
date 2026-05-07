@@ -35,6 +35,7 @@ using namespace cn;
 
 struct Config
 {
+  bool testnet = false;
   std::string viewKeyHex;
   std::string spendKeyHex;
   std::string dataDir;
@@ -50,7 +51,19 @@ struct Config
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("BoltRPC — Conceal RPC Wallet (walletd replacement)");
-  desc.add_options()("help,h", "Show help")("view-key", po::value<std::string>(), "64-char hex private view key (required)")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state");
+  desc.add_options()
+    ("help,h", "Show help")
+    ("view-key", po::value<std::string>(), "64-char hex private view key (required)")
+    ("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")
+    ("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")
+    ("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")
+    ("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")
+    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")
+    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")
+    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")
+    ("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")
+    ("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")
+    ("testnet", po::bool_switch(), "Run sidechain in testnet mode");
 
   po::variables_map vm;
   try
@@ -87,6 +100,7 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.bindIp = vm["bind-ip"].as<std::string>();
   cfg.bindPort = vm["bind-port"].as<uint16_t>();
   cfg.stateFile = vm["state-file"].as<std::string>();
+  cfg.testnet = vm["testnet"].as<bool>();
 
   if (cfg.viewKeyHex.size() != 64)
   {

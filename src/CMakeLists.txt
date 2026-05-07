@@ -36,6 +36,8 @@ file(GLOB_RECURSE BOLTSYNC_FILES BoltSync/*)
 file(GLOB_RECURSE BOLTCORE_FILES BoltCore/*)
 file(GLOB_RECURSE BOLT_TUI_FILES BoltClientWallet/*)
 file(GLOB_RECURSE BOLTRPC_FILES BoltRPC/*)
+file(GLOB_RECURSE SIDECHAIN_FILES Sidechain/*)
+file(GLOB_RECURSE BOLTHTTP_FILES BoltHttp/*)
 
 if(MSVC OR MINGW)
   file(GLOB_RECURSE System System/* Platform/Windows/System/*)
@@ -70,6 +72,7 @@ add_library(PaymentGate STATIC ${PaymentGate})
 add_library(JsonRpcServer STATIC ${JsonRpcServer})
 add_library(BoltSync STATIC ${BOLTSYNC_FILES})
 add_library(BoltCore STATIC ${BOLTCORE_FILES})
+add_library(BoltHttp STATIC ${BOLTHTTP_FILES})
 
 # Storage library (only when MDBX is enabled)
 if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
@@ -86,6 +89,7 @@ add_executable(PaymentGateService ${PaymentGateService})
 add_executable(Optimizer ${Optimizer})
 add_executable(BoltClientWallet ${BOLT_TUI_FILES})
 add_executable(BoltRPC ${BOLTRPC_FILES})
+add_executable(Sidechain ${SIDECHAIN_FILES})
 
 if (MSVC)
   target_link_libraries(System ws2_32)
@@ -141,6 +145,26 @@ target_link_libraries(BoltRPC
     ${CMAKE_THREAD_LIBS_INIT}
 )
 
+
+target_link_libraries(Sidechain
+    BoltSync
+    BoltCore
+    BoltHttp
+    NodeRpcProxy
+    Rpc
+    Http
+    System
+    CryptoNoteCore
+    Serialization
+    -Wl,--start-group
+        Common
+        Logging
+        crypto
+    -Wl,--end-group
+    ${Boost_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
 # Tools (ColdSync + MigrationTool)
 add_subdirectory(Tools)
 
@@ -150,6 +174,7 @@ if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
   target_link_libraries(PaymentGateService -lresolv)
   target_link_libraries(BoltClientWallet -lresolv)
   target_link_libraries(BoltRPC -lresolv)
+  target_link_libraries(Sidechain -lresolv)
 endif ()
 
 add_dependencies(Rpc version)
@@ -158,9 +183,11 @@ add_dependencies(ConcealWallet version)
 add_dependencies(PaymentGateService version)
 add_dependencies(P2P version)
 add_dependencies(BoltRPC version)
+add_dependencies(Sidechain version)
 
 set_property(TARGET ConcealWallet PROPERTY OUTPUT_NAME "concealwallet")
 set_property(TARGET PaymentGateService PROPERTY OUTPUT_NAME "walletd")
 set_property(TARGET Daemon PROPERTY OUTPUT_NAME "conceald")
 set_property(TARGET Optimizer PROPERTY OUTPUT_NAME "optimizer")
 set_property(TARGET BoltRPC PROPERTY OUTPUT_NAME "conceal-rpc")
+set_property(TARGET Sidechain PROPERTY OUTPUT_NAME "conceal-side")

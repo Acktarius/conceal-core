@@ -1,6 +1,3 @@
-// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
-// Distributed under the MIT/X11 software license
-
 #pragma once
 #include <memory>
 #include <mutex>
@@ -35,6 +32,12 @@ namespace BoltRPC
 
     uint32_t getNodeHeight() const;
 
+    void setSidechainEndpoint(const std::string &host, uint16_t port)
+    {
+      m_sidechainHost = host;
+      m_sidechainPort = port;
+    }
+
   protected:
     // HttpServer override — all requests come through here
     void processRequest(const cn::HttpRequest &request,
@@ -58,6 +61,12 @@ namespace BoltRPC
     std::string methodReset(const common::JsonValue &params);
     std::string methodSave(const common::JsonValue &params);
 
+    std::string methodGetSidechainStatus(const common::JsonValue &params);
+    std::string methodGetSidechainTokens(const common::JsonValue &params);
+    std::string methodSidechainTransfer(const common::JsonValue &params);
+    std::string methodSidechainCreateToken(const common::JsonValue &params);
+    std::string methodGetTokenBalance(const common::JsonValue &params);
+
     logging::LoggerRef m_logger;
     BoltCore::Wallet &m_wallet;
     cn::INode &m_node;
@@ -65,6 +74,9 @@ namespace BoltRPC
     std::string m_address;
     std::atomic<uint32_t> m_syncedHeight{0};
     mutable std::mutex m_walletMutex; // guards wallet state for concurrent RPC calls
+
+    std::string m_sidechainHost = "127.0.0.1";
+    uint16_t m_sidechainPort = 8080;
   };
 
 } // namespace BoltRPC
