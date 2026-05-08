@@ -420,33 +420,30 @@ namespace BoltDex
       heightStr += statusJson[heightPos++];
     uint64_t currentHeight = heightStr.empty() ? 0 : std::stoull(heightStr);
 
-    // Only scan if there are new blocks
-    if (currentHeight <= m_lastScannedHeight)
+    // On first run, scan all blocks from the beginning
+    if (m_lastScannedHeight == 0)
     {
-      // Initialize on first run
-      if (m_lastScannedHeight == 0)
-        m_lastScannedHeight = currentHeight;
-      return;
+      m_lastScannedHeight = 0; // Start from block 0
     }
 
-    std::cout << "DEX: scanning blocks " << (m_lastScannedHeight + 1) << " to " << currentHeight << std::endl;
+    // Only scan if there are new blocks
+    if (currentHeight <= m_lastScannedHeight && m_lastScannedHeight > 0)
+      return;
+
+    uint64_t scanFrom = m_lastScannedHeight;
+    if (scanFrom == 0)
+      scanFrom = 1; // Start from block 1 (genesis is block 0)
+
+    std::cout << "DEX: scanning blocks " << scanFrom << " to " << currentHeight << std::endl;
 
     // Query transactions for the DEX address
     std::ostringstream params;
     params << R"({"address":")" << common::podToHex(m_dexPubKey) << R"("})";
     std::string txJson = m_rpcCaller("getTransactions", params.str()).response;
 
-    // Extract the result array from the JSON-RPC response
-    size_t resultStart = txJson.find("\"result\":[");
-    if (resultStart == std::string::npos)
-    {
-      m_lastScannedHeight = currentHeight;
-      return;
-    }
-
     // Find incoming transfers to the DEX address
     std::string dexAddrHex = common::podToHex(m_dexPubKey);
-    size_t pos = resultStart;
+    size_t pos = 0;
     while ((pos = txJson.find("\"to\":\"", pos)) != std::string::npos)
     {
       pos += 6;
@@ -466,7 +463,7 @@ namespace BoltDex
 
       // Find the block height for this transaction
       size_t blockPos = txJson.rfind("\"blockHeight\":", pos);
-      if (blockPos == std::string::npos || blockPos < resultStart)
+      if (blockPos == std::string::npos)
       {
         pos++;
         continue;
@@ -477,8 +474,8 @@ namespace BoltDex
         blockStr += txJson[blockPos++];
       uint64_t blockHeight = blockStr.empty() ? 0 : std::stoull(blockStr);
 
-      // Only process new blocks
-      if (blockHeight <= m_lastScannedHeight)
+      // Skip blocks we have already scanned
+      if (blockHeight < scanFrom)
       {
         pos++;
         continue;
@@ -486,7 +483,7 @@ namespace BoltDex
 
       // Find the type
       size_t typePos = txJson.rfind("\"type\":\"", pos);
-      if (typePos == std::string::npos || typePos < resultStart)
+      if (typePos == std::string::npos)
       {
         pos++;
         continue;
@@ -502,7 +499,7 @@ namespace BoltDex
 
       // Find the sender
       size_t fromPos = txJson.rfind("\"from\":\"", pos);
-      if (fromPos == std::string::npos || fromPos < resultStart)
+      if (fromPos == std::string::npos)
       {
         pos++;
         continue;
@@ -513,7 +510,7 @@ namespace BoltDex
 
       // Find the amount
       size_t amtPos = txJson.rfind("\"amount\":", pos);
-      if (amtPos == std::string::npos || amtPos < resultStart)
+      if (amtPos == std::string::npos)
       {
         pos++;
         continue;
@@ -527,7 +524,7 @@ namespace BoltDex
       // Find the token ID
       size_t tokPos = txJson.rfind("\"tokenId\":", pos);
       uint64_t tokenId = 0;
-      if (tokPos != std::string::npos && tokPos > resultStart)
+      if (tokPos != std::string::npos)
       {
         tokPos += 10;
         std::string tokStr;
