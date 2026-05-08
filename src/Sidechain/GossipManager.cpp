@@ -69,19 +69,34 @@ namespace Sidechain
   {
     m_running = false;
 
+    // Close server socket immediately so acceptLoop exits
     if (m_serverSocket >= 0)
+    {
+      shutdown(m_serverSocket, SHUT_RDWR);
       close(m_serverSocket);
+      m_serverSocket = -1;
+    }
 
+    // Give acceptLoop a moment to see m_running is false and exit
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Close all peer sockets so readLoop threads wake up
+    {
+      std::lock_guard<std::mutex> lock(m_peersMutex);
+      for (int sock : m_peerSockets)
+      {
+        shutdown(sock, SHUT_RDWR);
+        close(sock);
+      }
+      m_peerSockets.clear();
+    }
+
+    // Now join all threads
     for (auto &t : m_threads)
     {
       if (t.joinable())
         t.join();
     }
-
-    for (int sock : m_peerSockets)
-      close(sock);
-
-    m_peerSockets.clear();
     m_threads.clear();
   }
 

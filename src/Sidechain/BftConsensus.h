@@ -51,6 +51,10 @@ namespace Sidechain
     // Broadcast a new validator to the network
     void broadcastNewValidator(const ValidatorInfo &validator);
 
+    // Reward Validators
+    void setRewardKey(const crypto::PublicKey &rewardKey);
+
+
   private:
     void broadcastProposal(const Block &block);
     void broadcastVote(const crypto::Hash &blockHash, const crypto::Signature &signature);
@@ -74,6 +78,8 @@ namespace Sidechain
     std::unordered_map<crypto::Hash, PendingBlock> m_pendingBlocks;
     mutable std::mutex m_mutex;
     crypto::Hash m_previousBlockHash;
-    
+
+    crypto::PublicKey m_rewardKey;
+    bool m_hasRewardKey = false;
   };
 }

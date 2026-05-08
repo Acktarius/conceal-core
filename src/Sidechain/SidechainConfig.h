@@ -29,8 +29,11 @@ namespace SidechainConfig
   // Fees (in smallest unit)
   const uint64_t MINIMUM_FEE = 1;
   const uint64_t DEFAULT_FEE = 10;
-  const uint64_t TESTNET_FEE = 0;
+  const uint64_t TESTNET_FEE = 1;
   const std::string FEE_TOKEN = "SCCX";
+
+  // Faucet
+  const uint64_t FAUCET_AMOUNT = 2; // enough for 2 transfers at 1 SCCX each
 
   // Block reward (minted to proposer every committed block)
   const uint64_t BLOCK_REWARD = 1;

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <chrono>
 
 namespace BoltHttp
 {
@@ -158,15 +159,16 @@ namespace BoltHttp
       m_epollFd = -1;
     }
 
+    if (m_acceptThread.joinable())
+      m_acceptThread.join();
+
+    // Detach workers — they will exit on process termination
     for (auto &t : m_workers)
     {
       if (t.joinable())
-        t.join();
+        t.detach();
     }
     m_workers.clear();
-
-    if (m_acceptThread.joinable())
-      m_acceptThread.join();
   }
 
   void Server::onRequest(RequestHandler handler)

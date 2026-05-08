@@ -300,4 +300,16 @@ namespace Sidechain
   {
     m_storage.flush();
   }
+
+  bool SidechainStorage::getMeta(const std::string &key, std::vector<uint8_t> &value) const
+  {
+    return m_storage.getMeta(key, value);
+  }
+
+  void SidechainStorage::putMeta(const std::string &key, const std::vector<uint8_t> &value)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_storage.putMeta(key, value);
+    m_storage.flush();
+  }
 }

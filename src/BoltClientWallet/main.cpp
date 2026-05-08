@@ -49,6 +49,91 @@ struct Config
   bool sidechainTestnet = false;
 };
 
+// Local transaction history
+struct TxEntry
+{
+  std::string txHash;
+  std::string type;
+  std::string tokenSymbol;
+  uint64_t tokenId = 0;
+  uint64_t amount = 0;
+  std::string to;
+  std::string timestamp;
+};
+
+std::vector<TxEntry> txHistory;
+
+std::string formatHash(const std::string &hash, size_t len = 16)
+{
+  if (hash.size() <= len)
+    return hash;
+  return hash.substr(0, len) + "...";
+}
+
+std::string getTimestamp()
+{
+  auto t = std::time(nullptr);
+  std::string ts = std::ctime(&t);
+  if (!ts.empty() && ts.back() == '\n')
+    ts.pop_back();
+  return ts;
+}
+
+// Extract a string value from JSON
+std::string extractJsonString(const std::string &json, const std::string &key)
+{
+  std::string search = "\"" + key + "\":\"";
+  size_t pos = json.find(search);
+  if (pos == std::string::npos)
+  {
+    search = "\"" + key + "\":";
+    pos = json.find(search);
+    if (pos == std::string::npos)
+      return "";
+    pos += search.length();
+    size_t end = json.find_first_of(",}]", pos);
+    if (end == std::string::npos)
+      return "";
+    std::string val = json.substr(pos, end - pos);
+    if (!val.empty() && val.front() == '"' && val.back() == '"')
+      val = val.substr(1, val.size() - 2);
+    return val;
+  }
+  pos += search.length();
+  size_t end = json.find("\"", pos);
+  if (end == std::string::npos)
+    return "";
+  return json.substr(pos, end - pos);
+}
+
+// Extract a number from JSON
+uint64_t extractJsonNumber(const std::string &json, const std::string &key)
+{
+  std::string search = "\"" + key + "\":";
+  size_t pos = json.find(search);
+  if (pos == std::string::npos)
+    return 0;
+  pos += search.length();
+  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
+    pos++;
+  std::string num;
+  while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9')
+  {
+    num += json[pos];
+    pos++;
+  }
+  if (num.empty())
+    return 0;
+  try
+  {
+    return std::stoull(num);
+  }
+  catch (...)
+  {
+    return 0;
+  }
+}
+
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("Conceal Bolt - Terminal Wallet");
@@ -143,37 +228,9 @@ SidechainSummary getSidechainSummary(const Config &cfg)
   if (status.empty() || status == "{}")
     return summary;
   summary.connected = true;
-
-  auto extractNumber = [](const std::string &json, const std::string &key) -> uint64_t
-  {
-    size_t pos = json.find("\"" + key + "\":");
-    if (pos == std::string::npos)
-      return 0;
-    pos += key.length() + 3;
-    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t'))
-      pos++;
-    std::string num;
-    while (pos < json.length() && json[pos] >= '0' && json[pos] <= '9')
-    {
-      num += json[pos];
-      pos++;
-    }
-    if (num.empty())
-      return 0;
-    try
-    {
-      return std::stoull(num);
-    }
-    catch (...)
-    {
-      return 0;
-    }
-  };
-
-  summary.height = extractNumber(status, "height");
-  summary.tokenCount = extractNumber(status, "tokenCount");
-  summary.pendingTx = extractNumber(status, "pendingTransactions");
-  summary.totalBackedCCX = 0;
+  summary.height = extractJsonNumber(status, "height");
+  summary.tokenCount = extractJsonNumber(status, "tokenCount");
+  summary.pendingTx = extractJsonNumber(status, "pendingTransactions");
   return summary;
 }
 
@@ -225,12 +282,53 @@ void sidechainTokensMenu(const Config &cfg)
   std::cout << "Network Summary:" << std::endl;
   std::cout << "  Height: " << summary.height << std::endl;
   std::cout << "  Total unique tokens: " << summary.tokenCount << std::endl;
-  std::cout << "  Total CCX backing tokens: " << summary.totalBackedCCX << std::endl;
   std::cout << "  Pending transactions: " << summary.pendingTx << std::endl;
   std::cout << std::endl;
-  std::cout << "Token List:" << std::endl;
+
   std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokens", "{}");
-  std::cout << result << std::endl;
+
+  // Parse tokens from the "result" array to avoid matching the JSON-RPC "id" field
+  std::cout << "Token List:" << std::endl;
+  size_t arrayStart = result.find("\"result\":[");
+  if (arrayStart == std::string::npos)
+  {
+    std::cout << "  No tokens found." << std::endl;
+  }
+  else
+  {
+    arrayStart += 10; // skip past "result":[
+    std::string arrayContent = result.substr(arrayStart);
+
+    size_t pos = 0;
+    int count = 0;
+    while ((pos = arrayContent.find("\"id\":", pos)) != std::string::npos)
+    {
+      uint64_t id = extractJsonNumber(arrayContent.substr(pos), "id");
+      std::string name = extractJsonString(arrayContent.substr(pos), "name");
+      std::string symbol = extractJsonString(arrayContent.substr(pos), "symbol");
+      uint64_t supply = extractJsonNumber(arrayContent.substr(pos), "totalSupply");
+      uint64_t maxSupply = extractJsonNumber(arrayContent.substr(pos), "maxSupply");
+      uint64_t decimals = extractJsonNumber(arrayContent.substr(pos), "decimals");
+      uint64_t model = extractJsonNumber(arrayContent.substr(pos), "backingModel");
+
+      if (!name.empty() && !symbol.empty())
+      {
+        std::string modelName = (model == 0) ? "Unbacked" : (model == 1) ? "Fully Backed"
+                                                                         : "Hybrid";
+        std::cout << "  " << symbol << " [" << name << "]" << std::endl;
+        std::cout << "    ID: " << id << " | Supply: " << formatAmount(supply, decimals)
+                  << " | Max: " << formatAmount(maxSupply, decimals)
+                  << " | Decimals: " << decimals << " | Model: " << modelName << std::endl;
+      }
+      pos++;
+      count++;
+    }
+    if (count == 0)
+    {
+      std::cout << "  No tokens found." << std::endl;
+    }
+  }
+
   std::cout << "\nPress enter to return..." << std::endl;
   std::cin.get();
 }
@@ -401,7 +499,40 @@ void sidechainTransferMenu(const Config &cfg, const std::string &spendPubHex, cn
 
   std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "transfer", params.str());
   std::cout << std::endl;
-  std::cout << "Result: " << result << std::endl;
+
+  // Extract the transaction hash from the JSON-RPC response
+  std::string txHash;
+  size_t hashStart = result.find("\"result\":\"");
+  if (hashStart != std::string::npos)
+  {
+    hashStart += 10;
+    size_t hashEnd = result.find("\"", hashStart);
+    if (hashEnd != std::string::npos)
+    {
+      txHash = result.substr(hashStart, hashEnd - hashStart);
+    }
+  }
+
+  if (!txHash.empty() && txHash != "false")
+  {
+    std::cout << "Transfer sent successfully!" << std::endl;
+    std::cout << "Hash: " << txHash << std::endl;
+
+    TxEntry entry;
+    entry.type = "Transfer";
+    entry.tokenSymbol = "Token #" + std::to_string(tokenId);
+    entry.tokenId = tokenId;
+    entry.amount = amount;
+    entry.to = toPubHex;
+    entry.timestamp = getTimestamp();
+    entry.txHash = txHash;
+    txHistory.push_back(entry);
+  }
+  else
+  {
+    std::cout << "Transfer failed." << std::endl;
+  }
+
   std::cout << "Press enter to return..." << std::endl;
   std::cin.get();
 }
@@ -414,13 +545,54 @@ void sidechainBalanceMenu(const Config &cfg, const std::string &spendPubHex)
 
   std::ostringstream nativeParams;
   nativeParams << R"({"address":")" << spendPubHex << R"(","tokenId":0})";
-  std::string nativeBal = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", nativeParams.str());
-  std::cout << "Native SCCX: " << nativeBal << std::endl;
+  std::string nativeBalJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", nativeParams.str());
+  uint64_t sccxBalance = extractJsonNumber(nativeBalJson, "result");
+  std::cout << "Native SCCX: " << formatAmount(sccxBalance) << std::endl;
   std::cout << std::endl;
 
   std::string tokensResult = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokens", "{}");
-  std::cout << "Token balances:" << std::endl;
-  std::cout << tokensResult << std::endl;
+  std::cout << "Token Balances:" << std::endl;
+
+  size_t arrayStart = tokensResult.find("\"result\":[");
+  if (arrayStart == std::string::npos)
+  {
+    std::cout << "  No tokens found." << std::endl;
+  }
+  else
+  {
+    arrayStart += 10;
+    std::string arrayContent = tokensResult.substr(arrayStart);
+
+    size_t pos = 0;
+    int count = 0;
+    while ((pos = arrayContent.find("\"id\":", pos)) != std::string::npos)
+    {
+      uint64_t id = extractJsonNumber(arrayContent.substr(pos), "id");
+      std::string name = extractJsonString(arrayContent.substr(pos), "name");
+      std::string symbol = extractJsonString(arrayContent.substr(pos), "symbol");
+      uint64_t supply = extractJsonNumber(arrayContent.substr(pos), "totalSupply");
+      uint64_t decimals = extractJsonNumber(arrayContent.substr(pos), "decimals");
+
+      if (!name.empty() && !symbol.empty())
+      {
+        std::ostringstream tokParams;
+        tokParams << R"({"address":")" << spendPubHex << R"(","tokenId":)" << id << "}";
+        std::string tokBalJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", tokParams.str());
+        uint64_t tokBalance = extractJsonNumber(tokBalJson, "result");
+
+        std::cout << "  " << symbol << " [" << name << "]"
+                  << " | Balance: " << formatAmount(tokBalance, decimals)
+                  << " | Supply: " << formatAmount(supply, decimals)
+                  << " | Decimals: " << decimals << std::endl;
+      }
+      pos++;
+      count++;
+    }
+    if (count == 0)
+    {
+      std::cout << "  No tokens found." << std::endl;
+    }
+  }
 
   std::cout << "\nPress enter to return..." << std::endl;
   std::cin.get();
@@ -441,7 +613,6 @@ void sidechainStatusMenu(const Config &cfg)
     std::cout << "Network Status:" << std::endl;
     std::cout << "  Height: " << summary.height << std::endl;
     std::cout << "  Unique tokens: " << summary.tokenCount << std::endl;
-    std::cout << "  CCX backing tokens: " << summary.totalBackedCCX << std::endl;
     std::cout << "  Pending transactions: " << summary.pendingTx << std::endl;
     std::cout << std::endl;
     std::cout << "Connection: " << cfg.sidechainHost << ":" << cfg.sidechainPort << std::endl;
@@ -486,14 +657,125 @@ void sidechainQuickCreateMenu(const Config &cfg, const std::string &spendPubHex)
 
   std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "createToken", params.str());
 
-  std::cout << "Result: " << result << std::endl;
-  if (result.find("true") != std::string::npos)
+  // Extract the transaction hash from the JSON-RPC response
+  std::string txHash;
+  size_t hashStart = result.find("\"result\":\"");
+  if (hashStart != std::string::npos)
+  {
+    hashStart += 10;
+    size_t hashEnd = result.find("\"", hashStart);
+    if (hashEnd != std::string::npos)
+    {
+      txHash = result.substr(hashStart, hashEnd - hashStart);
+    }
+  }
+
+  if (!txHash.empty() && txHash != "false")
+  {
     std::cout << "Token $" << symbol << " created!" << std::endl;
+    std::cout << "Hash: " << txHash << std::endl;
+
+    TxEntry entry;
+    entry.type = "CreateToken";
+    entry.tokenSymbol = symbol;
+    entry.tokenId = 0;
+    entry.amount = initialSupply;
+    entry.to = spendPubHex;
+    entry.timestamp = getTimestamp();
+    entry.txHash = txHash;
+    txHistory.push_back(entry);
+  }
   else
+  {
     std::cout << "Failed to create token." << std::endl;
+  }
 
   std::cout << "\nPress enter to return..." << std::endl;
   std::cin.get();
+}
+
+void sidechainTxHistoryMenu()
+{
+  clearScreen();
+  std::cout << "=== Transaction History ===" << std::endl;
+  std::cout << std::endl;
+
+  if (txHistory.empty())
+  {
+    std::cout << "No transactions yet." << std::endl;
+  }
+  else
+  {
+    for (size_t i = 0; i < txHistory.size(); ++i)
+    {
+      const auto &tx = txHistory[i];
+      std::cout << (i + 1) << ". [" << tx.type << "] " << tx.tokenSymbol;
+      std::cout << " | Amount: " << formatAmount(tx.amount);
+      std::cout << " | To: " << formatHash(tx.to);
+      std::cout << " | Hash: " << formatHash(tx.txHash);
+      std::cout << " | " << tx.timestamp;
+      std::cout << std::endl;
+    }
+  }
+
+  std::cout << "\nPress enter to return..." << std::endl;
+  std::cin.get();
+}
+
+std::vector<TxEntry> loadTransactionHistory(const Config &cfg, const std::string &spendPubHex)
+{
+  std::vector<TxEntry> history;
+
+  std::ostringstream params;
+  params << R"({"address":")" << spendPubHex << R"("})";
+  std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTransactions", params.str());
+
+  // Parse each transaction from the JSON array
+  size_t pos = 0;
+  while ((pos = result.find("\"txHash\":\"", pos)) != std::string::npos)
+  {
+    TxEntry entry;
+    entry.txHash = extractJsonString(result.substr(pos), "txHash");
+    entry.type = extractJsonString(result.substr(pos), "type");
+    entry.tokenId = extractJsonNumber(result.substr(pos), "tokenId");
+    entry.amount = extractJsonNumber(result.substr(pos), "amount");
+
+    std::string toHex = extractJsonString(result.substr(pos), "to");
+    entry.to = toHex;
+
+    // Determine the token symbol based on type and tokenId
+    if (entry.type == "CreateToken")
+    {
+      entry.tokenSymbol = "Token Creation";
+    }
+    else if (entry.tokenId == 0)
+    {
+      entry.tokenSymbol = "SCCX";
+    }
+    else
+    {
+      entry.tokenSymbol = "Token #" + std::to_string(entry.tokenId);
+    }
+
+    uint64_t timestamp = extractJsonNumber(result.substr(pos), "timestamp");
+    if (timestamp > 0)
+    {
+      time_t t = static_cast<time_t>(timestamp);
+      std::string ts = std::ctime(&t);
+      if (!ts.empty() && ts.back() == '\n')
+        ts.pop_back();
+      entry.timestamp = ts;
+    }
+    else
+    {
+      entry.timestamp = "Unknown";
+    }
+
+    history.push_back(entry);
+    pos++;
+  }
+
+  return history;
 }
 
 int main(int argc, char *argv[])
@@ -522,6 +804,9 @@ int main(int argc, char *argv[])
     crypto::secret_key_to_public_key(spendKey, spendPub);
 
   std::string spendPubHex = common::podToHex(spendPub);
+
+  // Load sidechain transaction history
+  txHistory = loadTransactionHistory(cfg, spendPubHex);
 
   logging::LoggerManager logManager;
   logging::ConsoleLogger logger;
@@ -559,7 +844,6 @@ int main(int argc, char *argv[])
   std::cout << "Sidechain: " << cfg.sidechainHost << ":" << cfg.sidechainPort
             << " [" << (cfg.sidechainTestnet ? "TESTNET" : "MAINNET") << "]" << std::endl;
 
-  // Only scan and build wallet if daemon is connected
   std::unique_ptr<BoltCore::Wallet> walletPtr;
   std::vector<BoltSync::FoundOutput> allOutputs;
   std::vector<BoltCore::OutputInfo> outputInfos;
@@ -631,6 +915,15 @@ int main(int argc, char *argv[])
       }
     }
 
+    // Get sidechain SCCX balance
+    uint64_t sccxBalance = 0;
+    {
+      std::ostringstream sccxParams;
+      sccxParams << R"({"address":")" << spendPubHex << R"(","tokenId":0})";
+      std::string sccxJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", sccxParams.str());
+      sccxBalance = extractJsonNumber(sccxJson, "result");
+    }
+
     std::cout << "=== Conceal Bolt Wallet ============" << std::endl;
     std::cout << "Address: " << addressStr << std::endl;
     std::cout << "Main Chain: [" << (daemonLive ? "ONLINE" : "OFFLINE") << "]" << std::endl;
@@ -642,6 +935,7 @@ int main(int argc, char *argv[])
     std::cout << "------------------------------------" << std::endl;
     std::cout << "CCX Balance: " << formatAmount(balance.actual)
               << " (pending " << formatAmount(balance.pending) << ")" << std::endl;
+    std::cout << "SCCX Balance: " << formatAmount(sccxBalance) << std::endl;
     std::cout << "Deposits locked: " << formatAmount(balance.lockedDeposit)
               << " unlocked: " << formatAmount(balance.unlockedDeposit) << std::endl;
     std::cout << "------------------------------------" << std::endl;
@@ -661,6 +955,7 @@ int main(int argc, char *argv[])
     std::cout << "S4. Send sidechain token" << std::endl;
     std::cout << "S5. Token balances" << std::endl;
     std::cout << "S6. Quick create token" << std::endl;
+    std::cout << "S7. Transaction history" << std::endl;
     std::cout << "------------------------------------" << std::endl;
     std::cout << "0. Exit" << std::endl;
     std::cout << "Choice: ";
@@ -753,6 +1048,10 @@ int main(int argc, char *argv[])
     else if (input == "S6" || input == "s6")
     {
       sidechainQuickCreateMenu(cfg, spendPubHex);
+    }
+    else if (input == "S7" || input == "s7")
+    {
+      sidechainTxHistoryMenu();
     }
     else if (input == "0")
     {

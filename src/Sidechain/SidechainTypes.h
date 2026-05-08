@@ -93,6 +93,7 @@ namespace Sidechain
       s(feeTokenId, "feeTokenId");
       s(timestamp, "timestamp");
       s(extra, "extra");
+      s(txHash, "txHash");
       s(signature, "signature");
     }
   };

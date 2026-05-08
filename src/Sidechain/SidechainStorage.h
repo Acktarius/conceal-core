@@ -46,6 +46,8 @@ namespace Sidechain
 
     // Meta
     void flush();
+    bool getMeta(const std::string &key, std::vector<uint8_t> &value) const;
+    void putMeta(const std::string &key, const std::vector<uint8_t> &value);
 
   private:
     CryptoNote::MDBXBlockchainStorage m_storage;

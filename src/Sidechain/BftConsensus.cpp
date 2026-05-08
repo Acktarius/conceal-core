@@ -462,9 +462,10 @@ namespace Sidechain
 
         if (proposer)
         {
+          const crypto::PublicKey &rewardTarget = m_hasRewardKey ? m_rewardKey : proposer->publicKey;
           uint64_t currentBalance = 0;
-          m_storage.getBalance(proposer->publicKey, 0, currentBalance);
-          m_storage.setBalance(proposer->publicKey, 0, currentBalance + totalReward);
+          m_storage.getBalance(rewardTarget, 0, currentBalance);
+          m_storage.setBalance(rewardTarget, 0, currentBalance + totalReward);
 
           std::cout << "Block reward: validator " << proposer->id
                     << " earned " << totalReward << " SCCX"
@@ -488,5 +489,12 @@ namespace Sidechain
       std::cout << "Block committed at height " << it->second.block.header.height
                 << " with " << it->second.votes.size() << " votes" << std::endl;
     }
+  }
+
+  // Reward Validators
+  void BftConsensus::setRewardKey(const crypto::PublicKey &rewardKey)
+  {
+    m_rewardKey = rewardKey;
+    m_hasRewardKey = true;
   }
 }

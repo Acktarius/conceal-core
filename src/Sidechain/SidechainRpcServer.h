@@ -47,11 +47,12 @@ namespace Sidechain
     std::string methodGetStatus(const common::JsonValue &params);
     std::string methodGetPendingTransactions(const common::JsonValue &params);
     std::string methodGetValidators(const common::JsonValue &params);
-
     std::string methodGetSidechainStatus(const common::JsonValue &params);
     std::string methodGetSidechainTokens(const common::JsonValue &params);
     std::string methodSidechainTransfer(const common::JsonValue &params);
     std::string methodSidechainCreateToken(const common::JsonValue &params);
+    std::string methodGetTransactions(const common::JsonValue &params);
+    std::string methodFaucet(const common::JsonValue &params);
 
     logging::LoggerRef m_logger;
     SidechainStorage &m_storage;

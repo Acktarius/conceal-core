@@ -34,6 +34,8 @@ namespace Sidechain
     std::vector<Transaction> getPendingTransactions() const;
     std::vector<ValidatorInfo> getValidators() const;
 
+    void setRewardKey(const crypto::PublicKey &key) { m_consensus.setRewardKey(key); }
+
   private:
     void consensusLoop();
     bool validateTransaction(const Transaction &tx) const;

@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "SidechainRpcServer.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Common/Util.h"
 #include "Common/StringTools.h"
 #include <sstream>
@@ -85,6 +86,10 @@ namespace Sidechain
         result = methodGetPendingTransactions(params);
       else if (method == "getValidators")
         result = methodGetValidators(params);
+      else if (method == "getTransactions")
+        result = methodGetTransactions(params);
+      else if (method == "faucet")
+        result = methodFaucet(params);
       else
       {
         std::string error = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":" + id + "}";
@@ -152,19 +157,18 @@ namespace Sidechain
     tx.amount = static_cast<uint64_t>(params("amount").getInteger());
     tx.tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
 
-    // Transfers pay fees in SCCX — testnet uses TESTNET_FEE, mainnet uses DEFAULT_FEE
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
     tx.feeTokenId = 0;
 
-    // Initialize fields that serialization will read
-    tx.txHash = crypto::Hash{};
     tx.signature = crypto::Signature{};
     tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
     tx.extra.clear();
-//    tx.privateTx = false;
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
 
     if (m_validator.submitTransaction(tx))
-      return "true";
+      return "\"" + common::podToHex(tx.txHash) + "\"";
     return "false";
   }
 
@@ -186,7 +190,6 @@ namespace Sidechain
       tx.to = tx.from;
       tx.amount = static_cast<uint64_t>(supplyVal.getInteger());
 
-      // Token creation is always free — never mints SCCX to prevent inflation attacks
       tx.fee = 0;
       tx.feeTokenId = 0;
       tx.tokenId = 0;
@@ -209,8 +212,11 @@ namespace Sidechain
       std::string combined = name + ":" + symbol + ":" + std::to_string(backingModel) + ":" + std::to_string(decimals);
       tx.extra.assign(combined.begin(), combined.end());
 
+      cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+      crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
       if (m_validator.submitTransaction(tx))
-        return "true";
+        return "\"" + common::podToHex(tx.txHash) + "\"";
     }
     catch (const std::exception &e)
     {
@@ -228,12 +234,18 @@ namespace Sidechain
     tx.amount = static_cast<uint64_t>(params("amount").getInteger());
     tx.tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
 
-    // Minting pays fees in SCCX — testnet uses TESTNET_FEE, mainnet uses DEFAULT_FEE
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
     tx.feeTokenId = tx.tokenId;
 
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    tx.extra.clear();
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
     if (m_validator.submitTransaction(tx))
-      return "true";
+      return "\"" + common::podToHex(tx.txHash) + "\"";
     return "false";
   }
 
@@ -246,12 +258,18 @@ namespace Sidechain
     tx.amount = static_cast<uint64_t>(params("amount").getInteger());
     tx.tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
 
-    // Burning pays fees in SCCX — testnet uses TESTNET_FEE, mainnet uses DEFAULT_FEE
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
     tx.feeTokenId = tx.tokenId;
 
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    tx.extra.clear();
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
     if (m_validator.submitTransaction(tx))
-      return "true";
+      return "\"" + common::podToHex(tx.txHash) + "\"";
     return "false";
   }
 
@@ -287,6 +305,119 @@ namespace Sidechain
     }
     result += "]";
     return result;
+  }
+
+  std::string SidechainRpcServer::methodGetTransactions(const common::JsonValue &params)
+  {
+    std::string address = params("address").getString();
+    crypto::PublicKey pubKey;
+    common::podFromHex(address, pubKey);
+
+    uint64_t topHeight = m_storage.topBlockHeight();
+    std::string result = "[";
+
+    bool first = true;
+    for (uint64_t h = 1; h <= topHeight; ++h)
+    {
+      Block block;
+      if (!m_storage.getBlock(h, block))
+        continue;
+
+      for (const auto &tx : block.transactions)
+      {
+        if (tx.from == pubKey || tx.to == pubKey)
+        {
+          if (!first)
+            result += ",";
+          first = false;
+
+          std::string typeStr;
+          switch (tx.type)
+          {
+          case TransactionType::Transfer:
+            typeStr = "Transfer";
+            break;
+          case TransactionType::CreateToken:
+            typeStr = "CreateToken";
+            break;
+          case TransactionType::Mint:
+            typeStr = "Mint";
+            break;
+          case TransactionType::Burn:
+            typeStr = "Burn";
+            break;
+          default:
+            typeStr = "Unknown";
+            break;
+          }
+
+          result += "{";
+          result += R"("txHash":")" + common::podToHex(tx.txHash) + R"(")";
+          result += R"(,"type":")" + typeStr + R"(")";
+          result += R"(,"from":")" + common::podToHex(tx.from) + R"(")";
+          result += R"(,"to":")" + common::podToHex(tx.to) + R"(")";
+          result += R"(,"amount":)" + std::to_string(tx.amount);
+          result += R"(,"tokenId":)" + std::to_string(tx.tokenId);
+          result += R"(,"fee":)" + std::to_string(tx.fee);
+          result += R"(,"blockHeight":)" + std::to_string(h);
+          result += R"(,"timestamp":)" + std::to_string(tx.timestamp);
+          result += "}";
+        }
+      }
+    }
+
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodFaucet(const common::JsonValue &params)
+  {
+    std::string address = params("address").getString();
+    crypto::PublicKey pubKey;
+    common::podFromHex(address, pubKey);
+
+    // Check if this address has already claimed
+    std::string claimKey = "faucet_" + common::podToHex(pubKey);
+    std::vector<uint8_t> claimed;
+    if (m_storage.getMeta(claimKey, claimed) && !claimed.empty())
+    {
+      return R"({"status":"error","message":"already claimed"})";
+    }
+
+    // Verify the address has received a transaction before
+    // This prevents bots from generating fresh keys to farm the faucet
+    uint64_t topHeight = m_storage.topBlockHeight();
+    bool hasHistory = false;
+    for (uint64_t h = 1; h <= topHeight && !hasHistory; ++h)
+    {
+      Block block;
+      if (!m_storage.getBlock(h, block))
+        continue;
+      for (const auto &tx : block.transactions)
+      {
+        if (tx.to == pubKey)
+        {
+          hasHistory = true;
+          break;
+        }
+      }
+    }
+
+    if (!hasHistory)
+    {
+      return R"({"status":"error","message":"address has no transaction history, send a token or SCCX to this address first"})";
+    }
+
+    // Credit the address with enough SCCX for 2 transfers
+    uint64_t faucetAmount = SidechainConfig::FAUCET_AMOUNT;
+    uint64_t currentBalance = 0;
+    m_storage.getBalance(pubKey, 0, currentBalance);
+    m_storage.setBalance(pubKey, 0, currentBalance + faucetAmount);
+
+    // Mark as claimed
+    m_storage.putMeta(claimKey, {1});
+
+    return R"({"status":"ok","amount":)" + std::to_string(faucetAmount) + R"(,"balance":)" + std::to_string(currentBalance + faucetAmount) + "}";
   }
 
   std::string SidechainRpcServer::methodGetSidechainStatus(const common::JsonValue &)

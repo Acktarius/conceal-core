@@ -7,6 +7,9 @@
 #include <iostream>
 #include <thread>
 #include <future>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include <boost/program_options.hpp>
 
@@ -27,6 +30,7 @@
 #include "Common/StringTools.h"
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/Currency.h"
+#include "CryptoNoteCore/Account.h"
 #include "Logging/ConsoleLogger.h"
 #include "Logging/LoggerManager.h"
 #include "NodeRpcProxy/NodeRpcProxy.h"
@@ -47,12 +51,13 @@ struct Config
   bool watchBridge = false;
   std::string seedHost;
   uint16_t seedPort = 0;
+  std::string rewardAddress;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("Conceal Sidechain Validator");
-  desc.add_options()("help,h", "Show help")("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key")("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key")("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")("testnet", po::bool_switch(), "Run sidechain in testnet mode")("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)");
+  desc.add_options()("help,h", "Show help")("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key")("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key")("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")("testnet", po::bool_switch(), "Run sidechain in testnet mode")("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)");
 
   po::variables_map vm;
   try
@@ -82,6 +87,7 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.testnet = vm["testnet"].as<bool>();
   cfg.seedHost = vm["seed-host"].as<std::string>();
   cfg.seedPort = vm["seed-port"].as<uint16_t>();
+  cfg.rewardAddress = vm["reward-address"].as<std::string>();
 
   return true;
 }
@@ -119,7 +125,6 @@ int main(int argc, char *argv[])
   if (!parseArgs(argc, argv, cfg))
     return 1;
 
-  // Force unbuffered output so all debug logs appear immediately
   std::cout.setf(std::ios::unitbuf);
 
   logging::LoggerManager logManager;
@@ -168,7 +173,6 @@ int main(int argc, char *argv[])
 
   if (existingValidators.empty() && seedNodes.empty())
   {
-    // Genesis validator
     self.id = 0;
     storage.addValidator(self);
     validators.push_back(self);
@@ -176,7 +180,6 @@ int main(int argc, char *argv[])
   }
   else if (!existingValidators.empty() && seedNodes.empty())
   {
-    // Restarting, validators in storage
     validators = existingValidators;
     self.id = validators.size();
     storage.addValidator(self);
@@ -185,21 +188,17 @@ int main(int argc, char *argv[])
   }
   else
   {
-    // Joining via seed
     self.id = 0;
     storage.addValidator(self);
 
-    // Sync validator set from seed
     Sidechain::BftConsensus tempConsensus(storage, self, gossip);
     uint16_t seedGossipPort = cfg.seedPort > 0
                                   ? cfg.seedPort + SidechainConfig::GOSSIP_PORT_OFFSET
                                   : SidechainConfig::DEFAULT_RPC_BIND_PORT + SidechainConfig::GOSSIP_PORT_OFFSET;
     tempConsensus.syncValidators(cfg.seedHost, seedGossipPort);
 
-    // Re-read validators after sync
     validators = storage.getActiveValidators();
 
-    // Find our ID in the synced list
     bool found = false;
     for (const auto &v : validators)
     {
@@ -224,19 +223,58 @@ int main(int argc, char *argv[])
   logger(logging::INFO) << "Validator ID: " << self.id
                         << " Public key: " << common::podToHex(self.publicKey);
 
+  // Reward address (optional, accepts base58 CCX address or hex public key)
+  crypto::PublicKey rewardPub;
+  bool hasRewardWallet = false;
+
+  if (!cfg.rewardAddress.empty())
+  {
+    cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
+    std::string addressInput = cfg.rewardAddress;
+
+    if (addressInput.size() == 64 && addressInput.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos)
+    {
+      common::podFromHex(addressInput, rewardPub);
+      hasRewardWallet = true;
+    }
+    else
+    {
+      cn::AccountPublicAddress addr;
+      if (currency.parseAccountAddressString(addressInput, addr))
+      {
+        rewardPub = addr.spendPublicKey;
+        hasRewardWallet = true;
+      }
+    }
+
+    if (hasRewardWallet)
+    {
+      std::cout << "Reward address set to: " << common::podToHex(rewardPub) << std::endl;
+    }
+    else
+    {
+      std::cout << "Invalid reward address, rewards will go to validator key" << std::endl;
+    }
+  }
+
   // Validator with BFT
   Sidechain::SidechainValidator validator(storage, self, validators, gossip, cfg.testnet);
   validator.start();
   logger(logging::INFO) << "Validator started with BFT threshold "
                         << SidechainConfig::BFT_BLOCK_THRESHOLD;
 
-  // RPC server (BoltHttp — runs in its own threads, no dispatcher needed)
+  if (hasRewardWallet)
+  {
+    validator.setRewardKey(rewardPub);
+  }
+
+  // RPC server
   Sidechain::SidechainRpcServer rpcServer(consoleLogger, storage, validator);
   rpcServer.setTestnet(cfg.testnet);
   rpcServer.start(cfg.bindIp, cfg.bindPort);
   logger(logging::INFO) << "RPC server listening on " << cfg.bindIp << ":" << cfg.bindPort;
 
-  // Daemon connection (only when bridge watching is enabled)
+  // Daemon connection
   cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
 
   bool daemonConnected = false;
@@ -329,20 +367,33 @@ int main(int argc, char *argv[])
   tools::SignalHandler::install([&stopRequested]
                                 { stopRequested = true; });
 
-  logger(logging::INFO) << "Sidechain validator running — press Ctrl+C to stop";
+  logger(logging::INFO) << "Sidechain validator running — type 'exit' or press Ctrl+C to stop";
+
+  std::thread inputThread([&stopRequested]()
+                          {
+      std::string line;
+      while (!stopRequested)
+      {
+          std::getline(std::cin, line);
+          if (line == "exit" || line == "quit" || line == "q")
+          {
+              stopRequested = true;
+              break;
+          }
+      } });
 
   while (!stopRequested)
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+  if (inputThread.joinable())
+    inputThread.join();
+
   // Shutdown
   logger(logging::INFO) << "Shutting down...";
+  stopRequested = true;
   rpcServer.stop();
-  validator.stop();
   gossip.stop();
-  if (bridgeWatcher)
-    bridgeWatcher->stop();
-  if (nodePtr)
-    nodePtr->shutdown();
+  validator.stop();
   storage.flush();
   logger(logging::INFO) << "Sidechain validator stopped";
 
