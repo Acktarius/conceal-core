@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "SidechainTypes.h"
 #include "SidechainStorage.h"
 #include "SidechainValidator.h"
@@ -20,7 +22,7 @@ namespace Sidechain
                        SidechainStorage &storage,
                        SidechainValidator &validator);
 
-    void start(const std::string &bindIp, uint16_t bindPort);
+    void start(const std::string &bindIp, uint16_t bindPort, size_t threadCount = 1);
     void stop();
 
     void setSidechainEndpoint(const std::string &host, uint16_t port)
@@ -57,7 +59,7 @@ namespace Sidechain
     logging::LoggerRef m_logger;
     SidechainStorage &m_storage;
     SidechainValidator &m_validator;
-    BoltHttp::Server m_httpServer;
+    std::unique_ptr<BoltHttp::Server> m_httpServer;
 
     std::string m_sidechainHost = "127.0.0.1";
     uint16_t m_sidechainPort = 8080;

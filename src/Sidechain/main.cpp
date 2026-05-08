@@ -52,12 +52,27 @@ struct Config
   std::string seedHost;
   uint16_t seedPort = 0;
   std::string rewardAddress;
+  size_t rpcThreads = 1;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("Conceal Sidechain Validator");
-  desc.add_options()("help,h", "Show help")("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key")("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key")("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")("testnet", po::bool_switch(), "Run sidechain in testnet mode")("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)");
+  desc.add_options()
+    ("help,h", "Show help")
+    ("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")
+    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")
+    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")
+    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")
+    ("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")
+    ("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key")
+    ("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key")
+    ("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")
+    ("testnet", po::bool_switch(), "Run sidechain in testnet mode")
+    ("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")
+    ("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")
+    ("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")
+    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count");
 
   po::variables_map vm;
   try
@@ -88,6 +103,7 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.seedHost = vm["seed-host"].as<std::string>();
   cfg.seedPort = vm["seed-port"].as<uint16_t>();
   cfg.rewardAddress = vm["reward-address"].as<std::string>();
+  cfg.rpcThreads = vm["rpc-threads"].as<size_t>();
 
   return true;
 }
@@ -271,7 +287,7 @@ int main(int argc, char *argv[])
   // RPC server
   Sidechain::SidechainRpcServer rpcServer(consoleLogger, storage, validator);
   rpcServer.setTestnet(cfg.testnet);
-  rpcServer.start(cfg.bindIp, cfg.bindPort);
+  rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
   logger(logging::INFO) << "RPC server listening on " << cfg.bindIp << ":" << cfg.bindPort;
 
   // Daemon connection

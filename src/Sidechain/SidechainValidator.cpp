@@ -171,16 +171,37 @@ namespace Sidechain
       }
     }
 
-    // Balance check
-    uint64_t balance = 0;
-    m_storage.getBalance(tx.from, tx.tokenId, balance);
+    // Balance check for the token being transferred
+    uint64_t tokenBalance = 0;
+    m_storage.getBalance(tx.from, tx.tokenId, tokenBalance);
+
+    // If fee is paid in the same token, add fee to required amount
+    uint64_t requiredTokenAmount = tx.amount;
+    if (tx.feeTokenId == tx.tokenId)
+      requiredTokenAmount += tx.fee;
+
     std::cout << "validateTransaction: from=" << common::podToHex(tx.from).substr(0, 16)
-              << " tokenId=" << tx.tokenId << " balance=" << balance
-              << " amount=" << tx.amount << " fee=" << tx.fee << std::endl;
-    if (balance < tx.amount + tx.fee)
+              << " tokenId=" << tx.tokenId << " balance=" << tokenBalance
+              << " amount=" << tx.amount << " fee=" << tx.fee
+              << " feeTokenId=" << tx.feeTokenId << std::endl;
+
+    if (tokenBalance < requiredTokenAmount)
     {
-      std::cout << "validateTransaction: insufficient balance" << std::endl;
+      std::cout << "validateTransaction: insufficient token balance" << std::endl;
       return false;
+    }
+
+    // If fee is paid in a different token, check that balance too
+    if (tx.feeTokenId != tx.tokenId && tx.fee > 0)
+    {
+      uint64_t feeBalance = 0;
+      m_storage.getBalance(tx.from, tx.feeTokenId, feeBalance);
+      if (feeBalance < tx.fee)
+      {
+        std::cout << "validateTransaction: insufficient fee balance, have=" << feeBalance
+                  << " need=" << tx.fee << " feeTokenId=" << tx.feeTokenId << std::endl;
+        return false;
+      }
     }
 
     return true;

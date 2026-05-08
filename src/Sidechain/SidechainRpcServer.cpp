@@ -19,27 +19,29 @@ namespace Sidechain
   {
   }
 
-  void SidechainRpcServer::start(const std::string &bindIp, uint16_t bindPort)
+  void SidechainRpcServer::start(const std::string &bindIp, uint16_t bindPort, size_t threadCount)
   {
-    m_httpServer.onRequest([this](const BoltHttp::Request &req, BoltHttp::Response &resp)
-                           {
-      if (req.url == "/json_rpc" && req.method == "POST")
-      {
-        std::string body(req.body.begin(), req.body.end());
-        resp.setBody(handleJsonRpc(body));
-      }
-      else
-      {
-        resp.status = 404;
-        resp.setBody("Not found");
-      } });
-    m_httpServer.start(bindIp, bindPort);
+    m_httpServer.reset(new BoltHttp::Server(threadCount));
+    m_httpServer->onRequest([this](const BoltHttp::Request &req, BoltHttp::Response &resp)
+                            {
+        if (req.url == "/json_rpc" && req.method == "POST")
+        {
+            std::string body(req.body.begin(), req.body.end());
+            resp.setBody(handleJsonRpc(body));
+        }
+        else
+        {
+            resp.status = 404;
+            resp.setBody("Not found");
+        } });
+    m_httpServer->start(bindIp, bindPort);
     m_logger(logging::INFO) << "Sidechain RPC server started on " << bindIp << ":" << bindPort;
   }
 
   void SidechainRpcServer::stop()
   {
-    m_httpServer.stop();
+    if (m_httpServer)
+      m_httpServer->stop();
     m_logger(logging::INFO) << "Sidechain RPC server stopped";
   }
 

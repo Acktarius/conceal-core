@@ -22,7 +22,7 @@ namespace BoltHttp
   class Server
   {
   public:
-    explicit Server(size_t threadCount = 4);
+    explicit Server(size_t threadCount = 1);
     ~Server();
 
     void start(const std::string &bindIp, uint16_t port);

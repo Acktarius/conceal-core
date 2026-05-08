@@ -4,16 +4,16 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstring>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
-#include <mutex>
+#include <memory>
 #include <thread>
 #include <vector>
 
-#include <boost/filesystem.hpp>
-#include <boost/program_options.hpp>
+#include "Config.h"
+#include "TxHistory.h"
+#include "JsonHelpers.h"
+#include "SidechainMenus.h"
+#include "DexMenus.h"
 
 #include "BoltSync/BoltSync.h"
 #include "BoltSync/CryptoHelpers.h"
@@ -28,755 +28,8 @@
 #include "Logging/LoggerManager.h"
 #include <System/Dispatcher.h>
 #include "NodeRpcProxy/NodeRpcProxy.h"
-#include "Rpc/CoreRpcServerCommandsDefinitions.h"
-#include "Rpc/HttpClient.h"
 
 using namespace cn;
-namespace po = boost::program_options;
-
-// Configuration
-struct Config
-{
-  std::string dataDir;
-  std::string daemonHost = "127.0.0.1";
-  uint16_t daemonPort = 16000;
-  std::string viewKeyHex;
-  std::string spendKeyHex;
-  unsigned int scanThreads = 0;
-  bool skipScan = false;
-  std::string sidechainHost = "127.0.0.1";
-  uint16_t sidechainPort = 8080;
-  bool sidechainTestnet = false;
-};
-
-// Local transaction history
-struct TxEntry
-{
-  std::string txHash;
-  std::string type;
-  std::string tokenSymbol;
-  uint64_t tokenId = 0;
-  uint64_t amount = 0;
-  std::string to;
-  std::string timestamp;
-};
-
-std::vector<TxEntry> txHistory;
-
-std::string formatHash(const std::string &hash, size_t len = 16)
-{
-  if (hash.size() <= len)
-    return hash;
-  return hash.substr(0, len) + "...";
-}
-
-std::string getTimestamp()
-{
-  auto t = std::time(nullptr);
-  std::string ts = std::ctime(&t);
-  if (!ts.empty() && ts.back() == '\n')
-    ts.pop_back();
-  return ts;
-}
-
-// Extract a string value from JSON
-std::string extractJsonString(const std::string &json, const std::string &key)
-{
-  std::string search = "\"" + key + "\":\"";
-  size_t pos = json.find(search);
-  if (pos == std::string::npos)
-  {
-    search = "\"" + key + "\":";
-    pos = json.find(search);
-    if (pos == std::string::npos)
-      return "";
-    pos += search.length();
-    size_t end = json.find_first_of(",}]", pos);
-    if (end == std::string::npos)
-      return "";
-    std::string val = json.substr(pos, end - pos);
-    if (!val.empty() && val.front() == '"' && val.back() == '"')
-      val = val.substr(1, val.size() - 2);
-    return val;
-  }
-  pos += search.length();
-  size_t end = json.find("\"", pos);
-  if (end == std::string::npos)
-    return "";
-  return json.substr(pos, end - pos);
-}
-
-// Extract a number from JSON
-uint64_t extractJsonNumber(const std::string &json, const std::string &key)
-{
-  std::string search = "\"" + key + "\":";
-  size_t pos = json.find(search);
-  if (pos == std::string::npos)
-    return 0;
-  pos += search.length();
-  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
-    pos++;
-  std::string num;
-  while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9')
-  {
-    num += json[pos];
-    pos++;
-  }
-  if (num.empty())
-    return 0;
-  try
-  {
-    return std::stoull(num);
-  }
-  catch (...)
-  {
-    return 0;
-  }
-}
-
-bool parseArgs(int argc, char *argv[], Config &cfg)
-{
-  po::options_description desc("Conceal Bolt - Terminal Wallet");
-  desc.add_options()("help,h", "Show help")("data-dir", po::value<std::string>(), "Path to blockchain data directory (for scanning)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("view-key", po::value<std::string>(), "64-char hex private view key")("spend-key", po::value<std::string>(), "64-char hex private spend key (optional for view-only)")("threads", po::value<unsigned int>()->default_value(2), "Scan threads (0=auto)")("skip-scan", po::bool_switch(), "Skip blockchain scan (use if already scanned)")("sidechain-host", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC host")("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC port")("sidechain-testnet", po::bool_switch(), "Connect to sidechain in testnet mode");
-
-  po::variables_map vm;
-  try
-  {
-    po::store(po::parse_command_line(argc, argv, desc), vm);
-    if (vm.count("help"))
-    {
-      std::cout << desc << std::endl;
-      return false;
-    }
-    po::notify(vm);
-
-    if (vm.count("data-dir"))
-      cfg.dataDir = vm["data-dir"].as<std::string>();
-    cfg.daemonHost = vm["daemon-host"].as<std::string>();
-    cfg.daemonPort = vm["daemon-port"].as<uint16_t>();
-    if (vm.count("view-key"))
-      cfg.viewKeyHex = vm["view-key"].as<std::string>();
-    if (vm.count("spend-key"))
-      cfg.spendKeyHex = vm["spend-key"].as<std::string>();
-    cfg.scanThreads = vm["threads"].as<unsigned int>();
-    cfg.skipScan = vm["skip-scan"].as<bool>();
-    cfg.sidechainHost = vm["sidechain-host"].as<std::string>();
-    cfg.sidechainPort = vm["sidechain-port"].as<uint16_t>();
-    cfg.sidechainTestnet = vm["sidechain-testnet"].as<bool>();
-  }
-  catch (const std::exception &e)
-  {
-    std::cerr << "Error: " << e.what() << std::endl;
-    return false;
-  }
-
-  if (cfg.viewKeyHex.size() != 64)
-  {
-    std::cerr << "Error: view-key must be 64 hex characters" << std::endl;
-    return false;
-  }
-  if (!cfg.spendKeyHex.empty() && cfg.spendKeyHex.size() != 64)
-  {
-    std::cerr << "Error: spend-key must be 64 hex characters" << std::endl;
-    return false;
-  }
-  return true;
-}
-
-// Sidechain RPC helper
-std::string sidechainCall(const std::string &host, uint16_t port,
-                          const std::string &method, const std::string &params)
-{
-  platform_system::Dispatcher dispatcher;
-  HttpClient client(dispatcher, host, port);
-
-  HttpRequest req;
-  HttpResponse res;
-
-  std::string body = R"({"jsonrpc":"2.0","id":1,"method":")" + method +
-                     R"(","params":)" + params + "}";
-
-  req.setUrl("/json_rpc");
-  req.setBody(body);
-  req.addHeader("Content-Type", "application/json");
-
-  try
-  {
-    client.request(req, res);
-    return res.getBody();
-  }
-  catch (...)
-  {
-    return "{}";
-  }
-}
-
-// Sidechain summary helper
-struct SidechainSummary
-{
-  uint64_t height = 0;
-  uint64_t tokenCount = 0;
-  uint64_t pendingTx = 0;
-  uint64_t totalBackedCCX = 0;
-  bool connected = false;
-};
-
-SidechainSummary getSidechainSummary(const Config &cfg)
-{
-  SidechainSummary summary;
-  std::string status = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getStatus", "{}");
-  if (status.empty() || status == "{}")
-    return summary;
-  summary.connected = true;
-  summary.height = extractJsonNumber(status, "height");
-  summary.tokenCount = extractJsonNumber(status, "tokenCount");
-  summary.pendingTx = extractJsonNumber(status, "pendingTransactions");
-  return summary;
-}
-
-// Menu helpers
-void clearScreen() { std::cout << "\033[2J\033[1;1H" << std::flush; }
-
-std::string formatAmount(uint64_t amount, uint8_t decimals = 6)
-{
-  if (decimals == 0)
-    return std::to_string(amount);
-  std::string s = std::to_string(amount);
-  while (s.length() <= decimals)
-    s = "0" + s;
-  size_t dotPos = s.length() - decimals;
-  std::string result = s.substr(0, dotPos) + "." + s.substr(dotPos);
-  while (result.back() == '0' && result[result.size() - 2] != '.')
-    result.pop_back();
-  return result;
-}
-
-// Address conversion helper
-std::string addressToHexPubKey(const std::string &input, cn::Currency &currency)
-{
-  if (input.size() == 64 && input.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos)
-    return input;
-
-  try
-  {
-    cn::AccountPublicAddress addr;
-    if (currency.parseAccountAddressString(input, addr))
-    {
-      return common::podToHex(addr.spendPublicKey);
-    }
-  }
-  catch (...)
-  {
-  }
-
-  return input;
-}
-
-// Sidechain menus
-void sidechainTokensMenu(const Config &cfg)
-{
-  clearScreen();
-  std::cout << "=== Sidechain Tokens ===" << std::endl;
-  std::cout << std::endl;
-  auto summary = getSidechainSummary(cfg);
-  std::cout << "Network Summary:" << std::endl;
-  std::cout << "  Height: " << summary.height << std::endl;
-  std::cout << "  Total unique tokens: " << summary.tokenCount << std::endl;
-  std::cout << "  Pending transactions: " << summary.pendingTx << std::endl;
-  std::cout << std::endl;
-
-  std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokens", "{}");
-
-  // Parse tokens from the "result" array to avoid matching the JSON-RPC "id" field
-  std::cout << "Token List:" << std::endl;
-  size_t arrayStart = result.find("\"result\":[");
-  if (arrayStart == std::string::npos)
-  {
-    std::cout << "  No tokens found." << std::endl;
-  }
-  else
-  {
-    arrayStart += 10; // skip past "result":[
-    std::string arrayContent = result.substr(arrayStart);
-
-    size_t pos = 0;
-    int count = 0;
-    while ((pos = arrayContent.find("\"id\":", pos)) != std::string::npos)
-    {
-      uint64_t id = extractJsonNumber(arrayContent.substr(pos), "id");
-      std::string name = extractJsonString(arrayContent.substr(pos), "name");
-      std::string symbol = extractJsonString(arrayContent.substr(pos), "symbol");
-      uint64_t supply = extractJsonNumber(arrayContent.substr(pos), "totalSupply");
-      uint64_t maxSupply = extractJsonNumber(arrayContent.substr(pos), "maxSupply");
-      uint64_t decimals = extractJsonNumber(arrayContent.substr(pos), "decimals");
-      uint64_t model = extractJsonNumber(arrayContent.substr(pos), "backingModel");
-
-      if (!name.empty() && !symbol.empty())
-      {
-        std::string modelName = (model == 0) ? "Unbacked" : (model == 1) ? "Fully Backed"
-                                                                         : "Hybrid";
-        std::cout << "  " << symbol << " [" << name << "]" << std::endl;
-        std::cout << "    ID: " << id << " | Supply: " << formatAmount(supply, decimals)
-                  << " | Max: " << formatAmount(maxSupply, decimals)
-                  << " | Decimals: " << decimals << " | Model: " << modelName << std::endl;
-      }
-      pos++;
-      count++;
-    }
-    if (count == 0)
-    {
-      std::cout << "  No tokens found." << std::endl;
-    }
-  }
-
-  std::cout << "\nPress enter to return..." << std::endl;
-  std::cin.get();
-}
-
-void sidechainCreateTokenMenu(const Config &cfg, const std::string &spendPubHex)
-{
-  clearScreen();
-  std::cout << "=== Create Token ===" << std::endl;
-  std::cout << std::endl;
-  std::cout << "Token models:" << std::endl;
-  std::cout << "  0 = Unbacked (meme coins, no CCX required, free to create)" << std::endl;
-  std::cout << "  1 = Fully Backed (stablecoins, CCX must be locked 1:1)" << std::endl;
-  std::cout << "  2 = Hybrid (serious projects, CCX-backed with flexible fees)" << std::endl;
-  std::cout << std::endl;
-
-  std::string name, symbol;
-  uint64_t initialSupply;
-  int backingModel;
-  int decimals = 6;
-
-  std::cout << "Step 1/6: Token name (e.g., \"MyToken\"): ";
-  std::getline(std::cin, name);
-  if (name.empty())
-  {
-    std::cout << "Token name cannot be empty. Cancelled." << std::endl;
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::cout << "Step 2/6: Token symbol (e.g., \"MYT\"): ";
-  std::getline(std::cin, symbol);
-  if (symbol.empty())
-  {
-    std::cout << "Token symbol cannot be empty. Cancelled." << std::endl;
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::cout << "Step 3/6: Initial supply (e.g., 1000000): ";
-  std::cin >> initialSupply;
-  if (initialSupply == 0)
-  {
-    std::cout << "Supply must be greater than 0. Cancelled." << std::endl;
-    std::cin.ignore();
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::cout << "Step 4/6: Decimals (default 6, e.g., 6 for 0.000001): ";
-  std::cin >> decimals;
-  if (decimals < 0 || decimals > 18)
-  {
-    std::cout << "Decimals must be between 0 and 18. Using default 6." << std::endl;
-    decimals = 6;
-  }
-
-  std::cout << "Step 5/6: Backing model (0=Unbacked, 1=Fully Backed, 2=Hybrid): ";
-  std::cin >> backingModel;
-  std::cin.ignore();
-
-  if (backingModel < 0 || backingModel > 2)
-  {
-    std::cout << "Invalid backing model. Cancelled." << std::endl;
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::cout << std::endl;
-  std::cout << "Step 6/6: Confirm token creation:" << std::endl;
-  std::cout << "  Name: " << name << std::endl;
-  std::cout << "  Symbol: " << symbol << std::endl;
-  std::cout << "  Initial supply: " << initialSupply << std::endl;
-  std::cout << "  Decimals: " << decimals << std::endl;
-  std::cout << "  Backing model: ";
-  if (backingModel == 0)
-    std::cout << "Unbacked (no CCX needed)";
-  else if (backingModel == 1)
-    std::cout << "Fully Backed (CCX locked 1:1)";
-  else
-    std::cout << "Hybrid (CCX-backed, flexible fees)";
-  std::cout << std::endl;
-  std::cout << std::endl;
-  std::cout << "Create this token? (y/n): ";
-
-  std::string confirm;
-  std::getline(std::cin, confirm);
-  if (confirm != "y" && confirm != "Y")
-  {
-    std::cout << "Cancelled." << std::endl;
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::string nameHex = common::toHex(common::asBinaryArray(name));
-  std::string symbolHex = common::toHex(common::asBinaryArray(symbol));
-
-  std::ostringstream params;
-  params << "{"
-         << R"("from":")" << spendPubHex << R"(")"
-         << R"(,"nameHex":")" << nameHex << R"(")"
-         << R"(,"symbolHex":")" << symbolHex << R"(")"
-         << R"(,"initialSupply":)" << initialSupply
-         << R"(,"backingModel":)" << backingModel
-         << R"(,"decimals":)" << decimals
-         << "}";
-
-  std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "createToken", params.str());
-
-  std::cout << std::endl;
-  std::cout << "Result: " << result << std::endl;
-  std::cout << std::endl;
-
-  if (result.find("true") != std::string::npos)
-    std::cout << "Token $" << symbol << " created successfully!" << std::endl;
-  else if (result.find("error") != std::string::npos)
-    std::cout << "Error creating token. Sidechain may need to be reset." << std::endl;
-
-  std::cout << "Press enter to return..." << std::endl;
-  std::cin.get();
-}
-
-void sidechainTransferMenu(const Config &cfg, const std::string &spendPubHex, cn::Currency &currency)
-{
-  clearScreen();
-  std::cout << "=== Send Token ===" << std::endl;
-  std::cout << std::endl;
-
-  std::string to;
-  uint64_t amount, tokenId;
-
-  std::cout << "Step 1/3: Recipient address (base58 or hex): ";
-  std::getline(std::cin, to);
-  if (to.empty())
-  {
-    std::cout << "Address cannot be empty. Cancelled." << std::endl;
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::string toPubHex = addressToHexPubKey(to, currency);
-
-  std::cout << "Step 2/3: Amount: ";
-  std::cin >> amount;
-  if (amount == 0)
-  {
-    std::cout << "Amount must be greater than 0. Cancelled." << std::endl;
-    std::cin.ignore();
-    std::cout << "Press enter to return..." << std::endl;
-    std::cin.get();
-    return;
-  }
-
-  std::cout << "Step 3/3: Token ID (0=SCCX native, check S2 for others): ";
-  std::cin >> tokenId;
-  std::cin.ignore();
-
-  std::ostringstream params;
-  params << R"({"from":")" << spendPubHex << R"(")"
-         << R"(,"to":")" << toPubHex << R"(")"
-         << R"(,"amount":)" << amount
-         << R"(,"tokenId":)" << tokenId << "}";
-
-  std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "transfer", params.str());
-  std::cout << std::endl;
-
-  // Extract the transaction hash from the JSON-RPC response
-  std::string txHash;
-  size_t hashStart = result.find("\"result\":\"");
-  if (hashStart != std::string::npos)
-  {
-    hashStart += 10;
-    size_t hashEnd = result.find("\"", hashStart);
-    if (hashEnd != std::string::npos)
-    {
-      txHash = result.substr(hashStart, hashEnd - hashStart);
-    }
-  }
-
-  if (!txHash.empty() && txHash != "false")
-  {
-    std::cout << "Transfer sent successfully!" << std::endl;
-    std::cout << "Hash: " << txHash << std::endl;
-
-    TxEntry entry;
-    entry.type = "Transfer";
-    entry.tokenSymbol = "Token #" + std::to_string(tokenId);
-    entry.tokenId = tokenId;
-    entry.amount = amount;
-    entry.to = toPubHex;
-    entry.timestamp = getTimestamp();
-    entry.txHash = txHash;
-    txHistory.push_back(entry);
-  }
-  else
-  {
-    std::cout << "Transfer failed." << std::endl;
-  }
-
-  std::cout << "Press enter to return..." << std::endl;
-  std::cin.get();
-}
-
-void sidechainBalanceMenu(const Config &cfg, const std::string &spendPubHex)
-{
-  clearScreen();
-  std::cout << "=== Token Balances ===" << std::endl;
-  std::cout << std::endl;
-
-  std::ostringstream nativeParams;
-  nativeParams << R"({"address":")" << spendPubHex << R"(","tokenId":0})";
-  std::string nativeBalJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", nativeParams.str());
-  uint64_t sccxBalance = extractJsonNumber(nativeBalJson, "result");
-  std::cout << "Native SCCX: " << formatAmount(sccxBalance) << std::endl;
-  std::cout << std::endl;
-
-  std::string tokensResult = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokens", "{}");
-  std::cout << "Token Balances:" << std::endl;
-
-  size_t arrayStart = tokensResult.find("\"result\":[");
-  if (arrayStart == std::string::npos)
-  {
-    std::cout << "  No tokens found." << std::endl;
-  }
-  else
-  {
-    arrayStart += 10;
-    std::string arrayContent = tokensResult.substr(arrayStart);
-
-    size_t pos = 0;
-    int count = 0;
-    while ((pos = arrayContent.find("\"id\":", pos)) != std::string::npos)
-    {
-      uint64_t id = extractJsonNumber(arrayContent.substr(pos), "id");
-      std::string name = extractJsonString(arrayContent.substr(pos), "name");
-      std::string symbol = extractJsonString(arrayContent.substr(pos), "symbol");
-      uint64_t supply = extractJsonNumber(arrayContent.substr(pos), "totalSupply");
-      uint64_t decimals = extractJsonNumber(arrayContent.substr(pos), "decimals");
-
-      if (!name.empty() && !symbol.empty())
-      {
-        std::ostringstream tokParams;
-        tokParams << R"({"address":")" << spendPubHex << R"(","tokenId":)" << id << "}";
-        std::string tokBalJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", tokParams.str());
-        uint64_t tokBalance = extractJsonNumber(tokBalJson, "result");
-
-        std::cout << "  " << symbol << " [" << name << "]"
-                  << " | Balance: " << formatAmount(tokBalance, decimals)
-                  << " | Supply: " << formatAmount(supply, decimals)
-                  << " | Decimals: " << decimals << std::endl;
-      }
-      pos++;
-      count++;
-    }
-    if (count == 0)
-    {
-      std::cout << "  No tokens found." << std::endl;
-    }
-  }
-
-  std::cout << "\nPress enter to return..." << std::endl;
-  std::cin.get();
-}
-
-void sidechainStatusMenu(const Config &cfg)
-{
-  clearScreen();
-  std::cout << "=== Sidechain Status ===" << std::endl;
-  std::cout << std::endl;
-  auto summary = getSidechainSummary(cfg);
-  if (!summary.connected)
-  {
-    std::cout << "Sidechain unreachable." << std::endl;
-  }
-  else
-  {
-    std::cout << "Network Status:" << std::endl;
-    std::cout << "  Height: " << summary.height << std::endl;
-    std::cout << "  Unique tokens: " << summary.tokenCount << std::endl;
-    std::cout << "  Pending transactions: " << summary.pendingTx << std::endl;
-    std::cout << std::endl;
-    std::cout << "Connection: " << cfg.sidechainHost << ":" << cfg.sidechainPort << std::endl;
-    std::cout << "Mode: " << (cfg.sidechainTestnet ? "TESTNET" : "MAINNET-STAGING") << std::endl;
-  }
-  std::cout << "\nPress enter to return..." << std::endl;
-  std::cin.get();
-}
-
-void sidechainQuickCreateMenu(const Config &cfg, const std::string &spendPubHex)
-{
-  clearScreen();
-  std::cout << "=== Quick Create Token ===" << std::endl;
-  std::cout << std::endl;
-
-  std::string name = "test" + std::to_string(time(nullptr) % 10000);
-  std::string symbol = "T" + std::to_string(time(nullptr) % 1000);
-  uint64_t initialSupply = 1000;
-  int backingModel = 0;
-  uint8_t decimals = 6;
-
-  std::cout << "Creating token with defaults:" << std::endl;
-  std::cout << "  Name: " << name << std::endl;
-  std::cout << "  Symbol: " << symbol << std::endl;
-  std::cout << "  Supply: " << initialSupply << std::endl;
-  std::cout << "  Decimals: " << (int)decimals << std::endl;
-  std::cout << "  Model: Unbacked" << std::endl;
-  std::cout << std::endl;
-
-  std::string nameHex = common::toHex(common::asBinaryArray(name));
-  std::string symbolHex = common::toHex(common::asBinaryArray(symbol));
-
-  std::ostringstream params;
-  params << "{"
-         << R"("from":")" << spendPubHex << R"(")"
-         << R"(,"nameHex":")" << nameHex << R"(")"
-         << R"(,"symbolHex":")" << symbolHex << R"(")"
-         << R"(,"initialSupply":)" << initialSupply
-         << R"(,"backingModel":)" << backingModel
-         << R"(,"decimals":)" << (int)decimals
-         << "}";
-
-  std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "createToken", params.str());
-
-  // Extract the transaction hash from the JSON-RPC response
-  std::string txHash;
-  size_t hashStart = result.find("\"result\":\"");
-  if (hashStart != std::string::npos)
-  {
-    hashStart += 10;
-    size_t hashEnd = result.find("\"", hashStart);
-    if (hashEnd != std::string::npos)
-    {
-      txHash = result.substr(hashStart, hashEnd - hashStart);
-    }
-  }
-
-  if (!txHash.empty() && txHash != "false")
-  {
-    std::cout << "Token $" << symbol << " created!" << std::endl;
-    std::cout << "Hash: " << txHash << std::endl;
-
-    TxEntry entry;
-    entry.type = "CreateToken";
-    entry.tokenSymbol = symbol;
-    entry.tokenId = 0;
-    entry.amount = initialSupply;
-    entry.to = spendPubHex;
-    entry.timestamp = getTimestamp();
-    entry.txHash = txHash;
-    txHistory.push_back(entry);
-  }
-  else
-  {
-    std::cout << "Failed to create token." << std::endl;
-  }
-
-  std::cout << "\nPress enter to return..." << std::endl;
-  std::cin.get();
-}
-
-void sidechainTxHistoryMenu()
-{
-  clearScreen();
-  std::cout << "=== Transaction History ===" << std::endl;
-  std::cout << std::endl;
-
-  if (txHistory.empty())
-  {
-    std::cout << "No transactions yet." << std::endl;
-  }
-  else
-  {
-    for (size_t i = 0; i < txHistory.size(); ++i)
-    {
-      const auto &tx = txHistory[i];
-      std::cout << (i + 1) << ". [" << tx.type << "] " << tx.tokenSymbol;
-      std::cout << " | Amount: " << formatAmount(tx.amount);
-      std::cout << " | To: " << formatHash(tx.to);
-      std::cout << " | Hash: " << formatHash(tx.txHash);
-      std::cout << " | " << tx.timestamp;
-      std::cout << std::endl;
-    }
-  }
-
-  std::cout << "\nPress enter to return..." << std::endl;
-  std::cin.get();
-}
-
-std::vector<TxEntry> loadTransactionHistory(const Config &cfg, const std::string &spendPubHex)
-{
-  std::vector<TxEntry> history;
-
-  std::ostringstream params;
-  params << R"({"address":")" << spendPubHex << R"("})";
-  std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTransactions", params.str());
-
-  // Parse each transaction from the JSON array
-  size_t pos = 0;
-  while ((pos = result.find("\"txHash\":\"", pos)) != std::string::npos)
-  {
-    TxEntry entry;
-    entry.txHash = extractJsonString(result.substr(pos), "txHash");
-    entry.type = extractJsonString(result.substr(pos), "type");
-    entry.tokenId = extractJsonNumber(result.substr(pos), "tokenId");
-    entry.amount = extractJsonNumber(result.substr(pos), "amount");
-
-    std::string toHex = extractJsonString(result.substr(pos), "to");
-    entry.to = toHex;
-
-    // Determine the token symbol based on type and tokenId
-    if (entry.type == "CreateToken")
-    {
-      entry.tokenSymbol = "Token Creation";
-    }
-    else if (entry.tokenId == 0)
-    {
-      entry.tokenSymbol = "SCCX";
-    }
-    else
-    {
-      entry.tokenSymbol = "Token #" + std::to_string(entry.tokenId);
-    }
-
-    uint64_t timestamp = extractJsonNumber(result.substr(pos), "timestamp");
-    if (timestamp > 0)
-    {
-      time_t t = static_cast<time_t>(timestamp);
-      std::string ts = std::ctime(&t);
-      if (!ts.empty() && ts.back() == '\n')
-        ts.pop_back();
-      entry.timestamp = ts;
-    }
-    else
-    {
-      entry.timestamp = "Unknown";
-    }
-
-    history.push_back(entry);
-    pos++;
-  }
-
-  return history;
-}
 
 int main(int argc, char *argv[])
 {
@@ -805,7 +58,6 @@ int main(int argc, char *argv[])
 
   std::string spendPubHex = common::podToHex(spendPub);
 
-  // Load sidechain transaction history
   txHistory = loadTransactionHistory(cfg, spendPubHex);
 
   logging::LoggerManager logManager;
@@ -817,9 +69,7 @@ int main(int argc, char *argv[])
   std::cout << "Address: " << addressStr << std::endl;
 
   if (cfg.sidechainTestnet)
-  {
-    std::cout << "\nTestnet mode — connect wallet to running sidechain validator" << std::endl;
-  }
+    std::cout << "\nTestnet mode" << std::endl;
 
   platform_system::Dispatcher dispatcher;
   NodeRpcProxy node(dispatcher, cfg.daemonHost, cfg.daemonPort, logger);
@@ -843,6 +93,7 @@ int main(int argc, char *argv[])
 
   std::cout << "Sidechain: " << cfg.sidechainHost << ":" << cfg.sidechainPort
             << " [" << (cfg.sidechainTestnet ? "TESTNET" : "MAINNET") << "]" << std::endl;
+  std::cout << "DEX: " << cfg.dexHost << ":" << cfg.dexPort << std::endl;
 
   std::unique_ptr<BoltCore::Wallet> walletPtr;
   std::vector<BoltSync::FoundOutput> allOutputs;
@@ -850,7 +101,7 @@ int main(int argc, char *argv[])
 
   if (daemonConnected && !cfg.skipScan && !cfg.dataDir.empty())
   {
-    std::cout << "\nScanning main chain... This may take a few minutes.\n"
+    std::cout << "\nScanning main chain...\n"
               << std::endl;
     BoltSync::Scanner scanner(viewKey, viewPub, hasSpendKey ? &spendKey : nullptr);
     BoltSync::ScanConfig scanCfg;
@@ -884,7 +135,6 @@ int main(int argc, char *argv[])
       info.subAddress = addressStr;
       outputInfos.push_back(info);
     }
-
     walletPtr.reset(new BoltCore::Wallet(viewKey, spendKey, viewPub, spendPub, node, currency));
     walletPtr->loadOutputs(outputInfos);
   }
@@ -893,21 +143,22 @@ int main(int argc, char *argv[])
   while (true)
   {
     clearScreen();
-    auto summary = getSidechainSummary(cfg);
-    BoltCore::Balance balance{0, 0, 0, 0};
 
+    auto status = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getStatus", "{}");
+    uint64_t height = extractJsonNumber(status, "height");
+    uint64_t tokenCount = extractJsonNumber(status, "tokenCount");
+    bool connected = !status.empty() && status != "{}";
+
+    BoltCore::Balance balance{0, 0, 0, 0};
     if (walletPtr)
-    {
       balance = walletPtr->getBalance();
-    }
 
     bool daemonLive = false;
     if (daemonConnected)
     {
       try
       {
-        uint32_t testHeight = node.getLastLocalBlockHeight();
-        daemonLive = (testHeight > 0);
+        daemonLive = node.getLastLocalBlockHeight() > 0;
       }
       catch (...)
       {
@@ -915,7 +166,6 @@ int main(int argc, char *argv[])
       }
     }
 
-    // Get sidechain SCCX balance
     uint64_t sccxBalance = 0;
     {
       std::ostringstream sccxParams;
@@ -929,15 +179,12 @@ int main(int argc, char *argv[])
     std::cout << "Main Chain: [" << (daemonLive ? "ONLINE" : "OFFLINE") << "]" << std::endl;
     std::cout << "Sidechain: [" << cfg.sidechainHost << ":" << cfg.sidechainPort
               << " " << (cfg.sidechainTestnet ? "TESTNET" : "STAGING") << "]"
-              << " [" << (summary.connected ? "CONNECTED" : "UNREACHABLE") << "]" << std::endl;
-    std::cout << "  Height: " << summary.height << " | Tokens: " << summary.tokenCount
-              << " | Backed CCX: " << summary.totalBackedCCX << std::endl;
+              << " [" << (connected ? "CONNECTED" : "UNREACHABLE") << "]" << std::endl;
+    std::cout << "  Height: " << height << " | Tokens: " << tokenCount << std::endl;
     std::cout << "------------------------------------" << std::endl;
     std::cout << "CCX Balance: " << formatAmount(balance.actual)
               << " (pending " << formatAmount(balance.pending) << ")" << std::endl;
     std::cout << "SCCX Balance: " << formatAmount(sccxBalance) << std::endl;
-    std::cout << "Deposits locked: " << formatAmount(balance.lockedDeposit)
-              << " unlocked: " << formatAmount(balance.unlockedDeposit) << std::endl;
     std::cout << "------------------------------------" << std::endl;
 
     if (walletPtr)
@@ -957,6 +204,13 @@ int main(int argc, char *argv[])
     std::cout << "S6. Quick create token" << std::endl;
     std::cout << "S7. Transaction history" << std::endl;
     std::cout << "------------------------------------" << std::endl;
+    std::cout << "D0. DEX deposit address" << std::endl;
+    std::cout << "D1. DEX order book" << std::endl;
+    std::cout << "D2. Place DEX order" << std::endl;
+    std::cout << "D3. DEX trade history" << std::endl;
+    std::cout << "D4. Cancel DEX order" << std::endl;
+    std::cout << "D5. DEX escrow balance" << std::endl;
+    std::cout << "------------------------------------" << std::endl;
     std::cout << "0. Exit" << std::endl;
     std::cout << "Choice: ";
     std::getline(std::cin, input);
@@ -965,14 +219,14 @@ int main(int argc, char *argv[])
     {
       std::string destAddr;
       uint64_t amount;
-      std::cout << "Destination address: ";
+      std::cout << "Destination: ";
       std::getline(std::cin, destAddr);
       std::cout << "Amount: ";
       std::cin >> amount;
       std::cin.ignore();
       auto res = walletPtr->transfer(destAddr, amount);
       std::cout << (res.success ? "Sent! Tx: " + res.txHash : "Error: " + res.error) << std::endl;
-      std::cout << "Press enter..." << std::endl;
+      std::cout << "Press enter...";
       std::cin.get();
     }
     else if (walletPtr && input == "2")
@@ -981,12 +235,12 @@ int main(int argc, char *argv[])
       uint32_t term;
       std::cout << "Amount: ";
       std::cin >> amount;
-      std::cout << "Term (blocks): ";
+      std::cout << "Term: ";
       std::cin >> term;
       std::cin.ignore();
       auto res = walletPtr->createDeposit(amount, term);
       std::cout << (res.success ? "Deposit created! Tx: " + res.txHash : "Error: " + res.error) << std::endl;
-      std::cout << "Press enter..." << std::endl;
+      std::cout << "Press enter...";
       std::cin.get();
     }
     else if (walletPtr && input == "3")
@@ -997,7 +251,7 @@ int main(int argc, char *argv[])
       std::cin.ignore();
       auto res = walletPtr->withdrawDeposit(depositId);
       std::cout << (res.success ? "Withdrawn! Tx: " + res.txHash : "Error: " + res.error) << std::endl;
-      std::cout << "Press enter..." << std::endl;
+      std::cout << "Press enter...";
       std::cin.get();
     }
     else if (walletPtr && input == "4")
@@ -1006,8 +260,8 @@ int main(int argc, char *argv[])
       std::cout << "Fusion ready: " << est.fusionReadyCount << " outputs (total: " << est.totalOutputCount << ")" << std::endl;
       if (est.fusionReadyCount > 0)
       {
-        std::cout << "Create fusion? (y/n): ";
         std::string yn;
+        std::cout << "Create fusion? (y/n): ";
         std::getline(std::cin, yn);
         if (yn == "y")
         {
@@ -1015,48 +269,44 @@ int main(int argc, char *argv[])
           std::cout << (res.success ? "Fusion tx: " + res.txHash : "Error: " + res.error) << std::endl;
         }
       }
-      std::cout << "Press enter..." << std::endl;
+      std::cout << "Press enter...";
       std::cin.get();
     }
     else if (walletPtr && input == "5")
     {
       auto sub = walletPtr->generateSubAddress();
       std::cout << "New sub-address: " << sub.address << std::endl;
-      std::cout << "Press enter..." << std::endl;
+      std::cout << "Press enter...";
       std::cin.get();
     }
     else if (input == "S1" || input == "s1")
-    {
       sidechainStatusMenu(cfg);
-    }
     else if (input == "S2" || input == "s2")
-    {
       sidechainTokensMenu(cfg);
-    }
     else if (input == "S3" || input == "s3")
-    {
       sidechainCreateTokenMenu(cfg, spendPubHex);
-    }
     else if (input == "S4" || input == "s4")
-    {
       sidechainTransferMenu(cfg, spendPubHex, currency);
-    }
     else if (input == "S5" || input == "s5")
-    {
       sidechainBalanceMenu(cfg, spendPubHex);
-    }
     else if (input == "S6" || input == "s6")
-    {
       sidechainQuickCreateMenu(cfg, spendPubHex);
-    }
     else if (input == "S7" || input == "s7")
-    {
       sidechainTxHistoryMenu();
-    }
+    else if (input == "D0" || input == "d0")
+      dexDepositAddressMenu(cfg);
+    else if (input == "D1" || input == "d1")
+      dexOrderBookMenu(cfg);
+    else if (input == "D2" || input == "d2")
+      dexSubmitOrderMenu(cfg, spendPubHex);
+    else if (input == "D3" || input == "d3")
+      dexTradeHistoryMenu(cfg);
+    else if (input == "D4" || input == "d4")
+      dexCancelOrderMenu(cfg, spendPubHex);
+    else if (input == "D5" || input == "d5")
+      dexEscrowBalanceMenu(cfg, spendPubHex);
     else if (input == "0")
-    {
       break;
-    }
   }
 
   return 0;
