@@ -21,6 +21,7 @@
 #include "BridgeWatcher.h"
 #include "GossipManager.h"
 #include "BftConsensus.h"
+#include "BoltDex.h"
 
 #include "BoltSync/BoltSync.h"
 #include "BoltSync/CryptoHelpers.h"
@@ -53,6 +54,8 @@ struct Config
   uint16_t seedPort = 0;
   std::string rewardAddress;
   size_t rpcThreads = 1;
+  bool enableDex = false;
+  double dexFee = 0.0;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
@@ -72,7 +75,9 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
     ("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")
     ("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")
     ("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")
-    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count");
+    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")
+    ("enable-dex", po::bool_switch(), "Enable built-in DEX engine")
+    ("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage");
 
   po::variables_map vm;
   try
@@ -104,6 +109,8 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.seedPort = vm["seed-port"].as<uint16_t>();
   cfg.rewardAddress = vm["reward-address"].as<std::string>();
   cfg.rpcThreads = vm["rpc-threads"].as<size_t>();
+  cfg.enableDex = vm["enable-dex"].as<bool>();
+  cfg.dexFee = vm["dex-fee"].as<double>();
 
   return true;
 }
@@ -284,11 +291,44 @@ int main(int argc, char *argv[])
     validator.setRewardKey(rewardPub);
   }
 
+  // DEX Engine (optional)
+  std::unique_ptr<Sidechain::BoltDex::Engine> dexEngine;
+  if (cfg.enableDex)
+  {
+    dexEngine.reset(new Sidechain::BoltDex::Engine());
+    dexEngine->setStorage(storage);
+    dexEngine->setValidator(validator);
+    dexEngine->setTradingFee(cfg.dexFee);
+
+    // Use reward address as DEX fee destination
+    if (hasRewardWallet)
+    {
+      crypto::SecretKey emptySec{};
+      dexEngine->setDexKeys(rewardPub, emptySec);
+      std::cout << "DEX enabled, fees go to reward address" << std::endl;
+    }
+    else
+    {
+      dexEngine->setDexKeys(self.publicKey, validatorSec);
+      std::cout << "DEX enabled, fees go to validator address" << std::endl;
+    }
+  }
+
+  if (dexEngine)
+  {
+    validator.setDexEngine(dexEngine.get());
+  }
+
   // RPC server
   Sidechain::SidechainRpcServer rpcServer(consoleLogger, storage, validator);
   rpcServer.setTestnet(cfg.testnet);
   rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
   logger(logging::INFO) << "RPC server listening on " << cfg.bindIp << ":" << cfg.bindPort;
+
+  if (dexEngine)
+  {
+    rpcServer.setDexEngine(dexEngine.get());
+  }
 
   // Daemon connection
   cn::Currency currency = cn::CurrencyBuilder(logManager).currency();

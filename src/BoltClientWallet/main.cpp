@@ -95,6 +95,9 @@ int main(int argc, char *argv[])
             << " [" << (cfg.sidechainTestnet ? "TESTNET" : "MAINNET") << "]" << std::endl;
   std::cout << "DEX: " << cfg.dexHost << ":" << cfg.dexPort << std::endl;
 
+  // Load token metadata cache for symbol/decimals resolution
+  loadTokenCache(cfg.sidechainHost, cfg.sidechainPort);
+
   std::unique_ptr<BoltCore::Wallet> walletPtr;
   std::vector<BoltSync::FoundOutput> allOutputs;
   std::vector<BoltCore::OutputInfo> outputInfos;
@@ -184,7 +187,7 @@ int main(int argc, char *argv[])
     std::cout << "------------------------------------" << std::endl;
     std::cout << "CCX Balance: " << formatAmount(balance.actual)
               << " (pending " << formatAmount(balance.pending) << ")" << std::endl;
-    std::cout << "SCCX Balance: " << formatAmount(sccxBalance) << std::endl;
+    std::cout << "SCCX Balance: " << formatAmount(sccxBalance, 6) << std::endl;
     std::cout << "------------------------------------" << std::endl;
 
     if (walletPtr)

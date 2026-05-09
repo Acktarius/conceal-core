@@ -1,4 +1,4 @@
-// JsonHelpers.cpp — JSON parsing utilities
+// JsonHelpers.cpp — JSON parsing utilities and token info cache
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 // Distributed under the MIT/X11 software license
 
@@ -12,6 +12,7 @@
 #include <System/Dispatcher.h>
 #include <sstream>
 #include <ctime>
+#include <iostream>
 
 std::string extractJsonString(const std::string &json, const std::string &key)
 {
@@ -107,6 +108,112 @@ std::string formatAmount(uint64_t amount, uint8_t decimals)
   return result;
 }
 
+// Token cache for decimal lookups
+static std::unordered_map<uint64_t, TokenInfoCache> g_tokenCache;
+
+void loadTokenCache(const std::string &host, uint16_t port)
+{
+  g_tokenCache.clear();
+
+  // SCCX is always token 0 with 6 decimals
+  TokenInfoCache sccx;
+  sccx.symbol = "SCCX";
+  sccx.name = "SCCX";
+  sccx.decimals = 6;
+  g_tokenCache[0] = sccx;
+
+  std::string result = sidechainCall(host, port, "getTokens", "{}");
+
+  // Find the result array
+  size_t arrayStart = result.find("\"result\":[");
+  if (arrayStart == std::string::npos)
+    return;
+  arrayStart += 9; // skip past "result":[
+
+  // Parse each complete JSON object { ... }
+  size_t pos = arrayStart;
+  while ((pos = result.find("{\"id\":", pos)) != std::string::npos)
+  {
+    // Find the matching closing brace for this object
+    size_t objEnd = pos;
+    int braceDepth = 0;
+    bool inString = false;
+    while (objEnd < result.size())
+    {
+      char c = result[objEnd];
+      if (c == '"' && (objEnd == pos || result[objEnd - 1] != '\\'))
+        inString = !inString;
+      else if (!inString)
+      {
+        if (c == '{')
+          braceDepth++;
+        else if (c == '}')
+        {
+          braceDepth--;
+          if (braceDepth == 0)
+            break;
+        }
+      }
+      objEnd++;
+    }
+
+    if (braceDepth != 0 || objEnd >= result.size())
+      break; // malformed JSON, bail
+
+    // Extract the complete object string
+    std::string obj = result.substr(pos, objEnd - pos + 1);
+
+    // Parse fields from this single object
+    uint64_t id = extractJsonNumber(obj, "id");
+    std::string symbol = extractJsonString(obj, "symbol");
+    std::string name = extractJsonString(obj, "name");
+    uint64_t decimals = extractJsonNumber(obj, "decimals");
+
+    // Only cache if we got a valid ID and symbol
+    if (id > 0 && !symbol.empty())
+    {
+      TokenInfoCache info;
+      info.symbol = symbol;
+      info.name = name;
+      info.decimals = static_cast<uint8_t>(decimals > 0 ? decimals : 6);
+      g_tokenCache[id] = info;
+    }
+
+    pos = objEnd + 1; // move past this object for the next iteration
+  }
+
+  std::cout << "Loaded " << g_tokenCache.size() << " token(s)" << std::endl;
+}
+
+TokenInfoCache getTokenInfo(uint64_t tokenId)
+{
+  auto it = g_tokenCache.find(tokenId);
+  if (it != g_tokenCache.end())
+    return it->second;
+
+  TokenInfoCache unknown;
+  unknown.symbol = "Token #" + std::to_string(tokenId);
+  unknown.name = "Unknown";
+  unknown.decimals = 6;
+  return unknown;
+}
+
+std::string getTokenSymbol(uint64_t tokenId)
+{
+  return getTokenInfo(tokenId).symbol;
+}
+
+uint8_t getTokenDecimals(uint64_t tokenId)
+{
+  return getTokenInfo(tokenId).decimals;
+}
+
+std::string formatAmountWithDecimals(uint64_t amount, uint64_t tokenId,
+                                     const std::string &sidechainHost, uint16_t sidechainPort)
+{
+  return formatAmount(amount, getTokenDecimals(tokenId));
+}
+
 void clearScreen() { std::cout << "\033[2J\033[1;1H" << std::flush; }
 
 std::string formatHash(const std::string &hash, size_t len)
@@ -141,4 +248,9 @@ std::string addressToHexPubKey(const std::string &input, cn::Currency &currency)
   }
 
   return input;
+}
+
+const std::unordered_map<uint64_t, TokenInfoCache> &getTokenCache()
+{
+  return g_tokenCache;
 }

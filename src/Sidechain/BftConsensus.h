@@ -15,6 +15,14 @@
 
 namespace Sidechain
 {
+  namespace BoltDex
+  {
+    class Engine;
+  }
+}
+
+namespace Sidechain
+{
   class SidechainStorage;
 
   class BftConsensus
@@ -54,6 +62,8 @@ namespace Sidechain
     // Reward Validators
     void setRewardKey(const crypto::PublicKey &rewardKey);
 
+    // Dex Engine
+    void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_dexEngine = engine; }
 
   private:
     void broadcastProposal(const Block &block);
@@ -67,6 +77,7 @@ namespace Sidechain
 
     std::atomic<uint64_t> m_currentHeight{0};
     bool m_validatorsSynced = false;
+    Sidechain::BoltDex::Engine *m_dexEngine = nullptr;
 
     struct PendingBlock
     {

@@ -92,6 +92,22 @@ namespace Sidechain
         result = methodGetTransactions(params);
       else if (method == "faucet")
         result = methodFaucet(params);
+      else if (method == "dex_getOrders")
+        result = methodDexGetOrders(params);
+      else if (method == "dex_getTrades")
+        result = methodDexGetTrades(params);
+      else if (method == "dex_getAllTrades")
+        result = methodDexGetAllTrades(params);
+      else if (method == "dex_submitOrder")
+        result = methodDexSubmitOrder(params);
+      else if (method == "dex_cancelOrder")
+        result = methodDexCancelOrder(params);
+      else if (method == "dex_deposit")
+        result = methodDexDeposit(params);
+      else if (method == "dex_withdraw")
+        result = methodDexWithdraw(params);
+      else if (method == "dex_getEscrowBalance")
+        result = methodDexGetEscrowBalance(params);
       else
       {
         std::string error = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":" + id + "}";
@@ -378,7 +394,6 @@ namespace Sidechain
     crypto::PublicKey pubKey;
     common::podFromHex(address, pubKey);
 
-    // Check if this address has already claimed
     std::string claimKey = "faucet_" + common::podToHex(pubKey);
     std::vector<uint8_t> claimed;
     if (m_storage.getMeta(claimKey, claimed) && !claimed.empty())
@@ -386,8 +401,6 @@ namespace Sidechain
       return R"({"status":"error","message":"already claimed"})";
     }
 
-    // Verify the address has received a transaction before
-    // This prevents bots from generating fresh keys to farm the faucet
     uint64_t topHeight = m_storage.topBlockHeight();
     bool hasHistory = false;
     for (uint64_t h = 1; h <= topHeight && !hasHistory; ++h)
@@ -410,13 +423,11 @@ namespace Sidechain
       return R"({"status":"error","message":"address has no transaction history, send a token or SCCX to this address first"})";
     }
 
-    // Credit the address with enough SCCX for 2 transfers
     uint64_t faucetAmount = SidechainConfig::FAUCET_AMOUNT;
     uint64_t currentBalance = 0;
     m_storage.getBalance(pubKey, 0, currentBalance);
     m_storage.setBalance(pubKey, 0, currentBalance + faucetAmount);
 
-    // Mark as claimed
     m_storage.putMeta(claimKey, {1});
 
     return R"({"status":"ok","amount":)" + std::to_string(faucetAmount) + R"(,"balance":)" + std::to_string(currentBalance + faucetAmount) + "}";
@@ -440,5 +451,165 @@ namespace Sidechain
   std::string SidechainRpcServer::methodSidechainCreateToken(const common::JsonValue &params)
   {
     return methodCreateToken(params);
+  }
+
+  // ─── DEX RPC methods ────────────────────────────────────────
+
+  std::string SidechainRpcServer::methodDexGetOrders(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "[]";
+
+    uint64_t baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
+    uint64_t quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
+
+    auto orders = m_dexEngine->getOrders(baseTokenId, quoteTokenId);
+    std::string result = "[";
+    for (size_t i = 0; i < orders.size(); ++i)
+    {
+      result += "{";
+      result += R"("id":)" + std::to_string(orders[i].id) + ",";
+      result += R"("type":")" + std::string(orders[i].type == BoltDex::OrderType::Buy ? "buy" : "sell") + "\",";
+      result += R"("owner":")" + common::podToHex(orders[i].owner) + "\",";
+      result += R"("amount":)" + std::to_string(orders[i].amount) + ",";
+      result += R"("price":)" + std::to_string(orders[i].price) + ",";
+      result += R"("filled":)" + std::to_string(orders[i].filled) + ",";
+      std::string statusStr = "open";
+      if (orders[i].status == BoltDex::OrderStatus::Filled)
+        statusStr = "filled";
+      else if (orders[i].status == BoltDex::OrderStatus::Cancelled)
+        statusStr = "cancelled";
+      result += R"("status":")" + statusStr + "\"";
+      result += "}";
+      if (i < orders.size() - 1)
+        result += ",";
+    }
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodDexGetTrades(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "[]";
+
+    uint64_t baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
+    uint64_t quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
+    size_t limit = params.contains("limit") ? static_cast<size_t>(params("limit").getInteger()) : 50;
+
+    auto trades = m_dexEngine->getTrades(baseTokenId, quoteTokenId, limit);
+    std::string result = "[";
+    for (size_t i = 0; i < trades.size(); ++i)
+    {
+      result += "{";
+      result += R"("id":)" + std::to_string(trades[i].id) + ",";
+      result += R"("buyer":")" + common::podToHex(trades[i].buyer) + "\",";
+      result += R"("seller":")" + common::podToHex(trades[i].seller) + "\",";
+      result += R"("amount":)" + std::to_string(trades[i].amount) + ",";
+      result += R"("price":)" + std::to_string(trades[i].price) + ",";
+      result += R"("settled":)" + std::string(trades[i].settled ? "true" : "false") + ",";
+      result += R"("timestamp":)" + std::to_string(trades[i].timestamp);
+      result += "}";
+      if (i < trades.size() - 1)
+        result += ",";
+    }
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodDexGetAllTrades(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "[]";
+
+    size_t limit = params.contains("limit") ? static_cast<size_t>(params("limit").getInteger()) : 100;
+    auto trades = m_dexEngine->getAllTrades(limit);
+    std::string result = "[";
+    for (size_t i = 0; i < trades.size(); ++i)
+    {
+      result += "{";
+      result += R"("id":)" + std::to_string(trades[i].id) + ",";
+      result += R"("buyer":")" + common::podToHex(trades[i].buyer) + "\",";
+      result += R"("seller":")" + common::podToHex(trades[i].seller) + "\",";
+      result += R"("baseTokenId":)" + std::to_string(trades[i].baseTokenId) + ",";
+      result += R"("quoteTokenId":)" + std::to_string(trades[i].quoteTokenId) + ",";
+      result += R"("amount":)" + std::to_string(trades[i].amount) + ",";
+      result += R"("price":)" + std::to_string(trades[i].price) + ",";
+      result += R"("settled":)" + std::string(trades[i].settled ? "true" : "false") + ",";
+      result += R"("timestamp":)" + std::to_string(trades[i].timestamp);
+      result += "}";
+      if (i < trades.size() - 1)
+        result += ",";
+    }
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodDexSubmitOrder(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "false";
+
+    BoltDex::Order order;
+    order.type = params("type").getString() == "buy" ? BoltDex::OrderType::Buy : BoltDex::OrderType::Sell;
+    common::podFromHex(params("owner").getString(), order.owner);
+    order.baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
+    order.quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
+    order.amount = static_cast<uint64_t>(params("amount").getInteger());
+    order.price = static_cast<uint64_t>(params("price").getInteger());
+
+    if (m_dexEngine->submitOrder(order))
+      return "true";
+    return "false";
+  }
+
+  std::string SidechainRpcServer::methodDexCancelOrder(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "false";
+
+    uint64_t orderId = static_cast<uint64_t>(params("orderId").getInteger());
+    crypto::PublicKey owner;
+    common::podFromHex(params("owner").getString(), owner);
+
+    if (m_dexEngine->cancelOrder(orderId, owner))
+      return "true";
+    return "false";
+  }
+
+  std::string SidechainRpcServer::methodDexDeposit(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "{}";
+
+    crypto::PublicKey dexPub = m_dexEngine->getDexPublicKey();
+    return R"({"dexAddress":")" + common::podToHex(dexPub) + R"("})";
+  }
+
+  std::string SidechainRpcServer::methodDexWithdraw(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "false";
+
+    crypto::PublicKey owner;
+    common::podFromHex(params("owner").getString(), owner);
+    uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
+    uint64_t amount = static_cast<uint64_t>(params("amount").getInteger());
+
+    if (m_dexEngine->withdraw(owner, tokenId, amount))
+      return "true";
+    return "false";
+  }
+
+  std::string SidechainRpcServer::methodDexGetEscrowBalance(const common::JsonValue &params)
+  {
+    if (!m_dexEngine)
+      return "0";
+
+    crypto::PublicKey owner;
+    common::podFromHex(params("owner").getString(), owner);
+    uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
+
+    return std::to_string(m_dexEngine->getEscrowBalance(owner, tokenId));
   }
 }

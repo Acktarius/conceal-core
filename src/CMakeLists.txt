@@ -38,7 +38,6 @@ file(GLOB_RECURSE BOLT_TUI_FILES BoltClientWallet/*)
 file(GLOB_RECURSE BOLTRPC_FILES BoltRPC/*)
 file(GLOB_RECURSE SIDECHAIN_FILES Sidechain/*)
 file(GLOB_RECURSE BOLTHTTP_FILES BoltHttp/*)
-file(GLOB_RECURSE BOLTDEX_FILES BoltDex/*)
 
 if(MSVC OR MINGW)
   file(GLOB_RECURSE System System/* Platform/Windows/System/*)
@@ -91,7 +90,6 @@ add_executable(Optimizer ${Optimizer})
 add_executable(BoltClientWallet ${BOLT_TUI_FILES})
 add_executable(BoltRPC ${BOLTRPC_FILES})
 add_executable(Sidechain ${SIDECHAIN_FILES})
-add_executable(BoltDex ${BOLTDEX_FILES})
 
 if (MSVC)
   target_link_libraries(System ws2_32)
@@ -167,23 +165,6 @@ target_link_libraries(Sidechain
     ${CMAKE_THREAD_LIBS_INIT}
 )
 
-target_link_libraries(BoltDex
-    BoltSync
-    BoltHttp
-    Rpc
-    Http
-    System
-    CryptoNoteCore
-    Serialization
-    Logging
-    -Wl,--start-group
-        Common
-        crypto
-    -Wl,--end-group
-    ${Boost_LIBRARIES}
-    ${CMAKE_THREAD_LIBS_INIT}
-)
-
 # Tools (ColdSync + MigrationTool)
 add_subdirectory(Tools)
 
@@ -203,7 +184,6 @@ add_dependencies(PaymentGateService version)
 add_dependencies(P2P version)
 add_dependencies(BoltRPC version)
 add_dependencies(Sidechain version)
-add_dependencies(BoltDex version)
 
 set_property(TARGET ConcealWallet PROPERTY OUTPUT_NAME "concealwallet")
 set_property(TARGET PaymentGateService PROPERTY OUTPUT_NAME "walletd")
@@ -211,4 +191,3 @@ set_property(TARGET Daemon PROPERTY OUTPUT_NAME "conceald")
 set_property(TARGET Optimizer PROPERTY OUTPUT_NAME "optimizer")
 set_property(TARGET BoltRPC PROPERTY OUTPUT_NAME "conceal-rpc")
 set_property(TARGET Sidechain PROPERTY OUTPUT_NAME "conceal-side")
-set_property(TARGET BoltDex PROPERTY OUTPUT_NAME "conceal-dex")

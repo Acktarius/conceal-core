@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "BoltDex.h"
 #include "SidechainTypes.h"
 #include "SidechainStorage.h"
 #include "SidechainValidator.h"
@@ -36,6 +37,8 @@ namespace Sidechain
       m_testnet = testnet;
     }
 
+    void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_dexEngine = engine; }
+
   private:
     std::string handleJsonRpc(const std::string &body);
 
@@ -55,11 +58,20 @@ namespace Sidechain
     std::string methodSidechainCreateToken(const common::JsonValue &params);
     std::string methodGetTransactions(const common::JsonValue &params);
     std::string methodFaucet(const common::JsonValue &params);
+    std::string methodDexGetOrders(const common::JsonValue &params);
+    std::string methodDexGetTrades(const common::JsonValue &params);
+    std::string methodDexGetAllTrades(const common::JsonValue &params);
+    std::string methodDexSubmitOrder(const common::JsonValue &params);
+    std::string methodDexCancelOrder(const common::JsonValue &params);
+    std::string methodDexDeposit(const common::JsonValue &params);
+    std::string methodDexWithdraw(const common::JsonValue &params);
+    std::string methodDexGetEscrowBalance(const common::JsonValue &params);
 
     logging::LoggerRef m_logger;
     SidechainStorage &m_storage;
     SidechainValidator &m_validator;
     std::unique_ptr<BoltHttp::Server> m_httpServer;
+    Sidechain::BoltDex::Engine *m_dexEngine = nullptr;
 
     std::string m_sidechainHost = "127.0.0.1";
     uint16_t m_sidechainPort = 8080;

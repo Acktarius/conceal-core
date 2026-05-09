@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "BftConsensus.h"
+#include "BoltDex.h"
 #include "SidechainStorage.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Common/StringTools.h"
@@ -478,6 +479,13 @@ namespace Sidechain
         {
           std::cout << "Block proposer not found, reward burned" << std::endl;
         }
+      }
+
+      // Process DEX deposits from this block
+      if (m_dexEngine)
+      {
+        m_dexEngine->processBlock(it->second.block);
+        m_dexEngine->processSettlements();
       }
 
       m_currentHeight = it->second.block.header.height;

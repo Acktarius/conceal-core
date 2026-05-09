@@ -27,17 +27,15 @@ void dexOrderBookMenu(const Config &cfg)
   params << R"({"baseTokenId":)" << baseTokenId
          << R"(,"quoteTokenId":)" << quoteTokenId << "}";
 
-  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "getOrders", params.str());
+  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_getOrders", params.str());
 
   std::cout << std::endl;
 
-  // Parse sells (ascending price)
   std::cout << "Sells:" << std::endl;
   size_t pos = 0;
   bool foundSells = false;
   while ((pos = result.find("\"type\":\"sell\"", pos)) != std::string::npos)
   {
-    // Back up to find the start of this object
     size_t objStart = result.rfind("{", pos);
     if (objStart == std::string::npos)
     {
@@ -66,7 +64,6 @@ void dexOrderBookMenu(const Config &cfg)
   if (!foundSells)
     std::cout << "  No sell orders." << std::endl;
 
-  // Parse buys (descending price)
   std::cout << std::endl
             << "Buys:" << std::endl;
   pos = 0;
@@ -143,7 +140,7 @@ void dexSubmitOrderMenu(const Config &cfg, const std::string &spendPubHex)
          << R"(,"price":)" << price
          << "}";
 
-  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "submitOrder", params.str());
+  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_submitOrder", params.str());
   std::cout << std::endl
             << "Result: " << result << std::endl;
 
@@ -162,7 +159,7 @@ void dexTradeHistoryMenu(const Config &cfg)
   std::cout << "=== DEX Trade History ===" << std::endl
             << std::endl;
 
-  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "getAllTrades", R"({"limit":20})");
+  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_getAllTrades", R"({"limit":20})");
 
   size_t pos = 0;
   int count = 0;
@@ -232,7 +229,7 @@ void dexCancelOrderMenu(const Config &cfg, const std::string &spendPubHex)
   params << R"({"orderId":)" << orderId
          << R"(,"owner":")" << spendPubHex << R"("})";
 
-  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "cancelOrder", params.str());
+  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_cancelOrder", params.str());
   std::cout << std::endl
             << "Result: " << result << std::endl;
 
@@ -251,7 +248,7 @@ void dexDepositAddressMenu(const Config &cfg)
   std::cout << "=== DEX Deposit Address ===" << std::endl
             << std::endl;
 
-  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "deposit", "{}");
+  std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_deposit", "{}");
   std::string address = extractJsonString(result, "dexAddress");
 
   if (address.empty())
@@ -277,43 +274,49 @@ void dexEscrowBalanceMenu(const Config &cfg, const std::string &spendPubHex)
   std::cout << "=== DEX Escrow Balance ===" << std::endl
             << std::endl;
 
-  // Check SCCX escrow
-  std::ostringstream sccxParams;
-  sccxParams << R"({"owner":")" << spendPubHex << R"(","tokenId":0})";
-  std::string sccxResult = sidechainCall(cfg.dexHost, cfg.dexPort, "getEscrowBalance", sccxParams.str());
-  uint64_t sccxEscrow = 0;
-  try
+  auto fetchEscrow = [&](uint64_t tokenId) -> uint64_t
   {
-    sccxEscrow = std::stoull(sccxResult);
-  }
-  catch (...)
-  {
-  }
-
-  std::cout << "SCCX Escrow: " << formatAmount(sccxEscrow) << std::endl;
-
-  // Check token escrow balances - ask for token ID
-  std::cout << std::endl;
-  std::cout << "Check escrow for a specific token ID?" << std::endl;
-  std::cout << "Token ID (0 to skip): ";
-  uint64_t tokenId;
-  std::cin >> tokenId;
-  std::cin.ignore();
-
-  if (tokenId > 0)
-  {
-    std::ostringstream tokParams;
-    tokParams << R"({"owner":")" << spendPubHex << R"(","tokenId":)" << tokenId << "}";
-    std::string tokResult = sidechainCall(cfg.dexHost, cfg.dexPort, "getEscrowBalance", tokParams.str());
-    uint64_t tokEscrow = 0;
+    std::ostringstream params;
+    params << R"({"owner":")" << spendPubHex << R"(","tokenId":)" << tokenId << "}";
+    std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_getEscrowBalance", params.str());
+    uint64_t balance = 0;
     try
     {
-      tokEscrow = std::stoull(tokResult);
+      balance = std::stoull(result);
     }
     catch (...)
     {
     }
-    std::cout << "Token #" << tokenId << " Escrow: " << formatAmount(tokEscrow) << std::endl;
+    return balance;
+  };
+
+  // SCCX escrow
+  uint64_t sccxEscrow = fetchEscrow(0);
+  std::cout << "SCCX Escrow: " << formatAmount(sccxEscrow, 6) << std::endl;
+
+  // All known tokens
+  const auto &cache = getTokenCache();
+  if (cache.size() <= 1)
+  {
+    std::cout << "  (No other tokens. Use S2 to refresh.)" << std::endl;
+  }
+  else
+  {
+    std::cout << std::endl;
+    for (const auto &[tokenId, info] : cache)
+    {
+      if (tokenId == 0)
+        continue;
+
+      uint64_t escrow = fetchEscrow(tokenId);
+      std::string symbol = getTokenSymbol(tokenId);
+      uint8_t decimals = getTokenDecimals(tokenId);
+
+      std::cout << symbol;
+      if (!info.name.empty() && info.name != symbol)
+        std::cout << " (" << info.name << ")";
+      std::cout << " Escrow: " << formatAmount(escrow, decimals) << std::endl;
+    }
   }
 
   std::cout << "\nPress enter to return..." << std::endl;

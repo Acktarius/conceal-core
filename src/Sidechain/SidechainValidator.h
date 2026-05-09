@@ -17,6 +17,14 @@
 
 namespace Sidechain
 {
+  namespace BoltDex
+  {
+    class Engine;
+  }
+}
+
+namespace Sidechain
+{
   class SidechainValidator
   {
   public:
@@ -35,6 +43,8 @@ namespace Sidechain
     std::vector<ValidatorInfo> getValidators() const;
 
     void setRewardKey(const crypto::PublicKey &key) { m_consensus.setRewardKey(key); }
+
+    void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_consensus.setDexEngine(engine); }
 
   private:
     void consensusLoop();
