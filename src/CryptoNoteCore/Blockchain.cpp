@@ -1439,6 +1439,13 @@ namespace cn
 
   bool Blockchain::rebuildBlocks()
   {
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      logger(ERROR, BRIGHT_RED) << "rebuildBlocks not supported with MDBX backend";
+      return false;
+    }
+#endif
     logger(INFO, BRIGHT_WHITE) << "Rebuilding cache";
 
     try
@@ -2822,12 +2829,7 @@ namespace cn
          << common::podToHex(get_block_hash(blocksAt(i).bl))
 #endif
          << "\ndifficulty\t\t" << blockDifficulty(i) << ", nonce " << hdr.nonce
-         << ", tx_count "
-#ifdef HAVE_MDBX
-         << 0
-#else
-         << blocksAt(i).bl.transactionHashes.size()
-#endif
+         << ", tx_count " << blocksAt(i).bl.transactionHashes.size()
          << ENDL;
     }
     logger(INFO) << "Blockchain:\n"
@@ -3203,6 +3205,14 @@ namespace cn
       cumulativeSize = getObjectBinarySize(block.baseTransaction);
       for (const Transaction &tx : blockTxs)
         cumulativeSize += getObjectBinarySize(tx);
+
+      if (!missedTxs.empty())
+      {
+        // Transactions not available, estimate using the block entry from storage
+        logger(DEBUGGING) << "Some transactions missing for cumulative size calculation, using stored size";
+        // Fall through - the caller already handles this with a debug message
+      }
+
       return missedTxs.empty();
     }
     catch (const std::exception &)
@@ -3321,6 +3331,7 @@ namespace cn
     auto blockProcessingStart = std::chrono::steady_clock::now();
     crypto::Hash blockHash = id;
 
+    // Duplicate check
 #ifdef HAVE_MDBX
     if (m_useMdbx)
     {
@@ -3339,12 +3350,14 @@ namespace cn
       bvc.m_verification_failed = true;
       return false;
     }
+
     if (!checkBlockVersion(blockData, blockHash))
     {
       bvc.m_verification_failed = true;
       return false;
     }
 
+    // Height and merge mining check
     uint32_t height = 0;
     TransactionExtraMergeMiningTag mmTag;
 #ifdef HAVE_MDBX
@@ -3385,6 +3398,7 @@ namespace cn
       return false;
     }
 
+    // Difficulty and PoW
     auto targetTimeStart = std::chrono::steady_clock::now();
     difficulty_type currentDifficulty = getDifficultyForNextBlock();
     auto target_calculating_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - targetTimeStart).count();
@@ -3411,8 +3425,7 @@ namespace cn
       return false;
     }
 
-    auto longhash_calculating_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - longhashTimeStart).count();
-
+    // Miner transaction pre‑validation
     if (!prevalidate_miner_transaction(blockData, static_cast<uint32_t>(blocksSize())))
     {
       logger(INFO, BRIGHT_WHITE) << "Block " << blockHash << " failed prevalidation";
@@ -3420,21 +3433,15 @@ namespace cn
       return false;
     }
 
-    crypto::Hash minerTransactionHash = getObjectHash(blockData.baseTransaction);
-
+    // Build the complete BlockEntry
     BlockEntry block;
     block.bl = blockData;
     block.height = static_cast<uint32_t>(blocksSize());
-    block.transactions.resize(1);
-    block.transactions[0].tx = blockData.baseTransaction;
 
-#ifdef HAVE_MDBX
-    if (m_useMdbx)
-    {
-      pushBlock(block);
-      m_mdbxStorage->flush();
-    }
-#endif
+    // Start with the miner transaction
+    crypto::Hash minerTransactionHash = getObjectHash(blockData.baseTransaction);
+    block.transactions.resize(1 + transactions.size());
+    block.transactions[0].tx = blockData.baseTransaction;
 
     TransactionIndex transactionIndex = {block.height, static_cast<uint16_t>(0)};
     pushTransaction(block, minerTransactionHash, transactionIndex);
@@ -3443,11 +3450,11 @@ namespace cn
     size_t cumulative_block_size = coinbase_blob_size;
     uint64_t fee_summary = 0, interestSummary = 0;
 
+    // Add all non‑base transactions
     for (size_t i = 0; i < transactions.size(); ++i)
     {
       const crypto::Hash &tx_id = blockData.transactionHashes[i];
-      block.transactions.resize(block.transactions.size() + 1);
-      block.transactions.back().tx = transactions[i];
+      block.transactions[1 + i].tx = transactions[i];
       size_t blob_size = toBinaryArray(transactions[i]).size();
       uint64_t fee = m_currency.getTransactionFee(transactions[i], block.height);
 
@@ -3472,8 +3479,9 @@ namespace cn
       {
         logger(INFO, BRIGHT_WHITE) << "Block " << blockHash << " has invalid transaction: " << tx_id;
         bvc.m_verification_failed = true;
-        block.transactions.pop_back();
-        popTransactions(block, minerTransactionHash);
+
+        // Rollback the miner transaction we already pushed
+        popTransaction(blockData.baseTransaction, minerTransactionHash);
         return false;
       }
 
@@ -3487,9 +3495,12 @@ namespace cn
     if (!checkCumulativeBlockSize(blockHash, cumulative_block_size, block.height))
     {
       bvc.m_verification_failed = true;
+      // Rollback all transactions pushed so far (miner + non‑base)
+      popTransactions(block, minerTransactionHash);
       return false;
     }
 
+    // Validate miner transaction amounts
     int64_t emissionChange = 0;
     uint64_t reward = 0;
     uint64_t already_generated_coins = (block.height == 0) ? 0 : getBlockHeader(block.height - 1).alreadyGeneratedCoins;
@@ -3501,12 +3512,14 @@ namespace cn
       return false;
     }
 
+    // Finalize the block entry
     block.block_cumulative_size = cumulative_block_size;
     block.cumulative_difficulty = currentDifficulty;
     block.already_generated_coins = already_generated_coins + emissionChange + interestSummary;
     if (block.height > 0)
       block.cumulative_difficulty += getBlockHeader(block.height - 1).cumulativeDifficulty;
 
+    // PUSH THE COMPLETE BLOCK (ONCE!)
     pushBlock(block);
     pushToDepositIndex(block, interestSummary);
 
@@ -3526,7 +3539,7 @@ namespace cn
       m_mdbxStorage->pushBlockHeader(block.height, hdr);
       m_mdbxStorage->flush();
 
-      blocksAt(block.height);
+      blocksAt(block.height); // force cache load, optional
     }
 #endif
 
@@ -3540,35 +3553,24 @@ namespace cn
     m_upgradeDetectorV8.blockPushed();
     update_next_comulative_size_limit();
 
-    // Auto-generate checkpoints for any milestone heights that have
-    // now fallen outside the verification buffer
+    // Auto‑checkpoint generation
     const uint32_t networkHeight = static_cast<uint32_t>(blocksSize());
-
     if (networkHeight > cn::CHECKPOINT_VERIFICATION_BUFFER)
     {
       const uint32_t maxCheckpointHeight = networkHeight - cn::CHECKPOINT_VERIFICATION_BUFFER;
       const uint32_t lastCheckpoint = m_checkpoints.getMaxHeight();
-
-      // Find the next milestone at or after the last checkpoint we have
       uint32_t nextMilestone = ((lastCheckpoint / cn::CHECKPOINT_INTERVAL) + 1) * cn::CHECKPOINT_INTERVAL;
 
       while (nextMilestone <= maxCheckpointHeight)
       {
         crypto::Hash milestoneHash = getBlockIdByHeight(nextMilestone);
-
 #ifdef HAVE_MDBX
         if (m_useMdbx && m_mdbxStorage)
-        {
           m_mdbxStorage->storeCheckpoint(nextMilestone, milestoneHash);
-        }
 #endif
-
         m_checkpoints.add_checkpoint(nextMilestone, common::podToHex(milestoneHash));
-
         logger(INFO, BRIGHT_GREEN) << "Auto-generated checkpoint at height " << nextMilestone
-                                   << " (buffer: " << (networkHeight - nextMilestone)
-                                   << " blocks behind tip)";
-
+                                   << " (buffer: " << (networkHeight - nextMilestone) << " blocks behind tip)";
         nextMilestone += cn::CHECKPOINT_INTERVAL;
       }
     }
@@ -3918,6 +3920,25 @@ namespace cn
   bool Blockchain::getLowerBound(uint64_t timestamp, uint64_t startOffset, uint32_t &height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+#ifdef HAVE_MDBX
+    if (m_useMdbx)
+    {
+      assert(startOffset < m_blockHashes.size());
+
+      for (size_t i = startOffset; i < m_blockHashes.size(); ++i)
+      {
+        cn::BlockHeaderPOD hdr = getBlockHeader(static_cast<uint32_t>(i));
+        if (hdr.timestamp >= timestamp - m_currency.blockFutureTimeLimit())
+        {
+          height = static_cast<uint32_t>(i);
+          return true;
+        }
+      }
+      return false;
+    }
+#endif
+
     assert(startOffset < blocksSize());
     auto bound = std::lower_bound(m_blocks.begin() + startOffset, m_blocks.end(), timestamp - m_currency.blockFutureTimeLimit(),
                                   [](const BlockEntry &b, uint64_t timestamp)

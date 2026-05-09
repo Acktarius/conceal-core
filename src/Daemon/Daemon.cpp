@@ -60,6 +60,7 @@ namespace
   const command_line::arg_descriptor<bool> arg_use_mdbx = {"use-mdbx", "Use MDBX database backend for faster sync", false};
   const command_line::arg_descriptor<bool> arg_export_snapshot = {"export-snapshot", "Export blockchain headers snapshot to file", ""};
   const command_line::arg_descriptor<std::string> arg_import_snapshot = {"import-snapshot", "Import blockchain headers snapshot from file", ""};
+  const command_line::arg_descriptor<uint32_t> arg_rollback_height = {"rollback-height", "Rollback blockchain to this height before starting (MDBX only, debug)", 0};
 }
 
 void print_genesis_tx_hex()
@@ -294,6 +295,7 @@ int main(int argc, char *argv[])
     command_line::add_arg(desc_cmd_sett, arg_print_genesis_tx);
     command_line::add_arg(desc_cmd_sett, arg_export_snapshot);
     command_line::add_arg(desc_cmd_sett, arg_import_snapshot);
+    command_line::add_arg(desc_cmd_sett, arg_rollback_height);
 
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
@@ -446,7 +448,93 @@ int main(int argc, char *argv[])
     ccore.set_cryptonote_protocol(&cprotocol);
     DaemonCommandsHandler dch(ccore, p2psrv, logManager);
 
-    // initialize objects
+    // Auto-detect and recover from corrupt MDBX database before core initialization
+#ifdef HAVE_MDBX
+    if (coreConfig.useMdbx)
+    {
+      std::string dbPath = coreConfig.configFolder;
+      if (!dbPath.empty() && dbPath.back() != '/')
+        dbPath += '/';
+      dbPath += "mdbx_blocks";
+
+      if (boost::filesystem::exists(dbPath))
+      {
+        CryptoNote::MDBXBlockchainStorage storage(dbPath, 0);
+        uint32_t topHeight = storage.topBlockHeight();
+        uint32_t rollbackHeight = command_line::get_arg(vm, arg_rollback_height);
+
+        // Manual rollback requested via flag
+        if (rollbackHeight > 0 && rollbackHeight < topHeight)
+        {
+          logger(INFO, BRIGHT_YELLOW) << "Manual rollback requested: removing blocks above height " << rollbackHeight;
+
+          for (uint32_t h = rollbackHeight + 1; h <= topHeight; ++h)
+          {
+            crypto::Hash blockHash = storage.getBlockHash(h);
+            if (blockHash != NULL_HASH)
+              storage.removeBlock(blockHash);
+            storage.popBlockEntry(h);
+            storage.removeBlockHeader(h);
+          }
+
+          storage.setTopBlockHeight(rollbackHeight);
+          storage.putMeta("idx_hashes", std::vector<uint8_t>());
+          storage.putMeta("idx_topheight", std::vector<uint8_t>());
+          storage.flush();
+
+          logger(INFO, BRIGHT_GREEN) << "Manual rollback complete! Removed " << (topHeight - rollbackHeight)
+                                     << " blocks. Chain height is now " << rollbackHeight;
+          topHeight = rollbackHeight;
+        }
+
+        if (topHeight > 0)
+        {
+          bool needsRecovery = false;
+
+          // Check if the top block entry is missing or corrupt
+          cn::BinaryArray ba;
+          if (!storage.getBlockEntry(topHeight, ba))
+          {
+            logger(WARNING, BRIGHT_YELLOW) << "Missing block entry at height " << topHeight;
+            needsRecovery = true;
+          }
+          else if (ba.empty())
+          {
+            logger(WARNING, BRIGHT_YELLOW) << "Empty block entry at height " << topHeight;
+            needsRecovery = true;
+          }
+
+          if (needsRecovery)
+          {
+            // Remove the last 100 blocks to ensure clean state
+            uint32_t recoverTo = topHeight > 100 ? topHeight - 100 : 0;
+            logger(INFO, BRIGHT_YELLOW) << "Auto-recovering: removing blocks above height " << recoverTo;
+
+            for (uint32_t h = recoverTo + 1; h <= topHeight; ++h)
+            {
+              crypto::Hash blockHash = storage.getBlockHash(h);
+              if (blockHash != NULL_HASH)
+                storage.removeBlock(blockHash);
+              storage.popBlockEntry(h);
+              storage.removeBlockHeader(h);
+            }
+
+            storage.setTopBlockHeight(recoverTo);
+            storage.putMeta("idx_hashes", std::vector<uint8_t>());
+            storage.putMeta("idx_topheight", std::vector<uint8_t>());
+            storage.flush();
+
+            logger(INFO, BRIGHT_GREEN) << "Auto-recovery complete! Removed " << (topHeight - recoverTo)
+                                       << " blocks. Will rebuild indexes from height " << recoverTo;
+          }
+        }
+
+        storage.close();
+      }
+    }
+#endif
+
+    // initialize p2p
     logger(INFO) << "Initializing p2p server...";
     if (!p2psrv.init(netNodeConfig))
     {
@@ -458,7 +546,7 @@ int main(int argc, char *argv[])
       logger(INFO) << "P2p server initialized OK";
     }
 
-    // initialize core here
+    // initialize core
     logger(INFO) << "Initializing core...";
     if (!ccore.init(coreConfig, minerConfig, true))
     {
