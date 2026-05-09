@@ -29,19 +29,19 @@ namespace Sidechain
   {
   public:
     using BlockCommittedCallback = std::function<void(const Block &)>;
+    using BridgeBurnCallback = std::function<void(const Transaction &)>;
 
     BftConsensus(SidechainStorage &storage,
                  const ValidatorInfo &self,
                  GossipManager &gossip);
 
     // Propose a new block with the given transactions
-    // Returns true if block was committed, false if proposal failed
     bool proposeBlock(const std::vector<Transaction> &transactions, Block &outBlock);
 
     // Register callback for committed blocks
     void onBlockCommitted(BlockCommittedCallback callback);
 
-    // Handle incoming gossip message (called from GossipManager)
+    // Handle incoming gossip message
     void handleMessage(const std::vector<uint8_t> &data, const std::string &fromIp);
 
     // Get current consensus height
@@ -49,21 +49,23 @@ namespace Sidechain
 
     // Sync validator set from seed on first connect
     void syncValidators(const std::string &seedHost, uint16_t seedPort);
-
-    // Handle validator sync messages
     bool handleSyncResponse(const std::vector<uint8_t> &data);
-
-    // Request validator sync from seed
     void requestValidatorSync(const std::string &seedHost, uint16_t seedPort);
-
-    // Broadcast a new validator to the network
     void broadcastNewValidator(const ValidatorInfo &validator);
 
-    // Reward Validators
+    // Reward key for block rewards
     void setRewardKey(const crypto::PublicKey &rewardKey);
 
-    // Dex Engine
+    // DEX engine
     void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_dexEngine = engine; }
+
+    // Bridge
+    void setBridgeKey(const crypto::PublicKey &bridgeKey)
+    {
+      m_bridgePubKey = bridgeKey;
+      m_hasBridgeKey = true;
+    }
+    void onBridgeBurn(BridgeBurnCallback callback) { m_onBridgeBurn = callback; }
 
   private:
     void broadcastProposal(const Block &block);
@@ -74,6 +76,7 @@ namespace Sidechain
     ValidatorInfo m_self;
     GossipManager &m_gossip;
     BlockCommittedCallback m_onBlockCommitted;
+    BridgeBurnCallback m_onBridgeBurn;
 
     std::atomic<uint64_t> m_currentHeight{0};
     bool m_validatorsSynced = false;
@@ -92,5 +95,8 @@ namespace Sidechain
 
     crypto::PublicKey m_rewardKey;
     bool m_hasRewardKey = false;
+
+    crypto::PublicKey m_bridgePubKey;
+    bool m_hasBridgeKey = false;
   };
 }

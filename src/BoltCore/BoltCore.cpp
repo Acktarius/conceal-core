@@ -138,8 +138,10 @@ namespace BoltCore
     result.error = relayResult.error;
     result.fee = buildResult.fee;
 
-    if (result.success)
+    if (result.success) {
+      result.transaction = tx;
       result.txHash = common::podToHex(getObjectHash(tx));
+    }
 
     return result;
   }
@@ -169,6 +171,7 @@ namespace BoltCore
     result.success = depositResult.success;
     result.txHash = depositResult.txHash;
     result.fee = depositResult.fee;
+    result.transaction = depositResult.transaction;
 
     return result;
   }

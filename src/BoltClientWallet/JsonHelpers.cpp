@@ -120,6 +120,10 @@ void loadTokenCache(const std::string &host, uint16_t port)
   sccx.symbol = "SCCX";
   sccx.name = "SCCX";
   sccx.decimals = 6;
+  sccx.backingModel = 0;
+  sccx.verified = true;
+  sccx.sourceChain = "conceal";
+  sccx.sourceAsset = "native";
   g_tokenCache[0] = sccx;
 
   std::string result = sidechainCall(host, port, "getTokens", "{}");
@@ -168,6 +172,14 @@ void loadTokenCache(const std::string &host, uint16_t port)
     std::string symbol = extractJsonString(obj, "symbol");
     std::string name = extractJsonString(obj, "name");
     uint64_t decimals = extractJsonNumber(obj, "decimals");
+    uint64_t backingModel = extractJsonNumber(obj, "backingModel");
+    uint64_t backingRatio = extractJsonNumber(obj, "backingRatio");
+    uint64_t lockedCCXAmount = extractJsonNumber(obj, "lockedCCXAmount");
+
+    // Parse provenance if available
+    std::string sourceChain = extractJsonString(obj, "sourceChain");
+    std::string sourceAsset = extractJsonString(obj, "sourceAsset");
+    bool verified = extractJsonString(obj, "verified") == "true";
 
     // Only cache if we got a valid ID and symbol
     if (id > 0 && !symbol.empty())
@@ -176,6 +188,12 @@ void loadTokenCache(const std::string &host, uint16_t port)
       info.symbol = symbol;
       info.name = name;
       info.decimals = static_cast<uint8_t>(decimals > 0 ? decimals : 6);
+      info.backingModel = static_cast<uint8_t>(backingModel);
+      info.backingRatio = backingRatio;
+      info.lockedCCXAmount = lockedCCXAmount;
+      info.verified = verified;
+      info.sourceChain = sourceChain;
+      info.sourceAsset = sourceAsset;
       g_tokenCache[id] = info;
     }
 
@@ -195,6 +213,7 @@ TokenInfoCache getTokenInfo(uint64_t tokenId)
   unknown.symbol = "Token #" + std::to_string(tokenId);
   unknown.name = "Unknown";
   unknown.decimals = 6;
+  unknown.backingModel = 0;
   return unknown;
 }
 
@@ -206,6 +225,35 @@ std::string getTokenSymbol(uint64_t tokenId)
 uint8_t getTokenDecimals(uint64_t tokenId)
 {
   return getTokenInfo(tokenId).decimals;
+}
+
+std::string getBackingModelName(uint8_t model)
+{
+  switch (model)
+  {
+  case 1:
+    return "Fully Backed";
+  case 2:
+    return "Hybrid";
+  default:
+    return "Unbacked";
+  }
+}
+
+std::string getTokenProvenance(uint64_t tokenId)
+{
+  auto info = getTokenInfo(tokenId);
+  if (info.sourceChain.empty())
+    return "";
+
+  std::string provenance = info.sourceChain;
+  if (!info.sourceAsset.empty() && info.sourceAsset != "native")
+    provenance += ":" + info.sourceAsset;
+
+  if (info.verified)
+    provenance += " (verified)";
+
+  return provenance;
 }
 
 std::string formatAmountWithDecimals(uint64_t amount, uint64_t tokenId,

@@ -14,6 +14,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <functional>
 
 namespace Sidechain
 {
@@ -43,8 +44,9 @@ namespace Sidechain
     std::vector<ValidatorInfo> getValidators() const;
 
     void setRewardKey(const crypto::PublicKey &key) { m_consensus.setRewardKey(key); }
-
     void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_consensus.setDexEngine(engine); }
+    void setBridgeKey(const crypto::PublicKey &key) { m_consensus.setBridgeKey(key); }
+    void onBridgeBurn(std::function<void(const Transaction &)> cb) { m_consensus.onBridgeBurn(cb); }
 
   private:
     void consensusLoop();

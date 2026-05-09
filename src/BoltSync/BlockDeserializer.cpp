@@ -112,6 +112,7 @@ namespace BoltSync
               fo.amount = out.amount;
               fo.outputKey = keyOut.key;
               fo.txPublicKey = txPubKey;
+              fo.txExtra = tx.extra; // ← Copy transaction extra for bridge destination parsing
               if (ctx.spendKey)
               {
                 crypto::KeyDerivation derivation;
@@ -151,6 +152,7 @@ namespace BoltSync
             fo.amount = out.amount;
             fo.outputKey = keyOut.key;
             fo.txPublicKey = txPubKey;
+            fo.txExtra = tx.extra; // ← Copy transaction extra for bridge destination parsing
             if (ctx.spendKey)
             {
               crypto::KeyDerivation derivation;

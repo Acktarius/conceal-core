@@ -30,6 +30,9 @@ namespace CryptoNote
     void addBlock(const cn::Block &block, const crypto::Hash &hash, uint32_t height) override;
     void removeBlock(const crypto::Hash &hash) override;
 
+    void removeBlockHeader(uint32_t height);
+    void cleanupBlockData(uint32_t height);
+
     bool isSpentKeyImage(const crypto::KeyImage &keyImage) const override;
     void markKeyImageSpent(const crypto::KeyImage &keyImage) override;
 

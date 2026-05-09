@@ -25,6 +25,7 @@ namespace Sidechain
   struct TokenInfo
   {
     uint64_t id = 0;
+    std::string fingerprint; // hash(sourceChain:sourceAsset:bridgeOperatorPubKey)
     std::string name;
     std::string symbol;
     uint64_t totalSupply = 0;
@@ -38,6 +39,7 @@ namespace Sidechain
     void serialize(cn::ISerializer &s)
     {
       s(id, "id");
+      s(fingerprint, "fingerprint");
       s(name, "name");
       s(symbol, "symbol");
       s(totalSupply, "totalSupply");

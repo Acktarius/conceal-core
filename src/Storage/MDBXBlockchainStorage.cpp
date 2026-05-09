@@ -241,6 +241,31 @@ void MDBXBlockchainStorage::removeBlock(const crypto::Hash &hash)
   ++m_opsSinceLastCommit;
 }
 
+void MDBXBlockchainStorage::removeBlockHeader(uint32_t height)
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+  std::string key = "hdr_" + std::to_string(height);
+  MDBX_val mkey{mdbx_cast(key.data()), key.size()};
+  mdbx_del(m_writeTxn, m_dbiBlockHeaders, &mkey, nullptr);
+}
+
+void MDBXBlockchainStorage::cleanupBlockData(uint32_t height)
+{
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string beKey = "be_" + std::to_string(height);
+  MDBX_val mk{mdbx_cast(beKey.data()), beKey.size()};
+  mdbx_del(m_writeTxn, m_dbiBlockEntries, &mk, nullptr);
+
+  std::string hdrKey = "hdr_" + std::to_string(height);
+  MDBX_val hk{mdbx_cast(hdrKey.data()), hdrKey.size()};
+  mdbx_del(m_writeTxn, m_dbiBlockHeaders, &hk, nullptr);
+
+  commitWriteTransaction(true);
+}
+
 // Global state
 uint32_t MDBXBlockchainStorage::topBlockHeight() const
 {

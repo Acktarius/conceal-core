@@ -1,4 +1,4 @@
-// BoltHttpServer.h — High-performance HTTP server with thread pool and epoll
+// BoltHttpServer.h — Hybrid HTTP server with fiber I/O and thread pool
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 // Distributed under the MIT/X11 software license
 
@@ -6,6 +6,8 @@
 
 #include "BoltHttpRequest.h"
 #include "BoltHttpResponse.h"
+#include "IExecutor.h"
+#include "ThreadPool.h"
 
 #include <string>
 #include <functional>
@@ -14,35 +16,74 @@
 #include <vector>
 #include <mutex>
 #include <unordered_map>
+#include <memory>
+
+namespace platform_system
+{
+  class Dispatcher;
+}
 
 namespace BoltHttp
 {
   using RequestHandler = std::function<void(const Request &, Response &)>;
 
+  enum class WorkClass
+  {
+    Auto, // Server decides based on request path (default)
+    Fast, // Always run on fiber (balance queries, status)
+    Heavy // Always dispatch to thread pool (crypto, scanning)
+  };
+
   class Server
   {
   public:
-    explicit Server(size_t threadCount = 1);
+    explicit Server(platform_system::Dispatcher *dispatcher = nullptr,
+                    size_t threadCount = 1);
     ~Server();
 
     void start(const std::string &bindIp, uint16_t port);
     void stop();
 
-    void onRequest(RequestHandler handler);
+    // Register handler with optional work classification (defaults to Auto)
+    void onRequest(RequestHandler handler, WorkClass cls = WorkClass::Auto);
+
+    // Add a path pattern that should always be treated as heavy work
+    void markHeavy(const std::string &pathPrefix);
+
+    // Add a path pattern that should always be treated as fast work
+    void markFast(const std::string &pathPrefix);
 
   private:
     void acceptLoop();
     void workerLoop(int epollFd);
     void handleClient(int clientFd);
 
-    RequestHandler m_handler;
+    // Auto-classify a request based on URL and method
+    WorkClass classifyRequest(const Request &req) const;
+
+    platform_system::Dispatcher *m_dispatcher = nullptr;
+    std::shared_ptr<ThreadPool> m_threadPool;
+    std::shared_ptr<IExecutor> m_executor;
+
     int m_serverSocket = -1;
     int m_epollFd = -1;
     std::atomic<bool> m_running{false};
     size_t m_threadCount;
     std::thread m_acceptThread;
     std::vector<std::thread> m_workers;
+
     std::mutex m_clientsMutex;
     std::unordered_map<int, std::string> m_clientBuffers;
+
+    RequestHandler m_handler;
+    WorkClass m_defaultClass = WorkClass::Auto;
+
+    // Path-based classification tables
+    std::vector<std::string> m_heavyPaths;
+    std::vector<std::string> m_fastPaths;
+
+    // Default classification tables
+    static const std::vector<std::string> DEFAULT_HEAVY_PATHS;
+    static const std::vector<std::string> DEFAULT_FAST_PATHS;
   };
 }

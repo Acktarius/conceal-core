@@ -21,7 +21,7 @@ namespace Sidechain
 
   void SidechainRpcServer::start(const std::string &bindIp, uint16_t bindPort, size_t threadCount)
   {
-    m_httpServer.reset(new BoltHttp::Server(threadCount));
+    m_httpServer.reset(new BoltHttp::Server(nullptr, threadCount));
     m_httpServer->onRequest([this](const BoltHttp::Request &req, BoltHttp::Response &resp)
                             {
         if (req.url == "/json_rpc" && req.method == "POST")
@@ -74,6 +74,8 @@ namespace Sidechain
         result = methodGetTokenBalance(params);
       else if (method == "getTokens")
         result = methodGetTokens(params);
+      else if (method == "getTokenByFingerprint")
+        result = methodGetTokenByFingerprint(params);
       else if (method == "transfer")
         result = methodTransfer(params);
       else if (method == "createToken")
@@ -90,6 +92,12 @@ namespace Sidechain
         result = methodGetValidators(params);
       else if (method == "getTransactions")
         result = methodGetTransactions(params);
+      else if (method == "getAssetRegistry")
+        result = methodGetAssetRegistry(params);
+      else if (method == "getEquivalenceGroup")
+        result = methodGetEquivalenceGroup(params);
+      else if (method == "getBridgeStatus")
+        result = methodGetBridgeStatus(params);
       else if (method == "faucet")
         result = methodFaucet(params);
       else if (method == "dex_getOrders")
@@ -124,6 +132,8 @@ namespace Sidechain
     }
   }
 
+  // ── Account methods ────────────────────────────────────────
+
   std::string SidechainRpcServer::methodGetBalance(const common::JsonValue &params)
   {
     std::string address = params("address").getString();
@@ -152,18 +162,48 @@ namespace Sidechain
     for (size_t i = 0; i < tokens.size(); ++i)
     {
       result += R"({"id":)" + std::to_string(tokens[i].id) +
+                R"(,"fingerprint":")" + tokens[i].fingerprint + R"(")" +
                 R"(,"name":")" + tokens[i].name +
                 R"(","symbol":")" + tokens[i].symbol +
                 R"(","totalSupply":)" + std::to_string(tokens[i].totalSupply) +
                 R"(,"maxSupply":)" + std::to_string(tokens[i].maxSupply) +
                 R"(,"decimals":)" + std::to_string(tokens[i].decimals) +
                 R"(,"backingModel":)" + std::to_string(static_cast<uint8_t>(tokens[i].backingModel)) +
-                R"(,"backingRatio":)" + std::to_string(tokens[i].backingRatio) + "}";
+                R"(,"backingRatio":)" + std::to_string(tokens[i].backingRatio) +
+                R"(,"lockedCCXAmount":)" + std::to_string(tokens[i].lockedCCXAmount);
+
+      AssetRegistryEntry assetEntry;
+      if (m_storage.getAssetByTokenId(tokens[i].id, assetEntry))
+      {
+        result += R"(,"sourceChain":")" + assetEntry.sourceChain + R"(")";
+        result += R"(,"sourceAsset":")" + assetEntry.sourceAsset + R"(")";
+        result += R"(,"bridgeOperator":")" + common::podToHex(assetEntry.bridgeOperator) + R"(")";
+        result += R"(,"equivalenceClass":")" + assetEntry.equivalenceClass + R"(")";
+        result += R"(,"verified":)" + std::string(assetEntry.verified ? "true" : "false");
+      }
+
+      result += "}";
       if (i < tokens.size() - 1)
         result += ",";
     }
     result += "]";
     return result;
+  }
+
+  std::string SidechainRpcServer::methodGetTokenByFingerprint(const common::JsonValue &params)
+  {
+    std::string fingerprint = params("fingerprint").getString();
+    TokenInfo token;
+    if (m_storage.getTokenByFingerprint(fingerprint, token))
+    {
+      return R"({"id":)" + std::to_string(token.id) +
+             R"(,"fingerprint":")" + token.fingerprint + R"(")" +
+             R"(,"name":")" + token.name +
+             R"(","symbol":")" + token.symbol +
+             R"(","totalSupply":)" + std::to_string(token.totalSupply) +
+             R"(,"decimals":)" + std::to_string(token.decimals) + "}";
+    }
+    return "null";
   }
 
   std::string SidechainRpcServer::methodTransfer(const common::JsonValue &params)
@@ -218,6 +258,21 @@ namespace Sidechain
       if (params.contains("decimals"))
         decimals = static_cast<uint8_t>(static_cast<uint64_t>(params("decimals").getInteger()));
 
+      uint64_t backingRatio = 0;
+      uint64_t lockedCCXAmount = 0;
+
+      if (backingModel == static_cast<uint8_t>(TokenBackingModel::Backed) ||
+          backingModel == static_cast<uint8_t>(TokenBackingModel::Hybrid))
+      {
+        if (params.contains("backingRatio"))
+          backingRatio = static_cast<uint64_t>(params("backingRatio").getInteger());
+        else
+          backingRatio = SidechainConfig::DEFAULT_BACKING_RATIO;
+
+        if (params.contains("lockedCCXAmount"))
+          lockedCCXAmount = static_cast<uint64_t>(params("lockedCCXAmount").getInteger());
+      }
+
       std::string nameHex = nameHexVal.getString();
       std::string symbolHex = symbolHexVal.getString();
 
@@ -227,7 +282,10 @@ namespace Sidechain
       std::string name(nameBytes.begin(), nameBytes.end());
       std::string symbol(symbolBytes.begin(), symbolBytes.end());
 
-      std::string combined = name + ":" + symbol + ":" + std::to_string(backingModel) + ":" + std::to_string(decimals);
+      std::string combined = name + ":" + symbol + ":" + std::to_string(backingModel) +
+                             ":" + std::to_string(decimals) +
+                             ":" + std::to_string(backingRatio) +
+                             ":" + std::to_string(lockedCCXAmount);
       tx.extra.assign(combined.begin(), combined.end());
 
       cn::BinaryArray txBytes = cn::toBinaryArray(tx);
@@ -253,11 +311,16 @@ namespace Sidechain
     tx.tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
 
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
-    tx.feeTokenId = tx.tokenId;
+    tx.feeTokenId = 0;
 
     tx.signature = crypto::Signature{};
     tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
-    tx.extra.clear();
+
+    if (params.contains("mainChainTxHash"))
+    {
+      std::string txHash = params("mainChainTxHash").getString();
+      tx.extra.assign(txHash.begin(), txHash.end());
+    }
 
     cn::BinaryArray txBytes = cn::toBinaryArray(tx);
     crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
@@ -277,7 +340,7 @@ namespace Sidechain
     tx.tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
 
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
-    tx.feeTokenId = tx.tokenId;
+    tx.feeTokenId = 0;
 
     tx.signature = crypto::Signature{};
     tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
@@ -388,6 +451,115 @@ namespace Sidechain
     return result;
   }
 
+  std::string SidechainRpcServer::methodGetAssetRegistry(const common::JsonValue &)
+  {
+    auto assets = m_storage.getAllAssets();
+    std::string result = "[";
+    for (size_t i = 0; i < assets.size(); ++i)
+    {
+      result += "{";
+      result += R"("tokenId":)" + std::to_string(assets[i].tokenId) + ",";
+      result += R"("fingerprint":")" + assets[i].fingerprint + "\",";
+      result += R"("sourceChain":")" + assets[i].sourceChain + "\",";
+      result += R"("sourceAsset":")" + assets[i].sourceAsset + "\",";
+      result += R"("bridgeOperator":")" + common::podToHex(assets[i].bridgeOperator) + "\",";
+      result += R"("equivalenceClass":")" + assets[i].equivalenceClass + "\",";
+      result += R"("verified":)" + std::string(assets[i].verified ? "true" : "false");
+
+      TokenInfo token;
+      if (m_storage.getToken(assets[i].tokenId, token))
+      {
+        result += R"(,"name":")" + token.name + R"(")";
+        result += R"(,"symbol":")" + token.symbol + R"(")";
+        result += R"(,"totalSupply":)" + std::to_string(token.totalSupply);
+        result += R"(,"lockedCCXAmount":)" + std::to_string(token.lockedCCXAmount);
+        result += R"(,"backingModel":)" + std::to_string(static_cast<uint8_t>(token.backingModel));
+        result += R"(,"backingRatio":)" + std::to_string(token.backingRatio);
+        result += R"(,"decimals":)" + std::to_string(token.decimals);
+      }
+
+      result += "}";
+      if (i < assets.size() - 1)
+        result += ",";
+    }
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodGetEquivalenceGroup(const common::JsonValue &params)
+  {
+    std::string equivalenceClass = params("equivalenceClass").getString();
+    auto tokenIds = m_storage.getTokensByEquivalenceClass(equivalenceClass);
+
+    std::string result = "[";
+    for (size_t i = 0; i < tokenIds.size(); ++i)
+    {
+      TokenInfo token;
+      if (m_storage.getToken(tokenIds[i], token))
+      {
+        result += "{";
+        result += R"("tokenId":)" + std::to_string(token.id) + ",";
+        result += R"("fingerprint":")" + token.fingerprint + "\",";
+        result += R"("symbol":")" + token.symbol + "\",";
+        result += R"("name":")" + token.name + "\"";
+        result += "}";
+        if (i < tokenIds.size() - 1)
+          result += ",";
+      }
+    }
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodGetBridgeStatus(const common::JsonValue &)
+  {
+    auto assets = m_storage.getAllAssets();
+    auto pendingUnlocks = m_storage.getPendingUnlocks();
+
+    std::string result = "{";
+    result += R"("bridgeAssets":)";
+
+    std::string assetsArray = "[";
+    for (size_t i = 0; i < assets.size(); ++i)
+    {
+      assetsArray += "{";
+      assetsArray += R"("tokenId":)" + std::to_string(assets[i].tokenId) + ",";
+      assetsArray += R"("sourceChain":")" + assets[i].sourceChain + "\",";
+      assetsArray += R"("sourceAsset":")" + assets[i].sourceAsset + "\",";
+      assetsArray += R"("bridgeOperator":")" + common::podToHex(assets[i].bridgeOperator) + "\",";
+      assetsArray += R"("totalLocked":)" + std::to_string(m_storage.getTotalLockedForToken(assets[i].tokenId));
+      assetsArray += "}";
+      if (i < assets.size() - 1)
+        assetsArray += ",";
+    }
+    assetsArray += "]";
+    result += assetsArray + ",";
+
+    result += R"("pendingUnlocks":)" + std::to_string(pendingUnlocks.size()) + ",";
+
+    std::string unlocksArray = "[";
+    size_t unlockCount = 0;
+    for (size_t i = 0; i < pendingUnlocks.size() && unlockCount < 20; ++i)
+    {
+      if (unlockCount > 0)
+        unlocksArray += ",";
+      unlocksArray += "{";
+      unlocksArray += R"("lockId":)" + std::to_string(pendingUnlocks[i].id) + ",";
+      unlocksArray += R"("userAddress":")" + common::podToHex(pendingUnlocks[i].userAddress) + "\",";
+      unlocksArray += R"("tokenId":)" + std::to_string(pendingUnlocks[i].tokenId) + ",";
+      unlocksArray += R"("amount":)" + std::to_string(pendingUnlocks[i].amount);
+      unlocksArray += "}";
+      ++unlockCount;
+    }
+    unlocksArray += "]";
+    result += R"("pendingUnlockDetails":)" + unlocksArray;
+
+    result += "}";
+    return result;
+  }
+
+  // ── Remaining methods unchanged ────────────────────────────
+
   std::string SidechainRpcServer::methodFaucet(const common::JsonValue &params)
   {
     std::string address = params("address").getString();
@@ -397,9 +569,7 @@ namespace Sidechain
     std::string claimKey = "faucet_" + common::podToHex(pubKey);
     std::vector<uint8_t> claimed;
     if (m_storage.getMeta(claimKey, claimed) && !claimed.empty())
-    {
       return R"({"status":"error","message":"already claimed"})";
-    }
 
     uint64_t topHeight = m_storage.topBlockHeight();
     bool hasHistory = false;
@@ -419,23 +589,22 @@ namespace Sidechain
     }
 
     if (!hasHistory)
-    {
-      return R"({"status":"error","message":"address has no transaction history, send a token or SCCX to this address first"})";
-    }
+      return R"({"status":"error","message":"address has no transaction history"})";
 
     uint64_t faucetAmount = SidechainConfig::FAUCET_AMOUNT;
     uint64_t currentBalance = 0;
     m_storage.getBalance(pubKey, 0, currentBalance);
     m_storage.setBalance(pubKey, 0, currentBalance + faucetAmount);
-
     m_storage.putMeta(claimKey, {1});
 
-    return R"({"status":"ok","amount":)" + std::to_string(faucetAmount) + R"(,"balance":)" + std::to_string(currentBalance + faucetAmount) + "}";
+    return R"({"status":"ok","amount":)" + std::to_string(faucetAmount) +
+           R"(,"balance":)" + std::to_string(currentBalance + faucetAmount) + "}";
   }
 
   std::string SidechainRpcServer::methodGetSidechainStatus(const common::JsonValue &)
   {
-    return R"({"sidechainEnabled":true,"sidechainHost":")" + m_sidechainHost + R"(","sidechainPort":)" + std::to_string(m_sidechainPort) + "}";
+    return R"({"sidechainEnabled":true,"sidechainHost":")" + m_sidechainHost +
+           R"(","sidechainPort":)" + std::to_string(m_sidechainPort) + "}";
   }
 
   std::string SidechainRpcServer::methodGetSidechainTokens(const common::JsonValue &)
@@ -453,16 +622,13 @@ namespace Sidechain
     return methodCreateToken(params);
   }
 
-  // ─── DEX RPC methods ────────────────────────────────────────
-
+  // ── DEX methods unchanged ──────────────────────────────────
   std::string SidechainRpcServer::methodDexGetOrders(const common::JsonValue &params)
   {
     if (!m_dexEngine)
       return "[]";
-
     uint64_t baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
     uint64_t quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
-
     auto orders = m_dexEngine->getOrders(baseTokenId, quoteTokenId);
     std::string result = "[";
     for (size_t i = 0; i < orders.size(); ++i)
@@ -479,8 +645,7 @@ namespace Sidechain
         statusStr = "filled";
       else if (orders[i].status == BoltDex::OrderStatus::Cancelled)
         statusStr = "cancelled";
-      result += R"("status":")" + statusStr + "\"";
-      result += "}";
+      result += R"("status":")" + statusStr + "\"}";
       if (i < orders.size() - 1)
         result += ",";
     }
@@ -492,11 +657,9 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "[]";
-
     uint64_t baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
     uint64_t quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
     size_t limit = params.contains("limit") ? static_cast<size_t>(params("limit").getInteger()) : 50;
-
     auto trades = m_dexEngine->getTrades(baseTokenId, quoteTokenId, limit);
     std::string result = "[";
     for (size_t i = 0; i < trades.size(); ++i)
@@ -508,8 +671,7 @@ namespace Sidechain
       result += R"("amount":)" + std::to_string(trades[i].amount) + ",";
       result += R"("price":)" + std::to_string(trades[i].price) + ",";
       result += R"("settled":)" + std::string(trades[i].settled ? "true" : "false") + ",";
-      result += R"("timestamp":)" + std::to_string(trades[i].timestamp);
-      result += "}";
+      result += R"("timestamp":)" + std::to_string(trades[i].timestamp) + "}";
       if (i < trades.size() - 1)
         result += ",";
     }
@@ -521,7 +683,6 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "[]";
-
     size_t limit = params.contains("limit") ? static_cast<size_t>(params("limit").getInteger()) : 100;
     auto trades = m_dexEngine->getAllTrades(limit);
     std::string result = "[";
@@ -536,8 +697,7 @@ namespace Sidechain
       result += R"("amount":)" + std::to_string(trades[i].amount) + ",";
       result += R"("price":)" + std::to_string(trades[i].price) + ",";
       result += R"("settled":)" + std::string(trades[i].settled ? "true" : "false") + ",";
-      result += R"("timestamp":)" + std::to_string(trades[i].timestamp);
-      result += "}";
+      result += R"("timestamp":)" + std::to_string(trades[i].timestamp) + "}";
       if (i < trades.size() - 1)
         result += ",";
     }
@@ -549,7 +709,6 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "false";
-
     BoltDex::Order order;
     order.type = params("type").getString() == "buy" ? BoltDex::OrderType::Buy : BoltDex::OrderType::Sell;
     common::podFromHex(params("owner").getString(), order.owner);
@@ -557,7 +716,6 @@ namespace Sidechain
     order.quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
     order.amount = static_cast<uint64_t>(params("amount").getInteger());
     order.price = static_cast<uint64_t>(params("price").getInteger());
-
     if (m_dexEngine->submitOrder(order))
       return "true";
     return "false";
@@ -567,11 +725,9 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "false";
-
     uint64_t orderId = static_cast<uint64_t>(params("orderId").getInteger());
     crypto::PublicKey owner;
     common::podFromHex(params("owner").getString(), owner);
-
     if (m_dexEngine->cancelOrder(orderId, owner))
       return "true";
     return "false";
@@ -581,7 +737,6 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "{}";
-
     crypto::PublicKey dexPub = m_dexEngine->getDexPublicKey();
     return R"({"dexAddress":")" + common::podToHex(dexPub) + R"("})";
   }
@@ -590,12 +745,10 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "false";
-
     crypto::PublicKey owner;
     common::podFromHex(params("owner").getString(), owner);
     uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
     uint64_t amount = static_cast<uint64_t>(params("amount").getInteger());
-
     if (m_dexEngine->withdraw(owner, tokenId, amount))
       return "true";
     return "false";
@@ -605,11 +758,9 @@ namespace Sidechain
   {
     if (!m_dexEngine)
       return "0";
-
     crypto::PublicKey owner;
     common::podFromHex(params("owner").getString(), owner);
     uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
-
     return std::to_string(m_dexEngine->getEscrowBalance(owner, tokenId));
   }
 }

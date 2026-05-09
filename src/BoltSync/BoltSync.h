@@ -26,6 +26,7 @@ namespace BoltSync
     crypto::PublicKey txPublicKey;
     crypto::KeyImage keyImage;
     bool spent = false;
+    std::vector<uint8_t> txExtra;
   };
 
   struct ScanConfig

@@ -131,12 +131,11 @@ namespace Sidechain
     uint8_t msgType = data[0];
 
     // Sync request from a new validator (0x03)
-    if (msgType == 0x03) // Sync request from a new validator
+    if (msgType == 0x03)
     {
       std::cout << "BftConsensus: received sync request from " << fromIp << std::endl;
 
-      // Extract the requester's gossip port from the message (bytes 1-2)
-      uint16_t requesterPort = SidechainConfig::DEFAULT_RPC_BIND_PORT + SidechainConfig::GOSSIP_PORT_OFFSET; // fallback
+      uint16_t requesterPort = SidechainConfig::DEFAULT_RPC_BIND_PORT + SidechainConfig::GOSSIP_PORT_OFFSET;
       if (data.size() >= 3)
       {
         memcpy(&requesterPort, &data[1], sizeof(uint16_t));
@@ -144,7 +143,6 @@ namespace Sidechain
 
       std::cout << "BftConsensus: requester gossip port is " << requesterPort << std::endl;
 
-      // Build response with all active validators
       auto activeValidators = m_storage.getActiveValidators();
 
       std::string serializedData;
@@ -159,10 +157,9 @@ namespace Sidechain
       }
 
       std::vector<uint8_t> message;
-      message.push_back(0x04); // Sync response type
+      message.push_back(0x04);
       message.insert(message.end(), serializedData.begin(), serializedData.end());
 
-      // Extract IP from fromIp (format: "IP:port")
       std::string peerIp = fromIp.substr(0, fromIp.find(':'));
 
       m_gossip.sendTo(peerIp, requesterPort, message);
@@ -310,7 +307,6 @@ namespace Sidechain
           shouldCheck = true;
         }
       }
-      // Mutex released here, safe to call checkCommitCondition
       if (shouldCheck)
         checkCommitCondition(blockHash);
     }
@@ -330,9 +326,8 @@ namespace Sidechain
   void BftConsensus::requestValidatorSync(const std::string &seedHost, uint16_t seedPort)
   {
     std::vector<uint8_t> message;
-    message.push_back(0x03); // Sync request type
+    message.push_back(0x03);
 
-    // Include our gossip port so the seed knows where to respond
     uint16_t myGossipPort = m_self.port + SidechainConfig::GOSSIP_PORT_OFFSET;
     message.insert(message.end(), (uint8_t *)&myGossipPort, (uint8_t *)&myGossipPort + sizeof(myGossipPort));
 
@@ -413,23 +408,31 @@ namespace Sidechain
     if (it == m_pendingBlocks.end() || it->second.committed)
       return;
 
-    std::cout << "BftConsensus::checkCommitCondition: votes=" << it->second.votes.size()
-              << " threshold=" << SidechainConfig::BFT_BLOCK_THRESHOLD << std::endl;
-
     if (it->second.votes.size() >= SidechainConfig::BFT_BLOCK_THRESHOLD)
     {
+      auto commitStart = std::chrono::steady_clock::now();
+
       it->second.committed = true;
 
       m_storage.addBlock(it->second.block, blockHash);
 
-      // Apply all transactions and collect real transfer fees
+      // Apply all transactions
       uint64_t totalFees = 0;
       for (const auto &tx : it->second.block.transactions)
       {
+        // Bridge mint authorization check
+        if (tx.type == TransactionType::Mint)
+        {
+          if (!m_hasBridgeKey || tx.from != m_bridgePubKey)
+          {
+            std::cout << "BftConsensus: rejecting Mint from non-bridge address" << std::endl;
+            continue;
+          }
+        }
+
         m_storage.applyTransaction(tx);
 
-        // Only count fees from transfers, mints, and burns (real economic activity)
-        // CreateToken fees are always 0 and never counted
+        // Collect fees from economic transactions
         if (tx.type == TransactionType::Transfer ||
             tx.type == TransactionType::Mint ||
             tx.type == TransactionType::Burn)
@@ -441,6 +444,12 @@ namespace Sidechain
         if (tx.type == TransactionType::CreateToken)
         {
           m_storage.recordTokenCreation(tx.from, it->second.block.header.height);
+        }
+
+        // Notify bridge watcher of burns
+        if (tx.type == TransactionType::Burn && m_onBridgeBurn)
+        {
+          m_onBridgeBurn(tx);
         }
       }
 
@@ -494,8 +503,26 @@ namespace Sidechain
       if (m_onBlockCommitted)
         m_onBlockCommitted(it->second.block);
 
-      std::cout << "Block committed at height " << it->second.block.header.height
-                << " with " << it->second.votes.size() << " votes" << std::endl;
+      // Block production stats
+      auto commitTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - commitStart)
+                            .count();
+
+      static auto lastBlockTime = std::chrono::steady_clock::now();
+      static uint64_t lastBlockHeight = 0;
+      auto now = std::chrono::steady_clock::now();
+      auto timeSinceLast = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBlockTime).count();
+      lastBlockTime = now;
+
+      uint64_t txCount = it->second.block.transactions.size();
+
+      std::cout << "Block " << it->second.block.header.height
+                << " committed: " << txCount << " txs"
+                << " commit=" << commitTime << "ms"
+                << " interval=" << timeSinceLast << "ms";
+      if (timeSinceLast > 0)
+        std::cout << " tps=" << (txCount * 1000 / timeSinceLast);
+      std::cout << " votes=" << it->second.votes.size() << std::endl;
     }
   }
 

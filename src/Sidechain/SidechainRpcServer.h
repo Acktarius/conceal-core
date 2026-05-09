@@ -32,19 +32,18 @@ namespace Sidechain
       m_sidechainPort = port;
     }
 
-    void setTestnet(bool testnet)
-    {
-      m_testnet = testnet;
-    }
+    void setTestnet(bool testnet) { m_testnet = testnet; }
 
     void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_dexEngine = engine; }
 
   private:
     std::string handleJsonRpc(const std::string &body);
 
+    // Account methods
     std::string methodGetBalance(const common::JsonValue &params);
     std::string methodGetTokenBalance(const common::JsonValue &params);
     std::string methodGetTokens(const common::JsonValue &params);
+    std::string methodGetTokenByFingerprint(const common::JsonValue &params);
     std::string methodTransfer(const common::JsonValue &params);
     std::string methodCreateToken(const common::JsonValue &params);
     std::string methodMintToken(const common::JsonValue &params);
@@ -52,12 +51,21 @@ namespace Sidechain
     std::string methodGetStatus(const common::JsonValue &params);
     std::string methodGetPendingTransactions(const common::JsonValue &params);
     std::string methodGetValidators(const common::JsonValue &params);
+    std::string methodGetTransactions(const common::JsonValue &params);
+    std::string methodFaucet(const common::JsonValue &params);
+
+    // Asset registry, bridge, and equivalence
+    std::string methodGetAssetRegistry(const common::JsonValue &params);
+    std::string methodGetEquivalenceGroup(const common::JsonValue &params);
+    std::string methodGetBridgeStatus(const common::JsonValue &params);
+
+    // Legacy sidechain aliases
     std::string methodGetSidechainStatus(const common::JsonValue &params);
     std::string methodGetSidechainTokens(const common::JsonValue &params);
     std::string methodSidechainTransfer(const common::JsonValue &params);
     std::string methodSidechainCreateToken(const common::JsonValue &params);
-    std::string methodGetTransactions(const common::JsonValue &params);
-    std::string methodFaucet(const common::JsonValue &params);
+
+    // DEX methods
     std::string methodDexGetOrders(const common::JsonValue &params);
     std::string methodDexGetTrades(const common::JsonValue &params);
     std::string methodDexGetAllTrades(const common::JsonValue &params);

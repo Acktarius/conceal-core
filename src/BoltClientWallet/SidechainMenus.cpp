@@ -53,15 +53,34 @@ void sidechainTokensMenu(const Config &cfg)
       uint64_t maxSupply = extractJsonNumber(arrayContent.substr(pos), "maxSupply");
       uint64_t decimals = extractJsonNumber(arrayContent.substr(pos), "decimals");
       uint64_t model = extractJsonNumber(arrayContent.substr(pos), "backingModel");
+      uint64_t backingRatio = extractJsonNumber(arrayContent.substr(pos), "backingRatio");
+      uint64_t lockedCCX = extractJsonNumber(arrayContent.substr(pos), "lockedCCXAmount");
+      std::string sourceChain = extractJsonString(arrayContent.substr(pos), "sourceChain");
+      bool verified = extractJsonString(arrayContent.substr(pos), "verified") == "true";
 
       if (!name.empty() && !symbol.empty())
       {
-        std::string modelName = (model == 0) ? "Unbacked" : (model == 1) ? "Fully Backed"
-                                                                         : "Hybrid";
+        std::string modelName = getBackingModelName(static_cast<uint8_t>(model));
         std::cout << "  " << symbol << " (" << name << ")" << std::endl;
         std::cout << "    ID: " << id << " | Supply: " << formatAmount(supply, decimals)
                   << " | Max: " << formatAmount(maxSupply, decimals)
                   << " | Decimals: " << decimals << " | " << modelName << std::endl;
+
+        if (model > 0)
+        {
+          std::cout << "    Backing Ratio: " << backingRatio << "%";
+          if (lockedCCX > 0)
+            std::cout << " | Locked CCX: " << formatAmount(lockedCCX, 6);
+          std::cout << std::endl;
+        }
+
+        if (!sourceChain.empty())
+        {
+          std::cout << "    Source: " << sourceChain;
+          if (verified)
+            std::cout << " [verified]";
+          std::cout << std::endl;
+        }
       }
       pos++;
       count++;
@@ -81,14 +100,16 @@ void sidechainCreateTokenMenu(const Config &cfg, const std::string &spendPubHex)
             << std::endl;
   std::cout << "Backing models:" << std::endl;
   std::cout << "  0 = Unbacked — free to create, no CCX needed" << std::endl;
-  std::cout << "  1 = Fully Backed — CCX locked 1:1" << std::endl;
-  std::cout << "  2 = Hybrid — CCX-backed with flexible fees" << std::endl;
+  std::cout << "  1 = Fully Backed — CCX locked 1:1 as collateral" << std::endl;
+  std::cout << "  2 = Hybrid — CCX-backed with configurable ratio" << std::endl;
   std::cout << std::endl;
 
   std::string name, symbol;
   uint64_t initialSupply;
   int backingModel;
   int decimals = 6;
+  uint64_t backingRatio = 100;
+  uint64_t lockedCCXAmount = 0;
 
   std::cout << "Token name: ";
   std::getline(std::cin, name);
@@ -134,12 +155,53 @@ void sidechainCreateTokenMenu(const Config &cfg, const std::string &spendPubHex)
     return;
   }
 
+  if (backingModel == 1 || backingModel == 2)
+  {
+    std::cout << std::endl
+              << "Backing configuration:" << std::endl;
+
+    if (backingModel == 2)
+    {
+      std::cout << "Backing ratio (% — default 100): ";
+      std::string ratioStr;
+      std::getline(std::cin, ratioStr);
+      if (!ratioStr.empty())
+        backingRatio = std::stoull(ratioStr);
+    }
+
+    std::cout << "Locked CCX amount (atomic units, 0 to skip): ";
+    std::cin >> lockedCCXAmount;
+    std::cin.ignore();
+
+    if (lockedCCXAmount == 0)
+    {
+      std::cout << "Warning: Creating a backed token without locked CCX. It can be funded later via bridge Mint." << std::endl;
+      std::cout << "Continue? (y/n): ";
+      std::string cont;
+      std::getline(std::cin, cont);
+      if (cont != "y" && cont != "Y")
+      {
+        std::cout << "Cancelled." << std::endl;
+        std::cin.get();
+        return;
+      }
+    }
+  }
+
   std::cout << std::endl
             << "Confirm:" << std::endl;
   std::cout << "  Name: " << name << std::endl;
   std::cout << "  Symbol: " << symbol << std::endl;
   std::cout << "  Supply: " << initialSupply << std::endl;
   std::cout << "  Decimals: " << decimals << std::endl;
+  std::cout << "  Model: " << getBackingModelName(static_cast<uint8_t>(backingModel)) << std::endl;
+
+  if (backingModel > 0)
+  {
+    std::cout << "  Backing Ratio: " << backingRatio << "%" << std::endl;
+    std::cout << "  Locked CCX: " << formatAmount(lockedCCXAmount, 6) << std::endl;
+  }
+
   std::cout << "Create? (y/n): ";
 
   std::string confirm;
@@ -161,8 +223,13 @@ void sidechainCreateTokenMenu(const Config &cfg, const std::string &spendPubHex)
          << R"(,"symbolHex":")" << symbolHex << R"(")"
          << R"(,"initialSupply":)" << initialSupply
          << R"(,"backingModel":)" << backingModel
-         << R"(,"decimals":)" << decimals
-         << "}";
+         << R"(,"decimals":)" << decimals;
+  if (backingModel > 0)
+  {
+    params << R"(,"backingRatio":)" << backingRatio
+           << R"(,"lockedCCXAmount":)" << lockedCCXAmount;
+  }
+  params << "}";
 
   std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "createToken", params.str());
   std::cout << std::endl;
@@ -170,7 +237,6 @@ void sidechainCreateTokenMenu(const Config &cfg, const std::string &spendPubHex)
   if (result.find("true") != std::string::npos)
   {
     std::cout << "Token " << symbol << " created!" << std::endl;
-    // Reload token cache so the new token is available
     loadTokenCache(cfg.sidechainHost, cfg.sidechainPort);
   }
   else
@@ -210,26 +276,29 @@ void sidechainTransferMenu(const Config &cfg, const std::string &spendPubHex, cn
     return;
   }
 
-  // Show available tokens
   std::cout << std::endl
             << "Available tokens:" << std::endl;
+
+  const auto &cache = getTokenCache();
   std::cout << "  0 = SCCX (native gas token)" << std::endl;
-  std::string tokensResult = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokens", "{}");
-  size_t arrayStart = tokensResult.find("\"result\":[");
-  if (arrayStart != std::string::npos)
+
+  for (const auto &entry : cache)
   {
-    arrayStart += 10;
-    std::string arrayContent = tokensResult.substr(arrayStart);
-    size_t pos = 0;
-    while ((pos = arrayContent.find("\"id\":", pos)) != std::string::npos)
+    uint64_t id = entry.first;
+    const TokenInfoCache &info = entry.second;
+    if (id == 0)
+      continue;
+    std::cout << "  " << id << " = " << info.symbol << " (" << info.name << ")";
+    if (!info.sourceChain.empty())
     {
-      uint64_t id = extractJsonNumber(arrayContent.substr(pos), "id");
-      std::string symbol = extractJsonString(arrayContent.substr(pos), "symbol");
-      std::string name = extractJsonString(arrayContent.substr(pos), "name");
-      if (!symbol.empty())
-        std::cout << "  " << id << " = " << symbol << " (" << name << ")" << std::endl;
-      pos++;
+      std::cout << " [" << info.sourceChain;
+      if (info.verified)
+        std::cout << " · verified";
+      std::cout << "]";
     }
+    if (info.backingModel > 0)
+      std::cout << " · " << getBackingModelName(info.backingModel);
+    std::cout << std::endl;
   }
 
   std::cout << std::endl
@@ -296,47 +365,52 @@ void sidechainBalanceMenu(const Config &cfg, const std::string &spendPubHex)
   std::cout << "SCCX: " << formatAmount(sccxBalance, 6) << std::endl
             << std::endl;
 
-  std::string tokensResult = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokens", "{}");
+  const auto &cache = getTokenCache();
+  bool shownAny = false;
 
-  size_t arrayStart = tokensResult.find("\"result\":[");
-  if (arrayStart == std::string::npos)
+  for (const auto &entry : cache)
   {
-    std::cout << "No tokens found." << std::endl;
-  }
-  else
-  {
-    arrayStart += 10;
-    std::string arrayContent = tokensResult.substr(arrayStart);
+    uint64_t id = entry.first;
+    const TokenInfoCache &info = entry.second;
+    if (id == 0)
+      continue;
 
-    size_t pos = 0;
-    int count = 0;
-    while ((pos = arrayContent.find("\"id\":", pos)) != std::string::npos)
+    std::ostringstream tokParams;
+    tokParams << R"({"address":")" << spendPubHex << R"(","tokenId":)" << id << "}";
+    std::string tokBalJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", tokParams.str());
+    uint64_t tokBalance = extractJsonNumber(tokBalJson, "result");
+
+    std::cout << info.symbol << " (" << info.name << ")" << std::endl;
+    std::cout << "  Balance: " << formatAmount(tokBalance, info.decimals)
+              << " / Supply: " << formatAmount(info.lockedCCXAmount > 0 ? info.lockedCCXAmount : 0, info.decimals)
+              << " | " << getBackingModelName(info.backingModel) << std::endl;
+
+    if (!info.sourceChain.empty())
     {
-      uint64_t id = extractJsonNumber(arrayContent.substr(pos), "id");
-      std::string name = extractJsonString(arrayContent.substr(pos), "name");
-      std::string symbol = extractJsonString(arrayContent.substr(pos), "symbol");
-      uint64_t supply = extractJsonNumber(arrayContent.substr(pos), "totalSupply");
-      uint64_t decimals = extractJsonNumber(arrayContent.substr(pos), "decimals");
-
-      if (!name.empty() && !symbol.empty())
-      {
-        std::ostringstream tokParams;
-        tokParams << R"({"address":")" << spendPubHex << R"(","tokenId":)" << id << "}";
-        std::string tokBalJson = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "getTokenBalance", tokParams.str());
-        uint64_t tokBalance = extractJsonNumber(tokBalJson, "result");
-
-        std::cout << symbol << " (" << name << ")" << std::endl;
-        std::cout << "  Balance: " << formatAmount(tokBalance, decimals)
-                  << " / Supply: " << formatAmount(supply, decimals) << std::endl;
-      }
-      pos++;
-      count++;
+      std::cout << "  Source: " << info.sourceChain;
+      if (!info.sourceAsset.empty() && info.sourceAsset != "native")
+        std::cout << " (" << info.sourceAsset << ")";
+      if (info.verified)
+        std::cout << " [verified]";
+      std::cout << std::endl;
     }
-    if (count == 0)
-      std::cout << "No tokens found." << std::endl;
+
+    if (info.backingModel > 0)
+    {
+      std::cout << "  Backing: " << info.backingRatio << "%";
+      if (info.lockedCCXAmount > 0)
+        std::cout << " | Locked: " << formatAmount(info.lockedCCXAmount, 6) << " CCX";
+      std::cout << std::endl;
+    }
+
+    std::cout << std::endl;
+    shownAny = true;
   }
 
-  std::cout << "\nPress enter to return..." << std::endl;
+  if (!shownAny)
+    std::cout << "No tokens found." << std::endl;
+
+  std::cout << "Press enter to return..." << std::endl;
   std::cin.get();
 }
 
@@ -384,8 +458,8 @@ void sidechainQuickCreateMenu(const Config &cfg, const std::string &spendPubHex)
   std::cout << "  Name: " << name << std::endl;
   std::cout << "  Symbol: " << symbol << std::endl;
   std::cout << "  Supply: " << initialSupply << std::endl;
-  std::cout << "  Decimals: " << (int)decimals << std::endl;
-  std::cout << "  Model: Unbacked" << std::endl
+  std::cout << "  Decimals: " << static_cast<int>(decimals) << std::endl;
+  std::cout << "  Model: " << getBackingModelName(static_cast<uint8_t>(backingModel)) << std::endl
             << std::endl;
 
   std::string nameHex = common::toHex(common::asBinaryArray(name));
@@ -398,7 +472,7 @@ void sidechainQuickCreateMenu(const Config &cfg, const std::string &spendPubHex)
          << R"(,"symbolHex":")" << symbolHex << R"(")"
          << R"(,"initialSupply":)" << initialSupply
          << R"(,"backingModel":)" << backingModel
-         << R"(,"decimals":)" << (int)decimals
+         << R"(,"decimals":)" << static_cast<int>(decimals)
          << "}";
 
   std::string result = sidechainCall(cfg.sidechainHost, cfg.sidechainPort, "createToken", params.str());
@@ -427,7 +501,6 @@ void sidechainQuickCreateMenu(const Config &cfg, const std::string &spendPubHex)
     entry.txHash = txHash;
     addTxToHistory(entry);
 
-    // Reload token cache
     loadTokenCache(cfg.sidechainHost, cfg.sidechainPort);
   }
   else

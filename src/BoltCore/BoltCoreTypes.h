@@ -40,6 +40,7 @@ namespace BoltCore
     std::string txHash;
     uint64_t fee;
     std::string error;
+    cn::Transaction transaction;
   };
 
   struct Balance

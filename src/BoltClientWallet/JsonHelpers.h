@@ -25,12 +25,18 @@ std::string formatHash(const std::string &hash, size_t len = 16);
 std::string getTimestamp();
 std::string addressToHexPubKey(const std::string &input, class cn::Currency &currency);
 
-// Token info cache for decimal lookups
+// Token info cache for decimal lookups and provenance
 struct TokenInfoCache
 {
   std::string symbol;
   std::string name;
   uint8_t decimals = 6;
+  uint8_t backingModel = 0; // 0=Unbacked, 1=Fully Backed, 2=Hybrid
+  uint64_t backingRatio = 0;
+  uint64_t lockedCCXAmount = 0;
+  bool verified = false;
+  std::string sourceChain;
+  std::string sourceAsset;
 };
 
 const std::unordered_map<uint64_t, TokenInfoCache> &getTokenCache();
@@ -38,3 +44,7 @@ void loadTokenCache(const std::string &host, uint16_t port);
 TokenInfoCache getTokenInfo(uint64_t tokenId);
 std::string getTokenSymbol(uint64_t tokenId);
 uint8_t getTokenDecimals(uint64_t tokenId);
+
+// Backing model helpers
+std::string getBackingModelName(uint8_t model);
+std::string getTokenProvenance(uint64_t tokenId);

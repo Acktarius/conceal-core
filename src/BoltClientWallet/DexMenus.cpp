@@ -23,15 +23,31 @@ void dexOrderBookMenu(const Config &cfg)
   std::cin >> quoteTokenId;
   std::cin.ignore();
 
+  // Show token info for context
+  std::string baseSymbol = getTokenSymbol(baseTokenId);
+  uint8_t baseDecimals = getTokenDecimals(baseTokenId);
+  std::string quoteSymbol = getTokenSymbol(quoteTokenId);
+  uint8_t quoteDecimals = getTokenDecimals(quoteTokenId);
+  std::string baseProvenance = getTokenProvenance(baseTokenId);
+  std::string quoteProvenance = getTokenProvenance(quoteTokenId);
+
+  std::cout << std::endl
+            << "Pair: " << baseSymbol;
+  if (!baseProvenance.empty())
+    std::cout << " [" << baseProvenance << "]";
+  std::cout << " / " << quoteSymbol;
+  if (!quoteProvenance.empty())
+    std::cout << " [" << quoteProvenance << "]";
+  std::cout << std::endl
+            << std::endl;
+
   std::ostringstream params;
   params << R"({"baseTokenId":)" << baseTokenId
          << R"(,"quoteTokenId":)" << quoteTokenId << "}";
 
   std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_getOrders", params.str());
 
-  std::cout << std::endl;
-
-  std::cout << "Sells:" << std::endl;
+  std::cout << "Sells (" << baseSymbol << " → " << quoteSymbol << "):" << std::endl;
   size_t pos = 0;
   bool foundSells = false;
   while ((pos = result.find("\"type\":\"sell\"", pos)) != std::string::npos)
@@ -55,9 +71,9 @@ void dexOrderBookMenu(const Config &cfg)
     uint64_t price = extractJsonNumber(obj, "price");
     std::string owner = extractJsonString(obj, "owner");
 
-    std::cout << "  #" << id << " | Price: " << formatAmount(price)
-              << " | Amount: " << formatAmount(amount)
-              << " | Owner: " << formatHash(owner) << std::endl;
+    std::cout << "  #" << id << " | Price: " << formatAmount(price, quoteDecimals)
+              << " " << quoteSymbol << " | Amount: " << formatAmount(amount, baseDecimals)
+              << " " << baseSymbol << " | Owner: " << formatHash(owner) << std::endl;
     foundSells = true;
     pos = objEnd + 1;
   }
@@ -65,7 +81,7 @@ void dexOrderBookMenu(const Config &cfg)
     std::cout << "  No sell orders." << std::endl;
 
   std::cout << std::endl
-            << "Buys:" << std::endl;
+            << "Buys (" << baseSymbol << " ← " << quoteSymbol << "):" << std::endl;
   pos = 0;
   bool foundBuys = false;
   while ((pos = result.find("\"type\":\"buy\"", pos)) != std::string::npos)
@@ -89,9 +105,9 @@ void dexOrderBookMenu(const Config &cfg)
     uint64_t price = extractJsonNumber(obj, "price");
     std::string owner = extractJsonString(obj, "owner");
 
-    std::cout << "  #" << id << " | Price: " << formatAmount(price)
-              << " | Amount: " << formatAmount(amount)
-              << " | Owner: " << formatHash(owner) << std::endl;
+    std::cout << "  #" << id << " | Price: " << formatAmount(price, quoteDecimals)
+              << " " << quoteSymbol << " | Amount: " << formatAmount(amount, baseDecimals)
+              << " " << baseSymbol << " | Owner: " << formatHash(owner) << std::endl;
     foundBuys = true;
     pos = objEnd + 1;
   }
@@ -107,6 +123,28 @@ void dexSubmitOrderMenu(const Config &cfg, const std::string &spendPubHex)
   clearScreen();
   std::cout << "=== Place DEX Order ===" << std::endl
             << std::endl;
+
+  // Show available tokens for reference
+  std::cout << "Available tokens:" << std::endl;
+  const auto &cache = getTokenCache();
+  std::cout << "  0 = SCCX (native gas token)" << std::endl;
+  for (const auto &entry : cache)
+  {
+    uint64_t id = entry.first;
+    const TokenInfoCache &info = entry.second;
+    if (id == 0)
+      continue;
+    std::cout << "  " << id << " = " << info.symbol << " (" << info.name << ")";
+    if (!info.sourceChain.empty())
+    {
+      std::cout << " [" << info.sourceChain;
+      if (info.verified)
+        std::cout << " · verified";
+      std::cout << "]";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << std::endl;
 
   std::string type;
   uint64_t baseTokenId, quoteTokenId, amount, price;
@@ -129,6 +167,31 @@ void dexSubmitOrderMenu(const Config &cfg, const std::string &spendPubHex)
   std::cout << "Price (in quote token): ";
   std::cin >> price;
   std::cin.ignore();
+
+  // Show order summary with token symbols and decimals
+  std::string baseSymbol = getTokenSymbol(baseTokenId);
+  uint8_t baseDecimals = getTokenDecimals(baseTokenId);
+  std::string quoteSymbol = getTokenSymbol(quoteTokenId);
+  uint8_t quoteDecimals = getTokenDecimals(quoteTokenId);
+
+  uint64_t totalCost = amount * price;
+  std::cout << std::endl
+            << "Order Summary:" << std::endl;
+  std::cout << "  " << (type == "buy" ? "Buy" : "Sell") << " "
+            << formatAmount(amount, baseDecimals) << " " << baseSymbol
+            << " @ " << formatAmount(price, quoteDecimals) << " " << quoteSymbol << std::endl;
+  std::cout << "  Total: " << formatAmount(totalCost, quoteDecimals) << " " << quoteSymbol << std::endl
+            << std::endl;
+
+  std::cout << "Confirm? (y/n): ";
+  std::string confirm;
+  std::getline(std::cin, confirm);
+  if (confirm != "y" && confirm != "Y")
+  {
+    std::cout << "Cancelled." << std::endl;
+    std::cin.get();
+    return;
+  }
 
   std::ostringstream params;
   params << "{"
@@ -189,10 +252,15 @@ void dexTradeHistoryMenu(const Config &cfg)
     std::string settled = extractJsonString(obj, "settled");
     uint64_t timestamp = extractJsonNumber(obj, "timestamp");
 
+    std::string baseSymbol = getTokenSymbol(baseTokenId);
+    uint8_t baseDecimals = getTokenDecimals(baseTokenId);
+    std::string quoteSymbol = getTokenSymbol(quoteTokenId);
+    uint8_t quoteDecimals = getTokenDecimals(quoteTokenId);
+
     std::cout << "  Trade #" << id;
-    std::cout << " | Amount: " << formatAmount(amount);
-    std::cout << " | Price: " << formatAmount(price);
-    std::cout << " | Token: " << baseTokenId << "/" << quoteTokenId;
+    std::cout << " | Amount: " << formatAmount(amount, baseDecimals) << " " << baseSymbol;
+    std::cout << " | Price: " << formatAmount(price, quoteDecimals) << " " << quoteSymbol;
+    std::cout << " | Pair: " << baseSymbol << "/" << quoteSymbol;
     std::cout << " | " << (settled == "true" ? "Settled" : "Pending");
     if (timestamp > 0)
     {
@@ -262,6 +330,9 @@ void dexDepositAddressMenu(const Config &cfg)
     std::cout << std::endl;
     std::cout << "Use S4 (Send Token) to transfer tokens to this address." << std::endl;
     std::cout << "Then check your escrow balance with D5." << std::endl;
+    std::cout << std::endl;
+    std::cout << "For CCX-backed tokens, send CCX to this address on the main chain" << std::endl;
+    std::cout << "to trigger the bridge deposit and mint backed tokens." << std::endl;
   }
 
   std::cout << "\nPress enter to return..." << std::endl;
@@ -303,8 +374,10 @@ void dexEscrowBalanceMenu(const Config &cfg, const std::string &spendPubHex)
   else
   {
     std::cout << std::endl;
-    for (const auto &[tokenId, info] : cache)
+    for (const auto &entry : cache)
     {
+      uint64_t tokenId = entry.first;
+      const TokenInfoCache &info = entry.second;
       if (tokenId == 0)
         continue;
 
@@ -316,6 +389,27 @@ void dexEscrowBalanceMenu(const Config &cfg, const std::string &spendPubHex)
       if (!info.name.empty() && info.name != symbol)
         std::cout << " (" << info.name << ")";
       std::cout << " Escrow: " << formatAmount(escrow, decimals) << std::endl;
+
+      // Show backing and provenance info
+      if (info.backingModel > 0)
+      {
+        std::cout << "    " << getBackingModelName(info.backingModel);
+        if (info.backingRatio > 0)
+          std::cout << " · " << info.backingRatio << "% backed";
+        if (info.lockedCCXAmount > 0)
+          std::cout << " · " << formatAmount(info.lockedCCXAmount, 6) << " CCX locked";
+        std::cout << std::endl;
+      }
+
+      if (!info.sourceChain.empty())
+      {
+        std::cout << "    Source: " << info.sourceChain;
+        if (info.verified)
+          std::cout << " [verified]";
+        std::cout << std::endl;
+      }
+
+      std::cout << std::endl;
     }
   }
 

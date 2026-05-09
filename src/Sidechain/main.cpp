@@ -61,23 +61,7 @@ struct Config
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("Conceal Sidechain Validator");
-  desc.add_options()
-    ("help,h", "Show help")
-    ("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")
-    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")
-    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")
-    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")
-    ("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")
-    ("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key")
-    ("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key")
-    ("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")
-    ("testnet", po::bool_switch(), "Run sidechain in testnet mode")
-    ("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")
-    ("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")
-    ("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")
-    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")
-    ("enable-dex", po::bool_switch(), "Enable built-in DEX engine")
-    ("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage");
+  desc.add_options()("help,h", "Show help")("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key (64-char hex)")("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key (64-char hex, required for unlocks)")("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")("testnet", po::bool_switch(), "Run sidechain in testnet mode")("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")("enable-dex", po::bool_switch(), "Enable built-in DEX engine")("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage");
 
   po::variables_map vm;
   try
@@ -162,7 +146,7 @@ int main(int argc, char *argv[])
   uint64_t topHeight = storage.topBlockHeight();
   logger(logging::INFO) << "Sidechain height: " << topHeight;
 
-  // Setup gossip
+  // Gossip
   uint16_t gossipPort = cfg.bindPort + SidechainConfig::GOSSIP_PORT_OFFSET;
   std::vector<std::string> seedNodes;
 
@@ -244,9 +228,9 @@ int main(int argc, char *argv[])
   }
 
   logger(logging::INFO) << "Validator ID: " << self.id
-                        << " Public key: " << common::podToHex(self.publicKey);
+                        << " Public key: " << common::podToHex(self.publicKey).substr(0, 16) << "...";
 
-  // Reward address (optional, accepts base58 CCX address or hex public key)
+  // Reward address
   crypto::PublicKey rewardPub;
   bool hasRewardWallet = false;
 
@@ -300,16 +284,17 @@ int main(int argc, char *argv[])
     dexEngine->setValidator(validator);
     dexEngine->setTradingFee(cfg.dexFee);
 
-    // Use reward address as DEX fee destination
     if (hasRewardWallet)
     {
       crypto::SecretKey emptySec{};
       dexEngine->setDexKeys(rewardPub, emptySec);
+      std::cout << "DEX public key: " << common::podToHex(rewardPub) << std::endl;
       std::cout << "DEX enabled, fees go to reward address" << std::endl;
     }
     else
     {
       dexEngine->setDexKeys(self.publicKey, validatorSec);
+      std::cout << "DEX public key: " << common::podToHex(self.publicKey) << std::endl;
       std::cout << "DEX enabled, fees go to validator address" << std::endl;
     }
   }
@@ -330,7 +315,7 @@ int main(int argc, char *argv[])
     rpcServer.setDexEngine(dexEngine.get());
   }
 
-  // Daemon connection
+  // Daemon connection (for bridge)
   cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
 
   bool daemonConnected = false;
@@ -369,9 +354,12 @@ int main(int argc, char *argv[])
 
   // Bridge watcher
   std::unique_ptr<Sidechain::BridgeWatcher> bridgeWatcher;
+  crypto::PublicKey bridgeSpendPub;
+  bool hasBridgeSpendKey = false;
 
   if (cfg.watchBridge && !cfg.bridgeViewKeyHex.empty() && daemonConnected && nodePtr)
   {
+    // Parse bridge view key
     crypto::SecretKey bridgeViewKey;
     if (!BoltSync::hexToSecretKey(cfg.bridgeViewKeyHex, bridgeViewKey))
     {
@@ -382,21 +370,52 @@ int main(int argc, char *argv[])
     crypto::PublicKey bridgeViewPub;
     crypto::secret_key_to_public_key(bridgeViewKey, bridgeViewPub);
 
-    crypto::PublicKey bridgeSpendPub;
+    // Parse bridge spend key (required for unlock transactions)
+    crypto::SecretKey bridgeSpendKey;
     if (!cfg.bridgeSpendKeyHex.empty())
     {
-      crypto::SecretKey bridgeSpendKey;
       if (BoltSync::hexToSecretKey(cfg.bridgeSpendKeyHex, bridgeSpendKey))
+      {
         crypto::secret_key_to_public_key(bridgeSpendKey, bridgeSpendPub);
+        hasBridgeSpendKey = true;
+        std::cout << "Bridge public key: " << common::podToHex(bridgeSpendPub) << std::endl;
+      }
+      else
+      {
+        logger(logging::ERROR) << "Invalid bridge spend key — unlocks will not work";
+      }
+    }
+    else
+    {
+      logger(logging::WARNING) << "No bridge spend key provided — CCX unlocks disabled";
     }
 
+    // Create bridge watcher
     bridgeWatcher.reset(new Sidechain::BridgeWatcher(
-        storage, *nodePtr, bridgeViewPub, bridgeViewKey, bridgeSpendPub));
+        storage, *nodePtr, bridgeViewPub, bridgeViewKey, bridgeSpendPub, bridgeSpendKey));
 
+    // Set bridge key on validator for Mint authorization
+    if (hasBridgeSpendKey)
+    {
+      validator.setBridgeKey(bridgeSpendPub);
+      logger(logging::INFO) << "Bridge key set for Mint authorization";
+    }
+
+    // Wire up deposit callback
     bridgeWatcher->start([&](const Sidechain::Transaction &depositTx)
                          {
-            logger(logging::INFO) << "Deposit detected: " << depositTx.amount << " CCX locked";
-            validator.submitTransaction(depositTx); });
+      logger(logging::INFO) << "Bridge deposit detected: " << depositTx.amount
+                            << " CCX locked → sidechain destination: "
+                            << common::podToHex(depositTx.to).substr(0, 16) << "...";
+      validator.submitTransaction(depositTx); });
+
+    // Wire up burn callback — when sidechain burns tokens, queue CCX unlock
+    validator.onBridgeBurn([&bridgeWatcher, &logger](const Sidechain::Transaction &burnTx)
+                           {
+                            logger(logging::INFO) << "Bridge burn detected: " << burnTx.amount
+                            << " tokens burned by " << common::podToHex(burnTx.from).substr(0, 16) << "...";
+                            bridgeWatcher->handleBurn(burnTx);
+                          });
 
     logger(logging::INFO) << "Bridge watcher started";
   }
@@ -410,6 +429,14 @@ int main(int argc, char *argv[])
   logger(logging::INFO) << "Gossip: port " << gossipPort;
   logger(logging::INFO) << "BFT threshold: " << SidechainConfig::BFT_BLOCK_THRESHOLD;
   logger(logging::INFO) << "Network: " << (cfg.testnet ? "Testnet" : "Mainnet-Staging");
+  logger(logging::INFO) << "DEX: " << (cfg.enableDex ? "enabled" : "disabled");
+  logger(logging::INFO) << "Bridge: " << (cfg.watchBridge ? "watching" : "disabled");
+
+  if (cfg.watchBridge)
+  {
+    logger(logging::INFO) << "Bridge unlocks: " << (hasBridgeSpendKey ? "enabled" : "disabled (no spend key)");
+    logger(logging::INFO) << "Pending unlocks: " << (bridgeWatcher ? bridgeWatcher->getPendingUnlockCount() : 0);
+  }
 
   if (!seedNodes.empty())
     logger(logging::INFO) << "Connected to seed: " << seedNodes[0];
@@ -446,11 +473,16 @@ int main(int argc, char *argv[])
 
   // Shutdown
   logger(logging::INFO) << "Shutting down...";
+
+  if (bridgeWatcher)
+    bridgeWatcher->stop();
+
   stopRequested = true;
   rpcServer.stop();
   gossip.stop();
   validator.stop();
   storage.flush();
+
   logger(logging::INFO) << "Sidechain validator stopped";
 
   return 0;

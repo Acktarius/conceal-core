@@ -130,6 +130,7 @@ target_link_libraries(BoltClientWallet
 target_link_libraries(BoltRPC
     BoltSync
     BoltCore
+    BoltHttp
     NodeRpcProxy
     Rpc
     Http
@@ -144,7 +145,6 @@ target_link_libraries(BoltRPC
     ${Boost_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
 )
-
 
 target_link_libraries(Sidechain
     BoltSync

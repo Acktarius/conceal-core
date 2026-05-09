@@ -1,8 +1,9 @@
-// BoltHttpServer.cpp — High-performance HTTP server implementation
+// BoltHttpServer.cpp — Hybrid HTTP server with fiber I/O and thread pool
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 // Distributed under the MIT/X11 software license
 
 #include "BoltHttpServer.h"
+#include "FiberExecutor.h"
 
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -61,7 +62,6 @@ namespace BoltHttp
         }
       }
 
-      // Parse body from Content-Length
       auto it = req.headers.find("Content-Length");
       if (it != req.headers.end())
       {
@@ -82,15 +82,69 @@ namespace BoltHttp
     }
   }
 
-  Server::Server(size_t threadCount)
-      : m_threadCount(threadCount)
+  // ── Default classification tables ───────────────────────────
+
+  const std::vector<std::string> Server::DEFAULT_HEAVY_PATHS = {
+      "/sendrawtransaction",
+      "/submitblock",
+      "/getblocktemplate",
+      "createToken",
+      "mintToken",
+      "burnToken",
+      "transfer",
+      "dex_submitOrder",
+      "dex_cancelOrder",
+      "sendFusionTransaction",
+      "createDeposit",
+      "withdrawDeposit"};
+
+  const std::vector<std::string> Server::DEFAULT_FAST_PATHS = {
+      "/getinfo",
+      "/getheight",
+      "/getblockcount",
+      "/getblockhash",
+      "getBalance",
+      "getTokenBalance",
+      "getTokens",
+      "getStatus",
+      "getPendingTransactions",
+      "getValidators",
+      "getTransactions",
+      "getAssetRegistry",
+      "getBridgeStatus",
+      "dex_getOrders",
+      "dex_getTrades",
+      "dex_getAllTrades",
+      "dex_deposit",
+      "dex_getEscrowBalance",
+      "faucet"};
+
+  // ── Constructor ─────────────────────────────────────────────
+
+  Server::Server(platform_system::Dispatcher *dispatcher, size_t threadCount)
+      : m_dispatcher(dispatcher),
+        m_threadCount(threadCount),
+        m_heavyPaths(DEFAULT_HEAVY_PATHS),
+        m_fastPaths(DEFAULT_FAST_PATHS)
   {
+    m_threadPool = std::make_shared<ThreadPool>(threadCount);
+
+    if (m_dispatcher)
+    {
+      m_executor = std::make_shared<FiberExecutor>(*m_dispatcher, m_threadPool);
+    }
+    else
+    {
+      m_executor = m_threadPool;
+    }
   }
 
   Server::~Server()
   {
     stop();
   }
+
+  // ── Start / Stop ────────────────────────────────────────────
 
   void Server::start(const std::string &bindIp, uint16_t port)
   {
@@ -118,7 +172,6 @@ namespace BoltHttp
 
     listen(m_serverSocket, SOMAXCONN);
 
-    // Create epoll instance shared by all workers
     m_epollFd = epoll_create1(0);
     if (m_epollFd < 0)
     {
@@ -131,20 +184,23 @@ namespace BoltHttp
 
     m_running = true;
 
-    // Start worker threads
     for (size_t i = 0; i < m_threadCount; ++i)
       m_workers.emplace_back(&Server::workerLoop, this, m_epollFd);
 
-    // Start accept thread
     m_acceptThread = std::thread(&Server::acceptLoop, this);
 
     std::cout << "BoltHttp: Listening on " << bindIp << ":" << port
-              << " (" << m_threadCount << " workers)" << std::endl;
+              << " (" << m_threadCount << " workers"
+              << (m_dispatcher ? ", fiber mode" : ", thread mode")
+              << ")" << std::endl;
   }
 
   void Server::stop()
   {
     m_running = false;
+
+    if (m_executor)
+      m_executor->stop();
 
     if (m_serverSocket >= 0)
     {
@@ -162,7 +218,6 @@ namespace BoltHttp
     if (m_acceptThread.joinable())
       m_acceptThread.join();
 
-    // Detach workers — they will exit on process termination
     for (auto &t : m_workers)
     {
       if (t.joinable())
@@ -171,10 +226,63 @@ namespace BoltHttp
     m_workers.clear();
   }
 
-  void Server::onRequest(RequestHandler handler)
+  // ── Handler registration ────────────────────────────────────
+
+  void Server::onRequest(RequestHandler handler, WorkClass cls)
   {
-    m_handler = handler;
+    m_handler = std::move(handler);
+    m_defaultClass = cls;
   }
+
+  // ── Classification overrides ────────────────────────────────
+
+  void Server::markHeavy(const std::string &pathPrefix)
+  {
+    m_heavyPaths.push_back(pathPrefix);
+  }
+
+  void Server::markFast(const std::string &pathPrefix)
+  {
+    m_fastPaths.push_back(pathPrefix);
+  }
+
+  // ── Auto-classification ─────────────────────────────────────
+
+  WorkClass Server::classifyRequest(const Request &req) const
+  {
+    // Check URL path first (for direct endpoints like /sendrawtransaction)
+    for (const auto &prefix : m_heavyPaths)
+    {
+      if (req.url.find(prefix) != std::string::npos)
+        return WorkClass::Heavy;
+    }
+
+    for (const auto &prefix : m_fastPaths)
+    {
+      if (req.url.find(prefix) != std::string::npos)
+        return WorkClass::Fast;
+    }
+
+    // For JSON-RPC requests, check the method name in the body
+    std::string bodyStr(req.body.begin(), req.body.end());
+
+    for (const auto &prefix : m_heavyPaths)
+    {
+      if (bodyStr.find("\"method\":\"" + prefix + "\"") != std::string::npos)
+        return WorkClass::Heavy;
+    }
+
+    for (const auto &prefix : m_fastPaths)
+    {
+      if (bodyStr.find("\"method\":\"" + prefix + "\"") != std::string::npos)
+        return WorkClass::Fast;
+    }
+
+    // Default: fiber if available, thread if not
+    return m_dispatcher ? WorkClass::Fast : WorkClass::Heavy;
+  }
+
+  // ── Accept loop ─────────────────────────────────────────────
 
   void Server::acceptLoop()
   {
@@ -198,6 +306,8 @@ namespace BoltHttp
     }
   }
 
+  // ── Worker loop ─────────────────────────────────────────────
+
   void Server::workerLoop(int epollFd)
   {
     epoll_event events[64];
@@ -217,12 +327,14 @@ namespace BoltHttp
         int fd = events[i].data.fd;
 
         if (fd == m_serverSocket)
-          continue; // accept thread handles this
+          continue;
 
         handleClient(fd);
       }
     }
   }
+
+  // ── Client handler with work classification ─────────────────
 
   void Server::handleClient(int clientFd)
   {
@@ -240,7 +352,6 @@ namespace BoltHttp
       }
       else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
       {
-        // Connection closed or error
         shutdown(clientFd, SHUT_RDWR);
         close(clientFd);
         std::lock_guard<std::mutex> lock(m_clientsMutex);
@@ -249,7 +360,7 @@ namespace BoltHttp
       }
       else
       {
-        break; // No more data available right now
+        break;
       }
     }
 
@@ -264,13 +375,36 @@ namespace BoltHttp
         resp.headers["Access-Control-Allow-Origin"] = "*";
 
         if (m_handler)
-          m_handler(req, resp);
+        {
+          // Auto-classify based on URL and method
+          WorkClass cls = classifyRequest(req);
+
+          // Override with user-specified class if not Auto
+          if (m_defaultClass != WorkClass::Auto)
+            cls = m_defaultClass;
+
+          if (cls == WorkClass::Heavy && m_executor)
+          {
+            // Heavy work: dispatch to thread pool, wait for completion
+            auto token = m_executor->dispatch([&]()
+                                              { m_handler(req, resp); });
+            token->wait();
+          }
+          else
+          {
+            // Fast work: run inline
+            if (m_executor)
+              m_executor->runInline([&]()
+                                    { m_handler(req, resp); });
+            else
+              m_handler(req, resp);
+          }
+        }
 
         std::vector<uint8_t> rawResp = resp.toBytes();
         send(clientFd, rawResp.data(), rawResp.size(), MSG_NOSIGNAL);
       }
 
-      // Close after response — no keep-alive
       shutdown(clientFd, SHUT_RDWR);
       close(clientFd);
       std::lock_guard<std::mutex> lock(m_clientsMutex);

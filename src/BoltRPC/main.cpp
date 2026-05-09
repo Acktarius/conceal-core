@@ -46,24 +46,14 @@ struct Config
   std::string bindIp = "127.0.0.1";
   uint16_t bindPort = 8070;
   std::string stateFile = "bolt-wallet.state";
+  std::string sidechainHost;
+  uint16_t sidechainPort = 8080;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("BoltRPC — Conceal RPC Wallet (walletd replacement)");
-  desc.add_options()
-    ("help,h", "Show help")
-    ("view-key", po::value<std::string>(), "64-char hex private view key (required)")
-    ("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")
-    ("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")
-    ("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")
-    ("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")
-    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")
-    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")
-    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")
-    ("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")
-    ("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")
-    ("testnet", po::bool_switch(), "Run sidechain in testnet mode");
+  desc.add_options()("help,h", "Show help")("view-key", po::value<std::string>(), "64-char hex private view key (required)")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")("testnet", po::bool_switch(), "Run in testnet mode");
 
   po::variables_map vm;
   try
@@ -100,6 +90,8 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.bindIp = vm["bind-ip"].as<std::string>();
   cfg.bindPort = vm["bind-port"].as<uint16_t>();
   cfg.stateFile = vm["state-file"].as<std::string>();
+  cfg.sidechainHost = vm["sidechain-host"].as<std::string>();
+  cfg.sidechainPort = vm["sidechain-port"].as<uint16_t>();
   cfg.testnet = vm["testnet"].as<bool>();
 
   if (cfg.viewKeyHex.size() != 64)
@@ -207,7 +199,7 @@ int main(int argc, char *argv[])
       info.blockHeight = fo.blockHeight;
       info.txHash = fo.txHash;
       info.outputIndex = fo.outputIndex;
-      info.globalOutputIndex = fo.outputIndex; // BoltSync doesn't provide global, but it's okay for spending
+      info.globalOutputIndex = fo.outputIndex;
       info.amount = fo.amount;
       info.outputKey = fo.outputKey;
       info.txPublicKey = fo.txPublicKey;
@@ -229,7 +221,6 @@ int main(int argc, char *argv[])
   {
     logger(logging::WARNING) << "No --data-dir and no state file — starting with empty wallet.";
     logger(logging::WARNING) << "Perform an initial scan using: ./conceal-rpc --data-dir <path> --view-key ...";
-    // Continue with empty wallet; user can later rescan by restarting with --data-dir
   }
 
   // --- Initialize wallet ---
@@ -243,6 +234,17 @@ int main(int argc, char *argv[])
   // --- RPC server ---
   BoltRPC::BoltRpcServer rpcServer(dispatcher, consoleLogger,
                                    wallet, node, currency, address);
+
+  // Connect to sidechain if configured
+  if (!cfg.sidechainHost.empty())
+  {
+    rpcServer.setSidechainConnection(cfg.sidechainHost, cfg.sidechainPort);
+    logger(logging::INFO) << "Sidechain connection: " << cfg.sidechainHost << ":" << cfg.sidechainPort;
+  }
+  else
+  {
+    logger(logging::INFO) << "No sidechain configured. Use --sidechain-host to enable sidechain features.";
+  }
 
   // --- Incremental sync monitor ---
   BoltRPC::SyncMonitor syncMonitor(
@@ -265,6 +267,14 @@ int main(int argc, char *argv[])
                                 { stopRequested = true; });
 
   logger(logging::INFO) << "BoltRPC ready on " << cfg.bindIp << ":" << cfg.bindPort;
+  if (!cfg.sidechainHost.empty())
+  {
+    logger(logging::INFO) << "Sidechain features enabled via " << cfg.sidechainHost << ":" << cfg.sidechainPort;
+    logger(logging::INFO) << "  Mainchain: getBalance, transfer, createDeposit, withdrawDeposit, getDeposits";
+    logger(logging::INFO) << "  Sidechain: getSidechainTokens, sidechainTransfer, sidechainCreateToken, getTokenBalance";
+    logger(logging::INFO) << "  DEX:      dexGetOrderBook, dexPlaceOrder, dexCancelOrder, dexGetMyOrders, dexGetTradeHistory";
+    logger(logging::INFO) << "  Bridge:   bridgeGetStatus, bridgeLock, bridgeUnlock";
+  }
   logger(logging::INFO) << "Press Ctrl+C to stop";
 
   while (!stopRequested)
