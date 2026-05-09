@@ -1,5 +1,120 @@
 # Conceal Wallet & Sidechain RPC API Reference
 
+## Contents
+
+### BoltRPC Wallet API (Port 8070)
+
+#### Mainchain Wallet Methods
+
+| Method | Description |
+|--------|-------------|
+| [getBalance](#getbalance) | Get wallet mainchain CCX balance |
+| [getAddress](#getaddress) | Get wallet mainchain address |
+| [getStatus](#getstatus) | Get daemon and wallet sync status |
+| [getSyncStatus](#getsyncstatus) | Get detailed wallet scan progress |
+| [transfer](#transfer) | Send CCX to one or more addresses |
+| [getTransactions](#gettransactions) | List wallet transaction history |
+| [createDeposit](#createdeposit) | Lock CCX in a time-locked deposit |
+| [withdrawDeposit](#withdrawdeposit) | Withdraw a matured deposit |
+| [getDeposits](#getdeposits) | List all deposits |
+| [estimateFusion](#estimatefusion) | Estimate outputs available for fusion |
+| [sendFusionTransaction](#sendfusiontransaction) | Consolidate small outputs |
+| [reset](#reset) | Mark wallet for full rescan on restart |
+| [save](#save) | Persist wallet state to disk |
+
+#### Sidechain Proxy Methods
+
+| Method | Description |
+|--------|-------------|
+| [getSidechainStatus](#getsidechainstatus) | Get sidechain connection or full status |
+| [getSidechainTokens](#getsidechaintokens) | List all sidechain tokens |
+| [getTokenBalance](#gettokenbalance) | Get sidechain token balance |
+| [sidechainTransfer](#sidechaintransfer) | Transfer sidechain tokens |
+| [sidechainCreateToken](#sidechaincreatetoken) | Create a new sidechain token |
+
+#### DEX Proxy Methods
+
+| Method | Description |
+|--------|-------------|
+| [dexGetOrderBook](#dexgetorderbook) | Get open orders for a trading pair |
+| [dexPlaceOrder](#dexplaceorder) | Submit a new DEX order |
+| [dexCancelOrder](#dexcancelorder) | Cancel an open DEX order |
+| [dexGetMyOrders](#dexgetmyorders) | Get orders owned by an address |
+| [dexGetTradeHistory](#dexgettradehistory) | Get recent trades for a pair |
+| [dexGetEscrowBalance](#dexgetescrowbalance) | Get DEX escrow balance |
+
+#### Bridge Proxy Methods
+
+| Method | Description |
+|--------|-------------|
+| [bridgeGetStatus](#bridgegetstatus) | Get bridge assets and pending unlocks |
+| [bridgeLock](#bridgelock) | Lock CCX on mainchain for bridging |
+| [bridgeUnlock](#bridgeunlock) | Request CCX unlock from bridge |
+
+---
+
+### Sidechain RPC API (Port 8080)
+
+#### Account Methods
+
+| Method | Description |
+|--------|-------------|
+| [getBalance](#getbalance-1) | Get native SCCX balance |
+| [getTokenBalance](#gettokenbalance-1) | Get token balance |
+
+#### Token Methods
+
+| Method | Description |
+|--------|-------------|
+| [getTokens](#gettokens) | List all registered tokens |
+| [getTokenByFingerprint](#gettokenbyfingerprint) | Look up token by fingerprint |
+| [createToken](#createtoken) | Create a new token |
+
+#### Transaction Methods
+
+| Method | Description |
+|--------|-------------|
+| [transfer](#transfer-1) | Transfer tokens between addresses |
+| [mintToken](#minttoken) | Mint new tokens (bridge only) |
+| [burnToken](#burntoken) | Burn tokens (bridge unlock) |
+| [getTransactions](#gettransactions-1) | Get address transaction history |
+| [getPendingTransactions](#getpendingtransactions) | Get mempool transaction count |
+
+#### Status & Validators
+
+| Method | Description |
+|--------|-------------|
+| [getStatus](#getstatus-1) | Get sidechain status |
+| [getValidators](#getvalidators) | List active validators |
+
+#### Asset Registry & Bridge
+
+| Method | Description |
+|--------|-------------|
+| [getAssetRegistry](#getassetregistry) | List all bridged assets |
+| [getEquivalenceGroup](#getequivalencegroup) | Get tokens in equivalence class |
+| [getBridgeStatus](#getbridgestatus) | Get bridge status and pending unlocks |
+| [bridgeUnlock](#bridgeunlock-1) | Request bridge unlock (burn tokens) |
+
+#### Faucet
+
+| Method | Description |
+|--------|-------------|
+| [faucet](#faucet) | Claim test SCCX tokens |
+
+#### DEX Methods
+
+| Method | Description |
+|--------|-------------|
+| [dex_getOrders](#dex_getorders) | Get open orders for a pair |
+| [dex_getTrades](#dex_gettrades) | Get recent trades for a pair |
+| [dex_getAllTrades](#dex_getalltrades) | Get recent trades across all pairs |
+| [dex_submitOrder](#dex_submitorder) | Submit a new order |
+| [dex_cancelOrder](#dex_cancelorder-1) | Cancel an open order |
+| [dex_deposit](#dex_deposit) | Get DEX deposit address |
+| [dex_withdraw](#dex_withdraw) | Withdraw from DEX escrow |
+| [dex_getEscrowBalance](#dex_getescrowbalance-1) | Get DEX escrow balance |
+
 ## Overview
 
 The Conceal ecosystem provides two JSON-RPC 2.0 endpoints for wallet and sidechain operations:
