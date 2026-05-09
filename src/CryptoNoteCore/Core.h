@@ -160,6 +160,18 @@ namespace cn {
 
     const std::string &get_config_folder() const { return m_config_folder; }
 
+    CheckpointList getCheckpointList(uint32_t startHeight, uint32_t endHeight) const
+    {
+      return m_blockchain.getCheckpointList(startHeight, endHeight);
+    }
+
+    bool addCheckpoint(uint32_t height, const std::string &hash)
+    {
+      return m_blockchain.addCheckpoint(height, hash);
+    }
+
+    void setCheckpointGeneratedCallback(std::function<void(uint32_t, const crypto::Hash &)> callback) override;
+
   private:
     bool add_new_tx(const Transaction &tx, const crypto::Hash &tx_hash, size_t blob_size, tx_verification_context &tvc, bool keeped_by_block, uint32_t height);
     bool load_state_data();

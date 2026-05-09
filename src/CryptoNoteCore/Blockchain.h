@@ -303,6 +303,12 @@ namespace cn
 
     std::string printDatabaseStats() const;
 
+    CheckpointList getCheckpointList(uint32_t startHeight, uint32_t endHeight) const { return m_checkpoints.getCheckpointList(startHeight, endHeight); }
+    bool addCheckpoint(uint32_t height, const std::string &hash) { return m_checkpoints.add_checkpoint(height, hash); }
+
+    using CheckpointGeneratedCallback = std::function<void(uint32_t height, const crypto::Hash &hash)>;
+    void setCheckpointGeneratedCallback(CheckpointGeneratedCallback callback);
+
   private:
     bool m_testnet = false;
     struct MultisignatureOutputUsage
@@ -348,6 +354,8 @@ namespace cn
 
     Blocks m_blocks;
     cn::BlockIndex m_blockIndex;
+
+    CheckpointGeneratedCallback m_checkpointGeneratedCallback;
 
 #ifdef HAVE_MDBX
     std::unique_ptr<CryptoNote::MDBXBlockchainStorage> m_mdbxStorage; // Optional MDBX backend

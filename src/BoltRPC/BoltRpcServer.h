@@ -46,6 +46,7 @@ namespace BoltRPC
     std::string methodGetBalance(const common::JsonValue &params);
     std::string methodGetAddress(const common::JsonValue &params);
     std::string methodGetStatus(const common::JsonValue &params);
+    std::string methodGetSyncStatus(const common::JsonValue &params);
     std::string methodTransfer(const common::JsonValue &params);
     std::string methodGetTransactions(const common::JsonValue &params);
     std::string methodCreateDeposit(const common::JsonValue &params);

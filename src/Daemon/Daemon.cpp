@@ -448,6 +448,11 @@ int main(int argc, char *argv[])
     ccore.set_cryptonote_protocol(&cprotocol);
     DaemonCommandsHandler dch(ccore, p2psrv, logManager);
 
+    // Wire checkpoint distribution: when a new checkpoint is auto-generated,
+    // broadcast it to all connected peers
+    ccore.setCheckpointGeneratedCallback([&cprotocol](uint32_t height, const crypto::Hash &hash)
+                                         { cprotocol.broadcastCheckpoint(height, hash); });
+
     // Auto-detect and recover from corrupt MDBX database before core initialization
 #ifdef HAVE_MDBX
     if (coreConfig.useMdbx)

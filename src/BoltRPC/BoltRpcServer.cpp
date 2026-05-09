@@ -155,6 +155,8 @@ namespace BoltRPC
         result = methodGetAddress(params);
       else if (method == "getStatus")
         result = methodGetStatus(params);
+      else if (method == "getSyncStatus")
+        result = methodGetSyncStatus(params);
       else if (method == "transfer")
         result = methodTransfer(params);
       else if (method == "getTransactions")
@@ -253,6 +255,26 @@ namespace BoltRPC
        << R"(,"walletHeight":)" << syncedHeight;
 
     // Include sidechain status if connected
+    if (m_sidechainConnected)
+    {
+      ss << R"(,"sidechainHost":")" << m_sidechainHost << R"(")"
+         << R"(,"sidechainPort":)" << m_sidechainPort;
+    }
+
+    ss << "}";
+    return ss.str();
+  }
+
+  std::string BoltRpcServer::methodGetSyncStatus(const common::JsonValue &params)
+  {
+    uint32_t walletHeight = m_syncedHeight.load();
+    uint32_t nodeHeight = m_node.getLastLocalBlockHeight();
+
+    std::ostringstream ss;
+    ss << R"({"walletHeight":)" << walletHeight
+       << R"(,"nodeHeight":)" << nodeHeight
+       << R"(,"synced":)" << (walletHeight >= nodeHeight ? "true" : "false");
+
     if (m_sidechainConnected)
     {
       ss << R"(,"sidechainHost":")" << m_sidechainHost << R"(")"

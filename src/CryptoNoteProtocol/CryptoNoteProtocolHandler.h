@@ -75,6 +75,8 @@ namespace cn
     virtual uint32_t getObservedHeight() const override;
     void requestMissingPoolTransactions(const CryptoNoteConnectionContext& context);
 
+    void broadcastCheckpoint(uint32_t height, const crypto::Hash &hash);
+
   private:
     //----------------- commands handlers ----------------------------------------------
     int handle_notify_new_block(int command, NOTIFY_NEW_BLOCK::request& arg, CryptoNoteConnectionContext& context);
@@ -100,6 +102,9 @@ namespace cn
     void recalculateMaxObservedHeight(const CryptoNoteConnectionContext& context);
     int processObjects(CryptoNoteConnectionContext& context, const std::vector<parsed_block_entry>& blocks);
     logging::LoggerRef logger;
+ 
+    int handle_request_checkpoint_list(int command, NOTIFY_REQUEST_CHECKPOINT_LIST::request &arg, CryptoNoteConnectionContext &context);
+    int handle_response_checkpoint_list(int command, NOTIFY_RESPONSE_CHECKPOINT_LIST::request &arg, CryptoNoteConnectionContext &context);
 
   private:
     int doPushLiteBlock(NOTIFY_NEW_LITE_BLOCK::request block, CryptoNoteConnectionContext &context, std::vector<BinaryArray> missingTxs);

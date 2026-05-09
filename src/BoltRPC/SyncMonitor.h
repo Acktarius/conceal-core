@@ -38,6 +38,11 @@ namespace BoltRPC
       return m_lastScannedHeight.load(std::memory_order_relaxed);
     }
 
+    bool isScanning() const
+    {
+      return m_lastScannedHeight.load(std::memory_order_relaxed) < m_node.getLastLocalBlockHeight();
+    }
+
   private:
     void runLoop();
 

@@ -1146,4 +1146,8 @@ std::string core::printDatabaseStats() const
 #endif
 }
 
+void core::setCheckpointGeneratedCallback(std::function<void(uint32_t, const crypto::Hash &)> callback)
+{
+  m_blockchain.setCheckpointGeneratedCallback(std::move(callback));
+}
 }

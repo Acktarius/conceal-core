@@ -16,7 +16,7 @@
 
 #include <CryptoNote.h>
 #include "CryptoNoteCore/Difficulty.h"
-
+#include "CryptoNoteCore/CheckpointList.h"
 #include "CryptoNoteCore/MessageQueue.h"
 #include "CryptoNoteCore/BlockchainMessages.h"
 
@@ -114,6 +114,10 @@ public:
 
   virtual bool addMessageQueue(MessageQueue<BlockchainMessage>& messageQueue) = 0;
   virtual bool removeMessageQueue(MessageQueue<BlockchainMessage>& messageQueue) = 0;
+
+  virtual CheckpointList getCheckpointList(uint32_t startHeight = 0, uint32_t endHeight = 0) const = 0;
+  virtual bool addCheckpoint(uint32_t height, const std::string &hash) = 0;
+  virtual void setCheckpointGeneratedCallback(std::function<void(uint32_t, const crypto::Hash &)> callback) = 0;
 };
 
 } //namespace cn

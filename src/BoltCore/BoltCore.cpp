@@ -261,6 +261,20 @@ namespace BoltCore
     return unspent;
   }
 
+  std::vector<OutputInfo> Wallet::getTransactions(uint32_t startHeight, uint32_t limit) const
+  {
+    auto all = m_impl->balanceTracker.getOutputs();
+    std::vector<OutputInfo> result;
+    for (const auto &out : all)
+    {
+      if (out.blockHeight >= startHeight && result.size() < limit)
+        result.push_back(out);
+      if (result.size() >= limit)
+        break;
+    }
+    return result;
+  }
+
   WalletType Wallet::getType() const
   {
     return m_impl->type;

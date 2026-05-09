@@ -3571,6 +3571,13 @@ namespace cn
         m_checkpoints.add_checkpoint(nextMilestone, common::podToHex(milestoneHash));
         logger(INFO, BRIGHT_GREEN) << "Auto-generated checkpoint at height " << nextMilestone
                                    << " (buffer: " << (networkHeight - nextMilestone) << " blocks behind tip)";
+
+        // Notify protocol handler to share with peers
+        if (m_checkpointGeneratedCallback)
+        {
+          m_checkpointGeneratedCallback(nextMilestone, milestoneHash);
+        }
+
         nextMilestone += cn::CHECKPOINT_INTERVAL;
       }
     }
@@ -4244,5 +4251,10 @@ namespace cn
       return m_mdbxStorage->printDatabaseStats();
 #endif
     return "MDBX not enabled";
+  }
+
+  void Blockchain::setCheckpointGeneratedCallback(CheckpointGeneratedCallback callback)
+  {
+    m_checkpointGeneratedCallback = std::move(callback);
   }
 } // namespace cn

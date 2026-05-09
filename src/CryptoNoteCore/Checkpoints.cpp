@@ -243,4 +243,18 @@ uint32_t Checkpoints::getMaxHeight() const
   return m_points.rbegin()->first;
 }
 
+CheckpointList Checkpoints::getCheckpointList(uint32_t startHeight, uint32_t endHeight) const
+{
+  CheckpointList result;
+
+  for (const auto &cp : m_points)
+  {
+    if (cp.first >= startHeight && (endHeight == 0 || cp.first <= endHeight))
+    {
+      result.addCheckpoint(cp.first, cp.second);
+    }
+  }
+
+  return result;
+}
 } // cn

@@ -57,6 +57,7 @@ namespace BoltCore
     // Transaction history
     std::vector<OutputInfo> getOutputs() const;
     std::vector<OutputInfo> getUnspentOutputs() const;
+    std::vector<OutputInfo> getTransactions(uint32_t startHeight = 0, uint32_t limit = 100) const;
 
     // Wallet info
     WalletType getType() const;

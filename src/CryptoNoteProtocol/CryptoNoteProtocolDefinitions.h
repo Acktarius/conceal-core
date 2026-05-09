@@ -244,5 +244,46 @@ namespace cn
     const static int ID = BC_COMMANDS_POOL_BASE + 10;
     typedef NOTIFY_MISSING_TXS_request request;
   };
+
+  /************************************************************************/
+  /* Checkpoint distribution messages                                     */
+  /************************************************************************/
+  struct NOTIFY_REQUEST_CHECKPOINT_LIST_request
+  {
+    crypto::Hash targetHash; // Tip hash of the requesting node
+    uint32_t startHeight;    // Start of height range to request
+    uint32_t endHeight;      // End of height range (0 = all available)
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(targetHash)
+      KV_MEMBER(startHeight)
+      KV_MEMBER(endHeight)
+    }
+  };
+
+  struct NOTIFY_REQUEST_CHECKPOINT_LIST
+  {
+    const static int ID = BC_COMMANDS_POOL_BASE + 11;
+    typedef NOTIFY_REQUEST_CHECKPOINT_LIST_request request;
+  };
+
+  struct NOTIFY_RESPONSE_CHECKPOINT_LIST_request
+  {
+    std::vector<uint32_t> heights;         // Checkpoint heights
+    std::vector<crypto::Hash> blockHashes; // Corresponding block hashes
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(heights)
+      serializeAsBinary(blockHashes, "blockHashes", s);
+    }
+  };
+
+  struct NOTIFY_RESPONSE_CHECKPOINT_LIST
+  {
+    const static int ID = BC_COMMANDS_POOL_BASE + 12;
+    typedef NOTIFY_RESPONSE_CHECKPOINT_LIST_request request;
+  };
 } // namespace cn
 

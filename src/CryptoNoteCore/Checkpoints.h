@@ -8,6 +8,7 @@
 #pragma once
 #include <map>
 #include "CryptoNoteBasicImpl.h"
+#include "CheckpointList.h"
 #include <Logging/LoggerRef.h>
 
 namespace cn
@@ -32,6 +33,8 @@ namespace cn
     bool load_self_generated_checkpoints();
     const std::map<uint32_t, crypto::Hash> &get_points() const { return m_points; }
     uint32_t getMaxHeight() const;
+
+    CheckpointList getCheckpointList(uint32_t startHeight = 0, uint32_t endHeight = 0) const;
 
   private:
     bool m_testnet = false;
