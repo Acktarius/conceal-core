@@ -48,12 +48,28 @@ struct Config
   std::string stateFile = "bolt-wallet.state";
   std::string sidechainHost;
   uint16_t sidechainPort = 8080;
+  size_t rpcThreads = 1;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("BoltRPC — Conceal RPC Wallet (walletd replacement)");
-  desc.add_options()("help,h", "Show help")("view-key", po::value<std::string>(), "64-char hex private view key (required)")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")("testnet", po::bool_switch(), "Run in testnet mode");
+  desc.add_options()
+    ("help,h", "Show help")
+    ("view-key", po::value<std::string>()->default_value(""), "64-char hex private view key (optional at startup)")
+    ("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")
+    ("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")
+    ("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")
+    ("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")
+    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")
+    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")
+    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")
+    ("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")
+    ("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")
+    ("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")
+    ("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")
+    ("testnet", po::bool_switch(), "Run in testnet mode")
+    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count");
 
   po::variables_map vm;
   try
@@ -73,15 +89,21 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
     return false;
   }
 
-  if (!vm.count("view-key"))
+  cfg.viewKeyHex = vm["view-key"].as<std::string>();
+  cfg.spendKeyHex = vm["spend-key"].as<std::string>();
+
+  if (!cfg.viewKeyHex.empty() && cfg.viewKeyHex.size() != 64)
   {
-    std::cerr << "Error: --view-key is required" << std::endl;
-    std::cout << desc << std::endl;
+    std::cerr << "Error: view-key must be 64 hex characters" << std::endl;
     return false;
   }
 
-  cfg.viewKeyHex = vm["view-key"].as<std::string>();
-  cfg.spendKeyHex = vm["spend-key"].as<std::string>();
+  if (!cfg.spendKeyHex.empty() && cfg.spendKeyHex.size() != 64)
+  {
+    std::cerr << "Error: spend-key must be 64 hex characters" << std::endl;
+    return false;
+  }
+
   cfg.dataDir = vm["data-dir"].as<std::string>();
   cfg.skipScan = vm["skip-scan"].as<bool>();
   cfg.scanThreads = vm["threads"].as<unsigned int>();
@@ -93,12 +115,8 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.sidechainHost = vm["sidechain-host"].as<std::string>();
   cfg.sidechainPort = vm["sidechain-port"].as<uint16_t>();
   cfg.testnet = vm["testnet"].as<bool>();
+  cfg.rpcThreads = vm["rpc-threads"].as<size_t>();
 
-  if (cfg.viewKeyHex.size() != 64)
-  {
-    std::cerr << "Error: view-key must be 64 hex characters" << std::endl;
-    return false;
-  }
   return true;
 }
 
@@ -114,39 +132,55 @@ int main(int argc, char *argv[])
 
   logger(logging::INFO) << "BoltRPC starting (" << CCX_RELEASE_VERSION << ")";
 
-  // --- Keys ---
-  crypto::SecretKey viewKey;
-  if (!BoltSync::hexToSecretKey(cfg.viewKeyHex, viewKey))
-  {
-    logger(logging::ERROR) << "Invalid view key hex";
-    return 1;
-  }
+  // Keys (optional at startup)
+  crypto::SecretKey viewKey{};
   crypto::SecretKey spendKey{};
+  crypto::PublicKey viewPub{};
+  crypto::PublicKey spendPub{};
+  bool hasViewKey = !cfg.viewKeyHex.empty();
   bool hasSpendKey = !cfg.spendKeyHex.empty();
-  if (hasSpendKey && !BoltSync::hexToSecretKey(cfg.spendKeyHex, spendKey))
+
+  std::string address = "No wallet loaded";
+
+  if (hasViewKey)
   {
-    logger(logging::ERROR) << "Invalid spend key hex";
-    return 1;
+    if (!BoltSync::hexToSecretKey(cfg.viewKeyHex, viewKey))
+    {
+      logger(logging::ERROR) << "Invalid view key hex";
+      return 1;
+    }
+
+    if (hasSpendKey && !BoltSync::hexToSecretKey(cfg.spendKeyHex, spendKey))
+    {
+      logger(logging::ERROR) << "Invalid spend key hex";
+      return 1;
+    }
+
+    if (!crypto::secret_key_to_public_key(viewKey, viewPub))
+    {
+      logger(logging::ERROR) << "Failed to derive public view key";
+      return 1;
+    }
+
+    if (hasSpendKey && !crypto::secret_key_to_public_key(spendKey, spendPub))
+    {
+      logger(logging::ERROR) << "Failed to derive public spend key";
+      return 1;
+    }
+
+    cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
+    address = currency.accountAddressAsString({spendPub, viewPub});
+    logger(logging::INFO) << "Wallet address: " << address;
+  }
+  else
+  {
+    logger(logging::INFO) << "No view key provided — starting in setup mode";
+    logger(logging::INFO) << "Use the GUI or importWallet RPC to set keys later";
   }
 
-  crypto::PublicKey viewPub, spendPub{};
-  if (!crypto::secret_key_to_public_key(viewKey, viewPub))
-  {
-    logger(logging::ERROR) << "Failed to derive public view key";
-    return 1;
-  }
-  if (hasSpendKey && !crypto::secret_key_to_public_key(spendKey, spendPub))
-  {
-    logger(logging::ERROR) << "Failed to derive public spend key";
-    return 1;
-  }
-
-  cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
-  std::string address = currency.accountAddressAsString({spendPub, viewPub});
-  logger(logging::INFO) << "Wallet address: " << address;
-
-  // --- Connect to daemon ---
+  // Connect to daemon
   platform_system::Dispatcher dispatcher;
+  cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
   NodeRpcProxy node(dispatcher, cfg.daemonHost, cfg.daemonPort, consoleLogger);
   NodeInitObserver initObs;
   node.init([&initObs](std::error_code ec)
@@ -161,79 +195,95 @@ int main(int argc, char *argv[])
     logger(logging::WARNING) << "Daemon not reachable — running in offline mode (no transactions can be sent)";
   }
 
-  // --- Load or scan wallet state ---
+  // Load or scan wallet state (only if keys provided)
   BoltRPC::StateManager stateManager(cfg.stateFile);
   std::vector<BoltCore::OutputInfo> outputInfos;
-  uint32_t lastScannedHeight = 0;
+  std::atomic<uint32_t> lastScannedHeight{0};
 
-  if (cfg.skipScan && stateManager.exists())
+  if (hasViewKey)
   {
-    logger(logging::INFO) << "Loading wallet state from " << cfg.stateFile;
-    if (!stateManager.load(outputInfos, lastScannedHeight))
+    uint32_t initialHeight = 0;
+    if (cfg.skipScan && stateManager.exists())
     {
-      logger(logging::ERROR) << "Failed to load state file";
-      return 1;
+      logger(logging::INFO) << "Loading wallet state from " << cfg.stateFile;
+      if (!stateManager.load(outputInfos, initialHeight))
+      {
+        logger(logging::ERROR) << "Failed to load state file";
+        return 1;
+      }
+      lastScannedHeight.store(initialHeight, std::memory_order_relaxed);
+      logger(logging::INFO) << "Loaded " << outputInfos.size()
+                            << " outputs (last height " << initialHeight << ")";
     }
-    logger(logging::INFO) << "Loaded " << outputInfos.size()
-                          << " outputs (last height " << lastScannedHeight << ")";
+    else if (!cfg.dataDir.empty())
+    {
+      logger(logging::INFO) << "Starting BoltSync scan on " << cfg.dataDir;
+
+      BoltSync::Scanner scanner(viewKey, viewPub, hasSpendKey ? &spendKey : nullptr);
+      BoltSync::ScanConfig scanCfg;
+      scanCfg.dataDir = cfg.dataDir;
+      scanCfg.numThreads = cfg.scanThreads;
+
+      BoltSync::ScanState state;
+      if (!scanner.scan(scanCfg, state))
+      {
+        logger(logging::ERROR) << "BoltSync scan failed. Is the data directory correct?";
+        return 1;
+      }
+
+      for (const auto &fo : state.results)
+      {
+        BoltCore::OutputInfo info;
+        info.blockHeight = fo.blockHeight;
+        info.txHash = fo.txHash;
+        info.outputIndex = fo.outputIndex;
+        info.globalOutputIndex = fo.outputIndex;
+        info.amount = fo.amount;
+        info.outputKey = fo.outputKey;
+        info.txPublicKey = fo.txPublicKey;
+        info.keyImage = fo.keyImage;
+        info.spent = fo.spent;
+        info.isDeposit = false;
+        info.term = 0;
+        info.subAddress = address;
+        outputInfos.push_back(info);
+      }
+
+      uint32_t nodeHeight = node.getLastLocalBlockHeight();
+      lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
+      logger(logging::INFO) << "Scan complete — " << outputInfos.size() << " outputs found";
+
+      stateManager.save(outputInfos, nodeHeight);
+      logger(logging::INFO) << "State saved to " << cfg.stateFile;
+    }
+    else
+    {
+      logger(logging::WARNING) << "No --data-dir and no state file — starting with empty wallet.";
+      logger(logging::WARNING) << "Perform an initial scan using: ./conceal-rpc --data-dir <path> --view-key ...";
+    }
   }
-  else if (!cfg.dataDir.empty())
+
+  // Initialize wallet (empty if no keys)
+  BoltCore::Wallet wallet(viewKey, spendKey, viewPub, spendPub, node, currency);
+  if (hasViewKey)
   {
-    logger(logging::INFO) << "Starting BoltSync scan on " << cfg.dataDir;
+    wallet.loadOutputs(outputInfos);
 
-    BoltSync::Scanner scanner(viewKey, viewPub, hasSpendKey ? &spendKey : nullptr);
-    BoltSync::ScanConfig scanCfg;
-    scanCfg.dataDir = cfg.dataDir;
-    scanCfg.numThreads = cfg.scanThreads;
-
-    BoltSync::ScanState state;
-    if (!scanner.scan(scanCfg, state))
-    {
-      logger(logging::ERROR) << "BoltSync scan failed. Is the data directory correct?";
-      return 1;
-    }
-
-    for (const auto &fo : state.results)
-    {
-      BoltCore::OutputInfo info;
-      info.blockHeight = fo.blockHeight;
-      info.txHash = fo.txHash;
-      info.outputIndex = fo.outputIndex;
-      info.globalOutputIndex = fo.outputIndex;
-      info.amount = fo.amount;
-      info.outputKey = fo.outputKey;
-      info.txPublicKey = fo.txPublicKey;
-      info.keyImage = fo.keyImage;
-      info.spent = fo.spent;
-      info.isDeposit = false;
-      info.term = 0;
-      info.subAddress = address;
-      outputInfos.push_back(info);
-    }
-
-    lastScannedHeight = node.getLastLocalBlockHeight();
-    logger(logging::INFO) << "Scan complete — " << outputInfos.size() << " outputs found";
-
-    stateManager.save(outputInfos, lastScannedHeight);
-    logger(logging::INFO) << "State saved to " << cfg.stateFile;
+    auto balance = wallet.getBalance();
+    logger(logging::INFO) << "Balance: " << balance.actual
+                          << " pending: " << balance.pending;
   }
   else
   {
-    logger(logging::WARNING) << "No --data-dir and no state file — starting with empty wallet.";
-    logger(logging::WARNING) << "Perform an initial scan using: ./conceal-rpc --data-dir <path> --view-key ...";
+    logger(logging::INFO) << "Wallet not loaded — waiting for keys via importWallet RPC";
   }
 
-  // --- Initialize wallet ---
-  BoltCore::Wallet wallet(viewKey, spendKey, viewPub, spendPub, node, currency);
-  wallet.loadOutputs(outputInfos);
-
-  auto balance = wallet.getBalance();
-  logger(logging::INFO) << "Balance: " << balance.actual
-                        << " pending: " << balance.pending;
-
-  // --- RPC server ---
+  // RPC server
   BoltRPC::BoltRpcServer rpcServer(dispatcher, consoleLogger,
                                    wallet, node, currency, address);
+
+  // Wire up StateManager so save() RPC can persist wallet state
+  rpcServer.setStateManager(&stateManager, &outputInfos, &lastScannedHeight);
 
   // Connect to sidechain if configured
   if (!cfg.sidechainHost.empty())
@@ -246,27 +296,43 @@ int main(int argc, char *argv[])
     logger(logging::INFO) << "No sidechain configured. Use --sidechain-host to enable sidechain features.";
   }
 
-  // --- Incremental sync monitor ---
-  BoltRPC::SyncMonitor syncMonitor(
-      node, viewKey, viewPub, hasSpendKey ? &spendKey : nullptr,
-      cfg.dataDir, lastScannedHeight,
-      [&](const std::vector<BoltCore::OutputInfo> &newOuts, uint32_t newHeight)
-      {
-        rpcServer.onNewOutputs(newOuts, newHeight);
-        for (const auto &o : newOuts)
-          outputInfos.push_back(o);
-        stateManager.save(outputInfos, newHeight);
-      });
+  // Incremental sync monitor (only if keys provided)
+  std::unique_ptr<BoltRPC::SyncMonitor> syncMonitor;
 
-  syncMonitor.start();
-  rpcServer.start(cfg.bindIp, cfg.bindPort);
+  if (hasViewKey && !cfg.dataDir.empty())
+  {
+    uint32_t startHeight = lastScannedHeight.load(std::memory_order_relaxed);
+    syncMonitor.reset(new BoltRPC::SyncMonitor(
+        node, viewKey, viewPub, hasSpendKey ? &spendKey : nullptr,
+        cfg.dataDir, startHeight,
+        [&](const std::vector<BoltCore::OutputInfo> &newOuts, uint32_t newHeight)
+        {
+          rpcServer.onNewOutputs(newOuts, newHeight);
+          for (const auto &o : newOuts)
+            outputInfos.push_back(o);
+          lastScannedHeight.store(newHeight, std::memory_order_relaxed);
+          stateManager.save(outputInfos, newHeight);
+        }));
 
-  // --- Graceful shutdown ---
+    syncMonitor->start();
+  }
+
+  rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
+
+  // Graceful shutdown
   std::atomic<bool> stopRequested{false};
   tools::SignalHandler::install([&stopRequested]
                                 { stopRequested = true; });
 
   logger(logging::INFO) << "BoltRPC ready on " << cfg.bindIp << ":" << cfg.bindPort;
+  if (hasViewKey)
+  {
+    logger(logging::INFO) << "Wallet loaded: " << address;
+  }
+  else
+  {
+    logger(logging::INFO) << "Setup mode — waiting for importWallet RPC call";
+  }
   if (!cfg.sidechainHost.empty())
   {
     logger(logging::INFO) << "Sidechain features enabled via " << cfg.sidechainHost << ":" << cfg.sidechainPort;
@@ -281,9 +347,12 @@ int main(int argc, char *argv[])
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
   logger(logging::INFO) << "Shutting down...";
-  syncMonitor.stop();
+  if (syncMonitor)
+  {
+    syncMonitor->stop();
+    stateManager.save(outputInfos, syncMonitor->lastScannedHeight());
+  }
   rpcServer.stop();
-  stateManager.save(outputInfos, syncMonitor.lastScannedHeight());
   node.shutdown();
   logger(logging::INFO) << "BoltRPC stopped";
   return 0;

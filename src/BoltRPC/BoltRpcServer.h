@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "BoltHttp/BoltHttpServer.h"
 #include "BoltCore/BoltCore.h"
@@ -19,6 +20,8 @@
 namespace BoltRPC
 {
 
+  class StateManager;
+
   class BoltRpcServer
   {
   public:
@@ -29,12 +32,17 @@ namespace BoltRPC
                   const cn::Currency &currency,
                   const std::string &address);
 
-    void start(const std::string &bindIp, uint16_t bindPort, size_t threadCount = 4);
+    void start(const std::string &bindIp, uint16_t bindPort, size_t threadCount = 1);
     void stop();
 
     void setSidechainConnection(const std::string &host, uint16_t port);
     void onNewOutputs(const std::vector<BoltCore::OutputInfo> &outputs, uint32_t newHeight);
     uint32_t getNodeHeight() const;
+
+    // StateManager so save() RPC can persist wallet state
+    void setStateManager(StateManager *stateManager,
+                         std::vector<BoltCore::OutputInfo> *outputs,
+                         std::atomic<uint32_t> *syncedHeight);
 
   private:
     void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);
@@ -43,6 +51,8 @@ namespace BoltRPC
     void submitTransaction(const BoltCore::TransferResult &result);
 
     // Method handlers
+    std::string methodImportWallet(const common::JsonValue &params);
+    std::string methodGenerateWallet(const common::JsonValue &params);
     std::string methodGetBalance(const common::JsonValue &params);
     std::string methodGetAddress(const common::JsonValue &params);
     std::string methodGetStatus(const common::JsonValue &params);
@@ -83,6 +93,11 @@ namespace BoltRPC
     bool m_sidechainConnected = false;
     platform_system::Dispatcher &m_dispatcher;
     std::unique_ptr<BoltHttp::Server> m_server;
+
+    // State persistence
+    StateManager *m_stateManager = nullptr;
+    std::vector<BoltCore::OutputInfo> *m_outputs = nullptr;
+    std::atomic<uint32_t> *m_externalSyncedHeight = nullptr;
   };
 
 } // namespace BoltRPC
