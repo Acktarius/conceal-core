@@ -46,4 +46,16 @@ if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
   )
   add_dependencies(MigrationTool version)
   set_property(TARGET MigrationTool PROPERTY OUTPUT_NAME "conceald-migrate")
+
+  # Same directory as conceald-migrate (build/src/Tools with default Makefile/Ninja layout).
+  add_custom_command(
+    TARGET MigrationTool POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_SOURCE_DIR}/tools/migrate.sh"
+      "${CMAKE_CURRENT_BINARY_DIR}/migrate.sh"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_SOURCE_DIR}/tools/migrate-gui.sh"
+      "${CMAKE_CURRENT_BINARY_DIR}/migrate-gui.sh"
+    COMMENT "Copying migrate.sh and migrate-gui.sh next to conceald-migrate"
+  )
 endif()
