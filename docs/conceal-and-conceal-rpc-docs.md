@@ -852,7 +852,7 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 
 List wallet transaction history derived from tracked outputs, with pagination support.
 
-**CryptoNote output model:** Unlike account-based blockchains, CryptoNote wallets track individual outputs (UTXOs) rather than transactions. There is no "sent transaction" record. When you send CCX, one or more of your existing outputs are consumed and new outputs are created for the recipient. The `spent` field on an output indicates whether it has been used as an input in a subsequent transaction.
+**CryptoNote output model:** Unlike account-based blockchains, CryptoNote wallets track individual outputs (UTXOs) rather than transactions. There is no "sent transaction" record. When you send CCX, one or more of your existing outputs are consumed and new outputs are created for the recipient. The `spent` field on an output indicates whether it has been used as an input in a subsequent transaction. When an output is spent, its key image is recorded on-chain. The wallet detects this during scanning and marks the output `spent: true`. There is no separate "sent transaction" record because the wallet cannot deterministically know which inputs in a ring signature belong to it. For developers building custom transaction scanners, the key image is the canonical identifier for detecting spent outputs.
 
 Items are returned in descending block height order (newest first).
 
@@ -1549,7 +1549,7 @@ Look up a token by its asset fingerprint.
 |-------|------|----------|-------------|
 | `fingerprint` | string | Yes | Asset fingerprint |
 
-Returns a token object or `null`.
+Returns a token object on success, or an error if no token matches the fingerprint.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
@@ -2170,6 +2170,8 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
 | Order amount must be greater than zero | The `amount` parameter is zero |
 | Order price must be greater than zero | The `price` parameter is zero |
 | Insufficient escrow balance | Owner does not have enough funds in DEX escrow |
+
+> **Atomicity:** The escrow balance check and order placement are performed atomically under a single mutex lock. There is no race condition where two concurrent orders could overdraw the same escrow balance. If `submitOrder` returns success, the funds have been irrevocably debited from escrow.
 
 ---
 
