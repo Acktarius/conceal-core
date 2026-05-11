@@ -54,6 +54,7 @@ namespace BoltRPC
     // Access the underlying HTTP server for SSE/WebSocket setup
     void setSseBroadcaster(BoltHttp::SseBroadcaster *broadcaster);
     BoltHttp::Server *server() { return m_server.get(); }
+    void setSyncedHeight(uint32_t height) { m_syncedHeight.store(height, std::memory_order_relaxed); }
 
   private:
     void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);

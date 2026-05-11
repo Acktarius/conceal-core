@@ -200,9 +200,9 @@ int main(int argc, char *argv[])
   std::vector<BoltCore::OutputInfo> outputInfos;
   std::atomic<uint32_t> lastScannedHeight{0};
 
+  uint32_t initialHeight = 0;
   if (hasViewKey)
   {
-    uint32_t initialHeight = 0;
     if (cfg.skipScan && stateManager.exists())
     {
       logger(logging::INFO) << "Loading wallet state from " << cfg.stateFile;
@@ -318,6 +318,7 @@ int main(int argc, char *argv[])
   }
 
   rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
+  rpcServer.setSyncedHeight(initialHeight);
 
   // Graceful shutdown
   std::atomic<bool> stopRequested{false};
