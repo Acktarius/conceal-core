@@ -47,7 +47,7 @@ void dexOrderBookMenu(const Config &cfg)
 
   std::string result = sidechainCall(cfg.dexHost, cfg.dexPort, "dex_getOrders", params.str());
 
-  std::cout << "Sells (" << baseSymbol << " → " << quoteSymbol << "):" << std::endl;
+  std::cout << "Sells (" << baseSymbol << " > " << quoteSymbol << "):" << std::endl;
   size_t pos = 0;
   bool foundSells = false;
   while ((pos = result.find("\"type\":\"sell\"", pos)) != std::string::npos)

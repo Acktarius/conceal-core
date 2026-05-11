@@ -31,6 +31,7 @@ using namespace common;
 
 namespace
 {
+  // Appends a filename to a directory path, adding a separator if the path is non‑empty
   std::string appendPath(const std::string &path, const std::string &fileName)
   {
     std::string result = path;
@@ -46,11 +47,13 @@ namespace
 
 namespace std
 {
+  // Lexicographic comparison of two 32‑byte hashes (required for std::map ordering)
   bool operator<(const crypto::Hash &hash1, const crypto::Hash &hash2)
   {
     return memcmp(&hash1, &hash2, crypto::HASH_SIZE) < 0;
   }
 
+  // Lexicographic comparison of two 32‑byte key images
   bool operator<(const crypto::KeyImage &keyImage1, const crypto::KeyImage &keyImage2)
   {
     return memcmp(&keyImage1, &keyImage2, 32) < 0;
@@ -69,7 +72,7 @@ namespace cn
 namespace cn
 {
 
-  // custom serialization to speedup cache loading
+  // Custom serialization to speedup cache loading — writes the raw binary representation of the vector
   bool serialize(std::vector<std::pair<Blockchain::TransactionIndex, uint16_t>> &value, common::StringView name, cn::ISerializer &s)
   {
     const size_t elementSize = sizeof(std::pair<Blockchain::TransactionIndex, uint16_t>);
@@ -98,12 +101,14 @@ namespace cn
     return true;
   }
 
+  // Serializes a TransactionIndex (block height + transaction index within block)
   void serialize(Blockchain::TransactionIndex &value, ISerializer &s)
   {
     s(value.block, "block");
     s(value.transaction, "tx");
   }
 
+  // Serializes the blockchain cache to/from disk (block index, transaction map, spent keys, outputs, deposit index)
   class BlockCacheSerializer
   {
 
@@ -112,6 +117,7 @@ namespace cn
     {
     }
 
+    // Loads the cache from a binary file — if the file doesn't exist or the version/hash mismatch, returns silently
     void load(const std::string &filename)
     {
       std::ifstream stdStream;
@@ -135,6 +141,7 @@ namespace cn
       }
     }
 
+    // Saves the cache to a binary file — returns false if the file cannot be opened
     bool save(const std::string &filename)
     {
       std::ofstream file;
@@ -166,6 +173,7 @@ namespace cn
       return true;
     }
 
+    // Main serialization entry point — reads/writes all cache components
     void serialize(ISerializer &s)
     {
       auto start = std::chrono::steady_clock::now();
@@ -186,6 +194,7 @@ namespace cn
         crypto::Hash blockHash;
         s(blockHash, "last_block");
 
+        // If the last block hash doesn't match, the cache is stale — skip loading
         if (blockHash != m_lastBlockHash)
         {
           return;
@@ -240,6 +249,7 @@ namespace cn
       m_loaded = true;
     }
 
+    // Returns true if the cache was successfully loaded
     bool loaded() const
     {
       return m_loaded;
@@ -252,6 +262,7 @@ namespace cn
     bool m_loaded = false;
   };
 
+  // Serializes the blockchain explorer indices (payment ID, timestamp, generated transactions) to/from disk
   class BlockchainIndicesSerializer
   {
 
@@ -260,6 +271,7 @@ namespace cn
     {
     }
 
+    // Main serialization entry point for the binary archive format
     void serialize(ISerializer &s)
     {
       uint8_t version = CURRENT_BLOCKCHAININDICES_STORAGE_ARCHIVE_VER;
@@ -304,6 +316,7 @@ namespace cn
       m_loaded = true;
     }
 
+    // Alternative serialization entry point for template‑based archives
     template <class Archive>
     void serialize(Archive &ar, unsigned int version)
     {
@@ -342,6 +355,7 @@ namespace cn
       m_loaded = true;
     }
 
+    // Returns true if the indices were successfully loaded
     bool loaded() const
     {
       return m_loaded;
@@ -354,6 +368,24 @@ namespace cn
     bool m_loaded = false;
   };
 
+  // Builds a BlockHeaderPOD from a fully deserialised BlockEntry
+  // Used as a fallback when the header DB lacks data, and as the primary path for the non‑MDBX backend
+  cn::BlockHeaderPOD Blockchain::headerFromBlockEntry(const BlockEntry &entry)
+  {
+    cn::BlockHeaderPOD hdr;
+    hdr.majorVersion = entry.bl.majorVersion;
+    hdr.minorVersion = entry.bl.minorVersion;
+    hdr.timestamp = entry.bl.timestamp;
+    hdr.previousBlockHash = entry.bl.previousBlockHash;
+    hdr.nonce = entry.bl.nonce;
+    hdr.blockCumulativeSize = entry.block_cumulative_size;
+    hdr.cumulativeDifficulty = entry.cumulative_difficulty;
+    hdr.alreadyGeneratedCoins = entry.already_generated_coins;
+    hdr.height = entry.height;
+    return hdr;
+  }
+
+  // Constructor — initialises all upgrade detectors, currency reference, and optional MDBX backend
   Blockchain::Blockchain(const Currency &currency, tx_memory_pool &tx_pool, ILogger &logger, bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled, bool useMdbx) : m_currency(currency),
                                                                                                                                                                             m_tx_pool(tx_pool),
                                                                                                                                                                             m_checkpoints(logger),
@@ -375,7 +407,7 @@ namespace cn
     m_lastSparseChainUpdate = std::chrono::steady_clock::now();
   }
 
-  // Block access wrappers (work with both MDBX and SwappedVector)
+  // Returns the number of blocks — from MDBX in‑memory hashes when MDBX is active, otherwise from the SwappedVector
   size_t Blockchain::blocksSize() const
   {
 #ifdef HAVE_MDBX
@@ -385,6 +417,7 @@ namespace cn
     return m_blocks.size();
   }
 
+  // Returns true if the blockchain has no blocks
   bool Blockchain::blocksEmpty() const
   {
 #ifdef HAVE_MDBX
@@ -394,6 +427,8 @@ namespace cn
     return m_blocks.empty();
   }
 
+  // Returns a const reference to the BlockEntry at the given height
+  // When MDBX is active, checks an LRU cache first, then loads and deserialises from the database
   const Blockchain::BlockEntry &Blockchain::blocksAt(size_t i) const
   {
 #ifdef HAVE_MDBX
@@ -415,6 +450,7 @@ namespace cn
       if (!cn::fromBinaryArray(entry, ba))
         throw std::runtime_error("blocksAt: failed to deserialise block at height " + std::to_string(i));
 
+      // Insert into the circular LRU cache
       if (m_cachedEntries.size() < MDBX_CACHE_SIZE)
       {
         m_cachedEntries.push_back({i, std::move(entry)});
@@ -432,16 +468,19 @@ namespace cn
     return const_cast<Blocks &>(m_blocks)[i];
   }
 
+  // Returns a mutable reference to the BlockEntry at the given height (delegates to const version via const_cast)
   Blockchain::BlockEntry &Blockchain::blocksAt(size_t i)
   {
     return const_cast<BlockEntry &>(const_cast<const Blockchain *>(this)->blocksAt(i));
   }
 
+  // Returns a copy of the last BlockEntry in the chain
   Blockchain::BlockEntry Blockchain::blocksBack() const
   {
     return blocksAt(blocksSize() - 1);
   }
 
+  // Clears all in‑memory block storage (LRU cache, hashes, or SwappedVector depending on backend)
   void Blockchain::blocksClear()
   {
 #ifdef HAVE_MDBX
@@ -458,7 +497,7 @@ namespace cn
     m_blocks.clear();
   }
 
-  // Lightweight header access
+  // Retrieves a lightweight block header — from MDBX header DB when available, otherwise falls back to full block deserialisation
   cn::BlockHeaderPOD Blockchain::getBlockHeader(uint32_t height) const
   {
 #ifdef HAVE_MDBX
@@ -468,45 +507,22 @@ namespace cn
       if (m_mdbxStorage->getBlockHeader(height, hdr))
       {
         // Safety check: if the header has zero cumulative difficulty but the
-        // block exists (height < blocksSize()), fall back to the full block entry.
+        // block exists, fall back to the full block entry to get correct data
         if (hdr.cumulativeDifficulty == 0 && height < blocksSize())
         {
-          logger(DEBUGGING) << "Header for height " << height << " has zero cumulativeDifficulty, falling back to full block entry";
-          // fall through to fallback
+          return headerFromBlockEntry(blocksAt(height));
         }
-        else
-          return hdr;
+        return hdr;
       }
-      // fallback
-      const BlockEntry &entry = blocksAt(height);
-      hdr.majorVersion = entry.bl.majorVersion;
-      hdr.minorVersion = entry.bl.minorVersion;
-      hdr.timestamp = entry.bl.timestamp;
-      hdr.previousBlockHash = entry.bl.previousBlockHash;
-      hdr.nonce = entry.bl.nonce;
-      hdr.blockCumulativeSize = entry.block_cumulative_size;
-      hdr.cumulativeDifficulty = entry.cumulative_difficulty;
-      hdr.alreadyGeneratedCoins = entry.already_generated_coins;
-      hdr.height = entry.height;
-      return hdr;
+      // Header not found in DB — fall back to full block entry
+      return headerFromBlockEntry(blocksAt(height));
     }
 #endif
-    // non‑MDBX path
-    const BlockEntry &entry = blocksAt(height);
-    cn::BlockHeaderPOD hdr;
-    hdr.majorVersion = entry.bl.majorVersion;
-    hdr.minorVersion = entry.bl.minorVersion;
-    hdr.timestamp = entry.bl.timestamp;
-    hdr.previousBlockHash = entry.bl.previousBlockHash;
-    hdr.nonce = entry.bl.nonce;
-    hdr.blockCumulativeSize = entry.block_cumulative_size;
-    hdr.cumulativeDifficulty = entry.cumulative_difficulty;
-    hdr.alreadyGeneratedCoins = entry.already_generated_coins;
-    hdr.height = entry.height;
-    return hdr;
+    // Non‑MDBX path: build header from the block entry
+    return headerFromBlockEntry(blocksAt(height));
   }
 
-  // BasicUpgradeDetector (non‑template) implementation
+  // BasicUpgradeDetector implementation
   BasicUpgradeDetector::BasicUpgradeDetector(const Currency &currency, Blockchain *blockchain,
                                              uint8_t targetVersion, logging::ILogger &log)
       : logger(log, "upgrade"),
@@ -517,6 +533,7 @@ namespace cn
   {
   }
 
+  // Initialises the upgrade detector by scanning the blockchain to determine the current voting state
   bool BasicUpgradeDetector::init()
   {
     uint32_t upgradeH = m_currency.upgradeHeight(m_targetVersion);
@@ -584,6 +601,7 @@ namespace cn
     return true;
   }
 
+  // Returns the height at which the upgrade will activate (or UNDEF_HEIGHT if voting is incomplete)
   uint32_t BasicUpgradeDetector::upgradeHeight() const
   {
     if (m_currency.upgradeHeight(m_targetVersion) == UNDEF_HEIGHT)
@@ -593,6 +611,7 @@ namespace cn
     return m_currency.upgradeHeight(m_targetVersion);
   }
 
+  // Called after a block is pushed — updates voting state and logs upgrade progress
   void BasicUpgradeDetector::blockPushed()
   {
     assert(!m_blockchain->blocksEmpty());
@@ -654,6 +673,7 @@ namespace cn
     }
   }
 
+  // Called after a block is popped — may cancel a pending upgrade if voting is no longer complete
   void BasicUpgradeDetector::blockPopped()
   {
     if (m_votingCompleteHeight != UNDEF_HEIGHT)
@@ -673,6 +693,7 @@ namespace cn
     }
   }
 
+  // Counts how many blocks in the voting window have voted for this upgrade
   size_t BasicUpgradeDetector::getNumberOfVotes(uint32_t height)
   {
     if (height < m_currency.upgradeVotingWindow() - 1)
@@ -686,6 +707,7 @@ namespace cn
     return voteCounter;
   }
 
+  // Scans backwards from a probable upgrade height to find where voting first became complete
   uint32_t BasicUpgradeDetector::findVotingCompleteHeight(uint32_t probableUpgradeHeight)
   {
     assert(m_currency.upgradeHeight(m_targetVersion) == UNDEF_HEIGHT);
@@ -700,6 +722,7 @@ namespace cn
     return UNDEF_HEIGHT;
   }
 
+  // Checks whether the voting threshold has been met at the given height
   bool BasicUpgradeDetector::isVotingComplete(uint32_t height)
   {
     assert(m_currency.upgradeHeight(m_targetVersion) == UNDEF_HEIGHT);
@@ -709,28 +732,32 @@ namespace cn
     return (size_t)m_currency.upgradeVotingThreshold() * m_currency.upgradeVotingWindow() <= 100 * voteCounter;
   }
 
-  // Original Blockchain methods
+  // Observer management
+  // Registers an observer to receive blockchain events (block added, removed, chain switch)
   bool Blockchain::addObserver(IBlockchainStorageObserver *observer)
   {
     return m_observerManager.add(observer);
   }
 
+  // Unregisters a previously registered observer
   bool Blockchain::removeObserver(IBlockchainStorageObserver *observer)
   {
     return m_observerManager.remove(observer);
   }
 
+  // Validates a transaction's inputs and outputs (public interface — delegates to private overload)
   bool Blockchain::checkTransactionInputs(const cn::Transaction &tx, BlockInfo &maxUsedBlock)
   {
     return checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id) && check_tx_outputs(tx, maxUsedBlock.height);
   }
 
+  // Validates a transaction's inputs with caching of the last failed block to avoid redundant checks
   bool Blockchain::checkTransactionInputs(const cn::Transaction &tx, BlockInfo &maxUsedBlock, BlockInfo &lastFailed)
   {
 
     BlockInfo tail;
     // not the best implementation at this time, sorry :(
-    // check is ring_signature already checked ?
+    // check if ring_signature already checked ?
     if (maxUsedBlock.empty())
     {
       // not checked, lets try to check
@@ -772,11 +799,13 @@ namespace cn
     return true;
   }
 
+  // Checks whether any key images in the transaction have already been spent
   bool Blockchain::haveSpentKeyImages(const cn::Transaction &tx)
   {
     return this->haveTransactionKeyImagesAsSpent(tx);
   }
 
+  // Validates that the transaction's serialised size fits within the current block size limit
   bool Blockchain::checkTransactionSize(size_t blobSize)
   {
     if (blobSize >= getCurrentCumulativeBlocksizeLimit() - m_currency.minerTxBlobReservedSize())
@@ -789,18 +818,21 @@ namespace cn
     return true;
   }
 
+  // Checks whether a transaction with the given hash exists in the main chain
   bool Blockchain::haveTransaction(const crypto::Hash &id)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_transactionMap.find(id) != m_transactionMap.end();
   }
 
+  // Checks whether a specific key image has been spent
   bool Blockchain::have_tx_keyimg_as_spent(const crypto::KeyImage &key_im)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_spent_keys.find(key_im) != m_spent_keys.end();
   }
 
+  // Returns the current chain height — from MDBX in‑memory hashes when active, otherwise from the block vector
   uint32_t Blockchain::getCurrentBlockchainHeight()
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -811,6 +843,7 @@ namespace cn
     return static_cast<uint32_t>(m_blocks.size());
   }
 
+  // Initialises the blockchain — loads or creates the database, rebuilds caches, validates genesis
   bool Blockchain::init(const std::string &config_folder, bool load_existing, bool testnet)
   {
     try
@@ -840,6 +873,7 @@ namespace cn
         {
           logger(INFO) << "Loading in-memory structures from MDBX...";
 
+          // Clear all in‑memory caches before rebuilding
           m_blockHashes.clear();
           m_hashToHeight.clear();
           m_blockIndex.clear();
@@ -855,6 +889,9 @@ namespace cn
 
           std::vector<uint8_t> metaBuf;
 
+          // Try to load the fast‑path serialised caches from the meta database
+
+          // Load block hashes from meta blob
           if (m_mdbxStorage->getMeta("idx_hashes", metaBuf) && !metaBuf.empty())
           {
             size_t count = metaBuf.size() / sizeof(crypto::Hash);
@@ -862,6 +899,7 @@ namespace cn
             memcpy(m_blockHashes.data(), metaBuf.data(), metaBuf.size());
           }
 
+          // Load hash > height map from meta blob
           if (m_mdbxStorage->getMeta("idx_hash2height", metaBuf))
           {
             const uint8_t *ptr = metaBuf.data();
@@ -878,6 +916,7 @@ namespace cn
             }
           }
 
+          // Load transaction map from meta blob
           if (m_mdbxStorage->getMeta("idx_txmap", metaBuf))
           {
             const uint8_t *ptr = metaBuf.data();
@@ -897,6 +936,7 @@ namespace cn
             }
           }
 
+          // Load spent keys from meta blob
           if (m_mdbxStorage->getMeta("idx_spentkeys", metaBuf))
           {
             const uint8_t *ptr = metaBuf.data();
@@ -913,17 +953,20 @@ namespace cn
             }
           }
 
+          // Load top height from meta blob
           if (m_mdbxStorage->getMeta("idx_topheight", metaBuf) && metaBuf.size() == sizeof(uint32_t))
           {
             memcpy(&topHeight, metaBuf.data(), sizeof(topHeight));
             loadedFast = (m_blockHashes.size() == topHeight + 1);
           }
 
+          // If the fast‑path loaded correctly, also try to load outputs and multisig outputs
           if (loadedFast)
           {
             bool outputsLoaded = false;
             bool msigLoaded = false;
 
+            // Load outputs index from meta blob
             if (m_mdbxStorage->getMeta("idx_outputs", metaBuf))
             {
               const uint8_t *ptr = metaBuf.data();
@@ -954,6 +997,7 @@ namespace cn
               outputsLoaded = !m_outputs.empty();
             }
 
+            // Load multisig outputs index from meta blob
             if (m_mdbxStorage->getMeta("idx_msig", metaBuf))
             {
               const uint8_t *ptr = metaBuf.data();
@@ -986,6 +1030,7 @@ namespace cn
 
             fastIndexesLoaded = outputsLoaded && msigLoaded && !m_spent_keys.empty() && !m_transactionMap.empty();
 
+            // Rebuild deposit index by scanning all blocks
             m_depositIndex = DepositIndex();
             for (uint32_t h = 0; h <= topHeight; ++h)
             {
@@ -998,6 +1043,7 @@ namespace cn
                 BlockEntry entry;
                 if (cn::fromBinaryArray(entry, ba))
                 {
+                  // If fast indexes weren't loaded from meta, build them from the block entries
                   if (!fastIndexesLoaded)
                   {
                     crypto::Hash blockHash = get_block_hash(entry.bl);
@@ -1034,6 +1080,7 @@ namespace cn
                     }
                   }
 
+                  // Accumulate deposit interest from all transactions in this block
                   uint64_t interest = 0;
                   for (const auto &tx : entry.transactions)
                     interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
@@ -1042,6 +1089,7 @@ namespace cn
               }
             }
 
+            // Push all block hashes into the legacy block index for compatibility
             for (const auto &h : m_blockHashes)
               m_blockIndex.push(h);
 
@@ -1049,6 +1097,7 @@ namespace cn
           }
           else
           {
+            // Fast path not available — do a full rebuild from the block entries
             logger(INFO) << "Fast index not available, doing full rebuild...";
 
             m_blockHashes.clear();
@@ -1077,6 +1126,7 @@ namespace cn
                   m_hashToHeight[blockHash] = h;
                   m_blockIndex.push(blockHash);
 
+                  // Build transaction map, spent keys, and outputs from this block
                   for (uint32_t t = 0; t < entry.transactions.size(); ++t)
                   {
                     crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
@@ -1124,6 +1174,7 @@ namespace cn
         auto mdbxMs = std::chrono::duration_cast<std::chrono::milliseconds>(mdbxEnd - mdbxStart).count();
         logger(INFO) << "MDBX initialization took " << mdbxMs << " ms";
 
+        // Initialise the LRU cache
         m_cacheIndex = 0;
         m_cachedEntries.clear();
         m_cachedEntries.reserve(MDBX_CACHE_SIZE);
@@ -1131,6 +1182,7 @@ namespace cn
       else
 #endif
       {
+        // Legacy backend: open the block files
         if (!m_blocks.open(appendPath(config_folder, m_currency.blocksFileName()),
                            appendPath(config_folder, m_currency.blockIndexesFileName()), 1024))
         {
@@ -1143,6 +1195,7 @@ namespace cn
       if (!m_useMdbx)
 #endif
       {
+        // Load the cache from disk (or rebuild if missing/stale)
         if (load_existing && !blocksEmpty())
         {
           logger(INFO) << "Loading blockchain";
@@ -1169,6 +1222,7 @@ namespace cn
               }
             }
 
+            // Sanity check: verify a known block's emission at height 24732
             uint64_t checkBlockHeight = 24732;
             uint64_t checkMinimum = 13000000000000;
             if (!m_testnet && blocksSize() > checkBlockHeight &&
@@ -1213,6 +1267,7 @@ namespace cn
         }
       }
 
+      // If the chain is still empty, push the genesis block
       if (blocksEmpty())
       {
         logger(INFO, BRIGHT_WHITE) << "Blockchain not loaded, generating genesis block.";
@@ -1239,6 +1294,7 @@ namespace cn
         if (!m_useMdbx)
 #endif
         {
+          // Verify that the first block is the correct genesis block
           crypto::Hash firstBlockHash = get_block_hash(blocksAt(0).bl);
           if (!(firstBlockHash == m_currency.genesisBlockHash()))
           {
@@ -1252,6 +1308,7 @@ namespace cn
     mdbx_initialized:
 #endif
 
+      // Validate checkpoints and roll back if any are invalid
       try
       {
         uint32_t lastValidCheckpointHeight = 0;
@@ -1268,6 +1325,7 @@ namespace cn
         return false;
       }
 
+      // Initialise all upgrade detectors
       try
       {
         if (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
@@ -1284,6 +1342,7 @@ namespace cn
         return false;
       }
 
+      // Calculate the initial cumulative block size limit
       update_next_comulative_size_limit();
 
 #ifdef HAVE_MDBX
@@ -1314,6 +1373,7 @@ namespace cn
     }
   }
 
+  // Verifies that all checkpoints are still on the main chain — returns the height of the last valid one
   bool Blockchain::checkCheckpoints(uint32_t &lastValidCheckpointHeight)
   {
     std::vector<uint32_t> checkpointHeights = m_checkpoints.getCheckpointHeights();
@@ -1337,6 +1397,7 @@ namespace cn
     return true;
   }
 
+  // Rebuilds all in‑memory caches by rescanning every block in the chain
   bool Blockchain::rebuildCache()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -1360,6 +1421,7 @@ namespace cn
       m_outputs.clear();
       m_multisignatureOutputs.clear();
 
+      // Iterate over every block and rebuild transaction map, spent keys, and outputs
       for (uint32_t b = 0; b < blocksSize(); ++b)
       {
         if (b % 1000 == 0)
@@ -1434,6 +1496,7 @@ namespace cn
     }
   }
 
+  // Rebuilds the block entries themselves (recalculates already_generated_coins) — legacy backend only
   bool Blockchain::rebuildBlocks()
   {
 #ifdef HAVE_MDBX
@@ -1503,6 +1566,7 @@ namespace cn
     }
   }
 
+  // Serialises all in‑memory caches to disk — MDBX writes to meta blobs, legacy writes to binary cache files
   bool Blockchain::storeCache()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -1514,10 +1578,12 @@ namespace cn
       {
         std::vector<uint8_t> buf;
 
+        // Store block hashes as a raw blob in meta
         m_mdbxStorage->putMeta("idx_hashes",
                                std::vector<uint8_t>((uint8_t *)m_blockHashes.data(),
                                                     (uint8_t *)m_blockHashes.data() + m_blockHashes.size() * sizeof(crypto::Hash)));
 
+        // Store hash > height map as packed pairs in meta
         buf.clear();
         for (const auto &p : m_hashToHeight)
         {
@@ -1527,6 +1593,7 @@ namespace cn
         }
         m_mdbxStorage->putMeta("idx_hash2height", buf);
 
+        // Store transaction map as packed (hash, packed_index) pairs in meta
         buf.clear();
         for (const auto &kv : m_transactionMap)
         {
@@ -1536,6 +1603,7 @@ namespace cn
         }
         m_mdbxStorage->putMeta("idx_txmap", buf);
 
+        // Store spent keys as packed (key_image, height) pairs in meta
         buf.clear();
         for (const auto &p : m_spent_keys)
         {
@@ -1545,10 +1613,12 @@ namespace cn
         }
         m_mdbxStorage->putMeta("idx_spentkeys", buf);
 
+        // Store top height in meta
         uint32_t topHeight = static_cast<uint32_t>(m_blockHashes.size() - 1);
         m_mdbxStorage->putMeta("idx_topheight",
                                std::vector<uint8_t>((uint8_t *)&topHeight, (uint8_t *)&topHeight + sizeof(topHeight)));
 
+        // Store outputs index as a packed structure in meta
         buf.clear();
         for (const auto &p : m_outputs)
         {
@@ -1568,6 +1638,7 @@ namespace cn
         }
         m_mdbxStorage->putMeta("idx_outputs", buf);
 
+        // Store multisig outputs index as a packed structure in meta
         buf.clear();
         for (const auto &p : m_multisignatureOutputs)
         {
@@ -1589,6 +1660,7 @@ namespace cn
         }
         m_mdbxStorage->putMeta("idx_msig", buf);
 
+        // Store deposit index as an array of uint64_t values in meta
         buf.clear();
         buf.reserve(sizeof(uint64_t) * m_depositIndex.size());
         for (size_t i = 0; i < m_depositIndex.size(); ++i)
@@ -1604,6 +1676,7 @@ namespace cn
     }
 #endif
 
+    // Legacy backend: save using BlockCacheSerializer
     logger(INFO, BRIGHT_WHITE) << "Saving blockchain...";
     BlockCacheSerializer ser(*this, getTailId(), logger.getLogger());
     const std::string &blocksCacheFileName = m_currency.blocksCacheFileName();
@@ -1627,6 +1700,7 @@ namespace cn
     }
   }
 
+  // Shuts down the blockchain — saves the cache and indices before closing
   bool Blockchain::deinit()
   {
     bool cacheStored = false, indicesStored = true;
@@ -1644,6 +1718,7 @@ namespace cn
     return cacheStored && indicesStored;
   }
 
+  // Wipes all state and sets the genesis block as the only block in the chain
   bool Blockchain::resetAndSetGenesisBlock(const Block &b)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -1663,6 +1738,7 @@ namespace cn
     return bvc.m_added_to_main_chain && !bvc.m_verification_failed;
   }
 
+  // Returns the hash of the last block and its height
   crypto::Hash Blockchain::getTailId(uint32_t &height)
   {
     assert(!blocksEmpty());
@@ -1671,6 +1747,7 @@ namespace cn
     return getTailId();
   }
 
+  // Returns the hash of the last block in the chain
   crypto::Hash Blockchain::getTailId()
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -1685,6 +1762,7 @@ namespace cn
     return m_blocks.empty() ? NULL_HASH : m_blockIndex.getTailId();
   }
 
+  // Builds a sparse chain starting from the current tip (uses cache if fresh)
   std::vector<crypto::Hash> Blockchain::buildSparseChain()
   {
     uint32_t currentHeight;
@@ -1696,6 +1774,7 @@ namespace cn
       tailId = getTailId();
     }
 
+    // Check if the cached sparse chain is still valid
     {
       std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
       auto now = std::chrono::steady_clock::now();
@@ -1707,6 +1786,7 @@ namespace cn
 
     std::vector<crypto::Hash> result = doBuildSparseChainUnlocked(tailId);
 
+    // Update the cache
     {
       std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
       m_cachedSparseChain = result;
@@ -1717,6 +1797,7 @@ namespace cn
     return result;
   }
 
+  // Builds a sparse chain starting from a specific block hash
   std::vector<crypto::Hash> Blockchain::buildSparseChain(const crypto::Hash &startBlockId)
   {
     {
@@ -1727,6 +1808,7 @@ namespace cn
     return doBuildSparseChainUnlocked(startBlockId);
   }
 
+  // Builds a sparse chain (internal — requires lock to be held)
   std::vector<crypto::Hash> Blockchain::doBuildSparseChain(const crypto::Hash &startBlockId) const
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -1806,7 +1888,6 @@ namespace cn
       std::vector<crypto::Hash> mainPart = buildFromHeight(ancestorHeight);
 
       // Combine: take sparse entries from altPart (powers of 2), then the main part
-      // altPart is [startBlockId, …, child_of_ancestor] (most recent first)
       std::vector<crypto::Hash> result;
       result.reserve(32);
       for (size_t i = 0; i < altPart.size(); i *= 2)
@@ -1858,6 +1939,7 @@ namespace cn
     return sparseChain;
   }
 
+  // Returns the block hash at a given height
   crypto::Hash Blockchain::getBlockIdByHeight(uint32_t height)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -1872,6 +1954,7 @@ namespace cn
     return m_blockIndex.getBlockId(height);
   }
 
+  // Looks up a block by its hash — checks main chain first, then alternative chains
   bool Blockchain::getBlockByHash(const crypto::Hash &blockHash, Block &b)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -1911,6 +1994,7 @@ namespace cn
     return false;
   }
 
+  // Looks up the height of a block by its hash
   bool Blockchain::getBlockHeight(const crypto::Hash &blockId, uint32_t &blockHeight)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lock(m_blockchain_lock);
@@ -1929,6 +2013,7 @@ namespace cn
     return m_blockIndex.getBlockHeight(blockId, blockHeight);
   }
 
+  // Calculates the required difficulty for the next block based on recent timestamps and difficulties
   difficulty_type Blockchain::getDifficultyForNextBlock()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -1941,6 +2026,7 @@ namespace cn
     if (offset == 0)
       ++offset;
 
+    // Collect timestamps and cumulative difficulties from recent blocks
     for (; offset < sz; offset++)
     {
       cn::BlockHeaderPOD hdr = getBlockHeader(offset);
@@ -1951,6 +2037,7 @@ namespace cn
     uint64_t block_index = sz;
     uint8_t block_major_version = get_block_major_version_for_height(block_index + 1);
 
+    // Select the appropriate difficulty algorithm based on block version
     difficulty_type currentDifficulty = 0;
     if (block_major_version >= 8)
       currentDifficulty = m_currency.nextDifficultyLWMA1(timestamps, commulative_difficulties, block_index);
@@ -1966,12 +2053,14 @@ namespace cn
     return currentDifficulty;
   }
 
+  // Returns the timestamp of the block at the given height
   uint64_t Blockchain::getBlockTimestamp(uint32_t height)
   {
     assert(height < blocksSize());
     return getBlockHeader(height).timestamp;
   }
 
+  // Returns the total coins in circulation (from the latest block header)
   uint64_t Blockchain::getCoinsInCirculation()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -1980,6 +2069,7 @@ namespace cn
     return getBlockHeader(blocksSize() - 1).alreadyGeneratedCoins;
   }
 
+  // Returns the total coins emitted up to a given height
   uint64_t Blockchain::coinsEmittedAtHeight(uint64_t height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2002,6 +2092,7 @@ namespace cn
     return blocksAt(height).already_generated_coins;
   }
 
+  // Returns the difficulty at a given height (cumulative difficulty difference from previous block)
   difficulty_type Blockchain::difficultyAtHeight(uint64_t height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2035,6 +2126,7 @@ namespace cn
     return current.cumulative_difficulty - blocksAt(height - 1).cumulative_difficulty;
   }
 
+  // Returns the major block version expected at a given height
   uint8_t Blockchain::get_block_major_version_for_height(uint64_t height) const
   {
     if (height > m_upgradeDetectorV8.upgradeHeight())
@@ -2050,6 +2142,7 @@ namespace cn
     return BLOCK_MAJOR_VERSION_1;
   }
 
+  // Rolls back a failed alternative chain switch by restoring the original chain
   bool Blockchain::rollback_blockchain_switching(const std::list<Block> &original_chain, size_t rollback_height)
   {
     try
@@ -2078,6 +2171,7 @@ namespace cn
     }
   }
 
+  // Switches the main chain to an alternative chain (reorganisation)
   bool Blockchain::switch_to_alternative_blockchain(const std::list<crypto::Hash> &alt_chain, bool discard_disconnected_chain)
   {
     try
@@ -2096,6 +2190,7 @@ namespace cn
         return false;
       }
 
+      // Verify that the alternative chain contains all transactions from the main chain segment being replaced
       std::vector<crypto::Hash> mainChainTxHashes, altChainTxHashes;
       for (size_t i = blocksSize() - 1; i >= split_height; i--)
       {
@@ -2120,6 +2215,7 @@ namespace cn
         }
       }
 
+      // Check block versions on the alternative chain
       for (const auto &hash : alt_chain)
       {
         const Block &b = m_alternative_chains[hash].bl;
@@ -2127,6 +2223,7 @@ namespace cn
           return false;
       }
 
+      // Pop blocks from the main chain down to the split point
       std::list<Block> disconnected_chain;
       for (size_t i = blocksSize() - 1; i >= split_height; i--)
       {
@@ -2135,6 +2232,7 @@ namespace cn
         disconnected_chain.push_front(b);
       }
 
+      // Push the alternative chain blocks
       uint32_t height = split_height - 1;
       for (auto alt_ch_iter = alt_chain.begin(); alt_ch_iter != alt_chain.end(); alt_ch_iter++)
       {
@@ -2157,6 +2255,7 @@ namespace cn
         }
       }
 
+      // Optionally re‑add the disconnected chain as alternative blocks
       if (!discard_disconnected_chain)
       {
         for (const auto &old_ch_ent : disconnected_chain)
@@ -2171,6 +2270,7 @@ namespace cn
         }
       }
 
+      // Send a chain switch message to all observers
       std::vector<crypto::Hash> blocksFromCommonRoot;
       blocksFromCommonRoot.reserve(alt_chain.size() + 1);
       const Block &b = m_alternative_chains[alt_chain.front()].bl;
@@ -2193,6 +2293,7 @@ namespace cn
     }
   }
 
+  // Returns the major block version active at a given height (public wrapper)
   uint8_t Blockchain::getBlockMajorVersionForHeight(uint32_t height) const
   {
     if (height > m_upgradeDetectorV8.upgradeHeight())
@@ -2208,6 +2309,7 @@ namespace cn
     return BLOCK_MAJOR_VERSION_1;
   }
 
+  // Calculates the next difficulty for a block extending an alternative chain
   difficulty_type Blockchain::get_next_difficulty_for_alternative_chain(const std::list<crypto::Hash> &alt_chain, const BlockEntry &bei)
   {
     std::vector<uint64_t> timestamps;
@@ -2225,6 +2327,7 @@ namespace cn
       if (!main_chain_start_offset)
         ++main_chain_start_offset;
 
+      // Collect timestamps/difficulties from the main chain portion
       for (; main_chain_start_offset < main_chain_stop_offset; ++main_chain_start_offset)
       {
         cn::BlockHeaderPOD hdr = getBlockHeader(main_chain_start_offset);
@@ -2238,6 +2341,7 @@ namespace cn
         return false;
       }
 
+      // Append the alternative chain blocks
       for (const auto &it : alt_chain)
       {
         const BlockEntry &blockEntry = m_alternative_chains[it];
@@ -2247,6 +2351,7 @@ namespace cn
     }
     else
     {
+      // Only use blocks from the alternative chain
       timestamps.resize(std::min(alt_chain.size(), m_currency.difficultyBlocksCountByBlockVersion(BlockMajorVersion)));
       commulative_difficulties.resize(std::min(alt_chain.size(), m_currency.difficultyBlocksCountByBlockVersion(BlockMajorVersion)));
       size_t count = 0, max_i = timestamps.size() - 1;
@@ -2272,6 +2377,7 @@ namespace cn
       return m_currency.nextDifficulty(block_major_version, block_index, timestamps, commulative_difficulties);
   }
 
+  // Validates the miner (coinbase) transaction before full block processing
   bool Blockchain::prevalidate_miner_transaction(const Block &b, uint32_t height) const
   {
     if (!(b.baseTransaction.inputs.size() == 1))
@@ -2314,6 +2420,7 @@ namespace cn
     return true;
   }
 
+  // Full validation of the miner transaction's reward against the emission schedule
   bool Blockchain::validate_miner_transaction(const Block &b, uint32_t height, size_t cumulativeBlockSize,
                                               uint64_t alreadyGeneratedCoins, uint64_t fee, uint64_t &reward, int64_t &emissionChange)
   {
@@ -2344,6 +2451,7 @@ namespace cn
     return true;
   }
 
+  // Returns the cumulative block sizes of the last `count` blocks starting from `from_height`
   bool Blockchain::getBackwardBlocksSize(size_t from_height, std::vector<size_t> &sz, size_t count)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2359,6 +2467,7 @@ namespace cn
     return true;
   }
 
+  // Retrieves the sizes of the last N blocks
   bool Blockchain::get_last_n_blocks_sizes(std::vector<size_t> &sz, size_t count)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2367,8 +2476,10 @@ namespace cn
     return getBackwardBlocksSize(blocksSize() - 1, sz, count);
   }
 
+  // Returns the current maximum cumulative block size
   uint64_t Blockchain::getCurrentCumulativeBlocksizeLimit() const { return m_current_block_cumul_sz_limit; }
 
+  // Fills a timestamps vector up to the timestamp check window size
   bool Blockchain::complete_timestamps_vector(uint64_t start_top_height, std::vector<uint64_t> &timestamps)
   {
     if (timestamps.size() >= m_currency.timestampCheckWindow())
@@ -2394,6 +2505,7 @@ namespace cn
     return true;
   }
 
+  // Handles a block that doesn't extend the main chain — stores it as an alternative (orphan) chain candidate
   bool Blockchain::handle_alternative_block(const Block &b, const crypto::Hash &id, block_verification_context &bvc, bool sendNewAlternativeBlockMessage)
   {
     try
@@ -2434,6 +2546,7 @@ namespace cn
         return false;
       }
 
+      // Find whether the previous block is in the main chain or an existing alternative chain
       uint32_t mainPrevHeight = 0;
       bool mainPrev = false;
 #ifdef HAVE_MDBX
@@ -2604,6 +2717,7 @@ namespace cn
     }
   }
 
+  // Retrieves a range of blocks and their transactions
   bool Blockchain::getBlocks(uint32_t start_offset, uint32_t count, std::list<Block> &blocks, std::list<Transaction> &txs)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2624,6 +2738,7 @@ namespace cn
     return true;
   }
 
+  // Retrieves a range of blocks without their transactions
   bool Blockchain::getBlocks(uint32_t start_offset, uint32_t count, std::list<Block> &blocks)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2634,6 +2749,7 @@ namespace cn
     return true;
   }
 
+  // Handles legacy P2P getObjects requests — returns blocks and transactions by hash
   bool Blockchain::handleGetObjects(NOTIFY_REQUEST_GET_OBJECTS::request &arg, NOTIFY_RESPONSE_GET_OBJECTS::request &rsp)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2665,6 +2781,7 @@ namespace cn
     return true;
   }
 
+  // Fetches transactions by hash and returns them with their global output indexes
   bool Blockchain::getTransactionsWithOutputGlobalIndexes(const std::vector<crypto::Hash> &txs_ids, std::list<crypto::Hash> &missed_txs, std::vector<std::pair<Transaction, std::vector<uint32_t>>> &txs)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2687,6 +2804,7 @@ namespace cn
     return true;
   }
 
+  // Returns all blocks currently held as alternative chains
   bool Blockchain::getAlternativeBlocks(std::list<Block> &blocks)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2695,12 +2813,14 @@ namespace cn
     return true;
   }
 
+  // Returns the number of blocks in alternative chains
   uint32_t Blockchain::getAlternativeBlocksCount()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return static_cast<uint32_t>(m_alternative_chains.size());
   }
 
+  // Adds a single output to a random output selection result (verifies it's a KeyOutput and is unlocked)
   bool Blockchain::add_out_to_get_random_outs(std::vector<std::pair<TransactionIndex, uint16_t>> &amount_outs, COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount &result_outs, uint64_t amount, size_t i)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2724,6 +2844,7 @@ namespace cn
     return true;
   }
 
+  // Finds the highest index in the amount outputs vector whose unlock time has passed
   size_t Blockchain::find_end_of_allowed_index(const std::vector<std::pair<TransactionIndex, uint16_t>> &amount_outs)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2739,6 +2860,7 @@ namespace cn
     return 0;
   }
 
+  // Selects random unspent outputs of given amounts for ring signature mixins
   bool Blockchain::getRandomOutsByAmount(const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::request &req, COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::response &res)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2771,6 +2893,7 @@ namespace cn
     return true;
   }
 
+  // Finds where our chain diverges from a remote peer's chain (returns the first block index the peer is missing)
   uint32_t Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids)
   {
     assert(!qblock_ids.empty());
@@ -2790,6 +2913,7 @@ namespace cn
     return blockIndex;
   }
 
+  // Returns the difficulty of a single block at index i
   uint64_t Blockchain::blockDifficulty(size_t i)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2804,6 +2928,7 @@ namespace cn
     return diff_i - getBlockHeader(i - 1).cumulativeDifficulty;
   }
 
+  // Prints a range of the blockchain to the log
   void Blockchain::print_blockchain(uint64_t start_index, uint64_t end_index)
   {
     std::stringstream ss;
@@ -2833,6 +2958,7 @@ namespace cn
                  << ss.str();
   }
 
+  // Prints the block index to the log
   void Blockchain::print_blockchain_index(bool print_all)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2874,6 +3000,7 @@ namespace cn
     }
   }
 
+  // Writes the global output index to a file for debugging
   void Blockchain::print_blockchain_outs(const std::string &file)
   {
     std::stringstream ss;
@@ -2894,6 +3021,7 @@ namespace cn
       logger(WARNING, BRIGHT_YELLOW) << "Failed to write current outputs index to file: " << file;
   }
 
+  // Returns block hashes and the start index for syncing from a peer
   std::vector<crypto::Hash> Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &remoteBlockIds, size_t maxCount, uint32_t &totalBlockCount, uint32_t &startBlockIndex)
   {
     assert(!remoteBlockIds.empty());
@@ -2908,6 +3036,7 @@ namespace cn
     return getBlockIds(startIndex, static_cast<uint32_t>(maxCount));
   }
 
+  // Checks whether a block with the given hash exists (main chain or alternative)
   bool Blockchain::haveBlock(const crypto::Hash &id)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -2928,12 +3057,14 @@ namespace cn
     return false;
   }
 
+  // Returns the total number of transactions in the main chain
   size_t Blockchain::getTotalTransactions()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_transactionMap.size();
   }
 
+  // Retrieves the global output indexes for a given transaction hash
   bool Blockchain::getTransactionOutputGlobalIndexes(const crypto::Hash &tx_id, std::vector<uint32_t> &indexs)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2955,6 +3086,7 @@ namespace cn
     return true;
   }
 
+  // Looks up a multisignature output by its amount and global index
   bool Blockchain::get_out_by_msig_gindex(uint64_t amount, uint64_t gindex, MultisignatureOutput &out)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2969,6 +3101,7 @@ namespace cn
     return true;
   }
 
+  // Validates a transaction's inputs and returns the max used block height and hash
   bool Blockchain::checkTransactionInputs(const Transaction &tx, uint32_t &max_used_block_height, crypto::Hash &max_used_block_id, BlockInfo *tail)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -2986,6 +3119,7 @@ namespace cn
     return true;
   }
 
+  // Checks whether any key images in the transaction have already been spent
   bool Blockchain::haveTransactionKeyImagesAsSpent(const Transaction &tx)
   {
     for (const auto &in : tx.inputs)
@@ -2994,12 +3128,14 @@ namespace cn
     return false;
   }
 
+  // Validates all transaction inputs (public entry point — computes the prefix hash)
   bool Blockchain::checkTransactionInputs(const Transaction &tx, uint32_t *pmax_used_block_height)
   {
     crypto::Hash tx_prefix_hash = getObjectHash(*static_cast<const TransactionPrefix *>(&tx));
     return checkTransactionInputs(tx, tx_prefix_hash, pmax_used_block_height);
   }
 
+  // Validates all transaction inputs against the global output index and spent keys
   bool Blockchain::checkTransactionInputs(const Transaction &tx, const crypto::Hash &tx_prefix_hash, uint32_t *pmax_used_block_height)
   {
     size_t inputIndex = 0;
@@ -3050,6 +3186,7 @@ namespace cn
     return true;
   }
 
+  // Checks whether a transaction's unlock time has passed
   bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time)
   {
     if (unlock_time < m_currency.maxBlockHeight())
@@ -3070,6 +3207,7 @@ namespace cn
     return false;
   }
 
+  // Validates a single KeyInput — verifies the ring signature against the referenced outputs
   bool Blockchain::check_tx_input(const KeyInput &txin, const crypto::Hash &tx_prefix_hash, const std::vector<crypto::Signature> &sig, uint32_t *pmax_related_block_height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -3128,8 +3266,10 @@ namespace cn
     return crypto::check_ring_signature(tx_prefix_hash, txin.keyImage, output_keys, sig.data());
   }
 
+  // Returns the current network‑adjusted time
   uint64_t Blockchain::get_adjusted_time() const { return time(nullptr); }
 
+  // Validates all outputs of a transaction at a given height
   bool Blockchain::check_tx_outputs(const Transaction &tx, uint32_t height) const
   {
     std::string error;
@@ -3142,6 +3282,7 @@ namespace cn
     return true;
   }
 
+  // Validates a new block's timestamp against the network time and median of recent blocks
   bool Blockchain::check_block_timestamp_main(const Block &b)
   {
     if (b.timestamp > get_adjusted_time() + m_currency.blockFutureTimeLimit())
@@ -3156,6 +3297,7 @@ namespace cn
     return check_block_timestamp(std::move(timestamps), b);
   }
 
+  // Validates a block's timestamp against the median of a provided timestamp vector
   bool Blockchain::check_block_timestamp(std::vector<uint64_t> timestamps, const Block &b)
   {
     if (timestamps.size() < m_currency.timestampCheckWindow())
@@ -3169,6 +3311,7 @@ namespace cn
     return true;
   }
 
+  // Validates that the block version matches the expected version for its height
   bool Blockchain::checkBlockVersion(const Block &b, const crypto::Hash &blockHash)
   {
     uint64_t height = get_block_height(b);
@@ -3181,6 +3324,7 @@ namespace cn
     return true;
   }
 
+  // Validates that the cumulative block size is within the allowed limit
   bool Blockchain::checkCumulativeBlockSize(const crypto::Hash &blockId, size_t cumulativeBlockSize, uint64_t height)
   {
     size_t maxSize = m_currency.maxBlockCumulativeSize(height);
@@ -3192,6 +3336,7 @@ namespace cn
     return true;
   }
 
+  // Calculates the cumulative block size from the block's transactions
   bool Blockchain::getBlockCumulativeSize(const Block &block, size_t &cumulativeSize)
   {
     try
@@ -3207,7 +3352,6 @@ namespace cn
       {
         // Transactions not available, estimate using the block entry from storage
         logger(DEBUGGING) << "Some transactions missing for cumulative size calculation, using stored size";
-        // Fall through - the caller already handles this with a debug message
       }
 
       return missedTxs.empty();
@@ -3219,6 +3363,7 @@ namespace cn
     }
   }
 
+  // Recalculates the dynamic cumulative block size limit based on the median of recent blocks
   bool Blockchain::update_next_comulative_size_limit()
   {
     std::vector<size_t> sz;
@@ -3230,6 +3375,7 @@ namespace cn
     return true;
   }
 
+  // Adds a newly received block to the chain — validates and either extends main chain or stores as alternative
   bool Blockchain::addNewBlock(const Block &bl_, block_verification_context &bvc)
   {
     try
@@ -3286,6 +3432,7 @@ namespace cn
     }
   }
 
+  // Resolves a TransactionIndex to the actual TransactionEntry
   const Blockchain::TransactionEntry &Blockchain::transactionByIndex(TransactionIndex index)
   {
 #ifdef HAVE_MDBX
@@ -3295,6 +3442,7 @@ namespace cn
     return m_blocks[index.block].transactions[index.transaction];
   }
 
+  // Pushes a raw block onto the main chain — loads transactions from the pool first
   bool Blockchain::pushBlock(const Block &blockData, const crypto::Hash &id, block_verification_context &bvc, uint32_t height)
   {
     try
@@ -3322,6 +3470,7 @@ namespace cn
     }
   }
 
+  // Pushes a block with pre‑loaded transactions onto the main chain — does full validation
   bool Blockchain::pushBlock(const Block &blockData, const std::vector<Transaction> &transactions, const crypto::Hash &id, block_verification_context &bvc)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -3523,20 +3672,9 @@ namespace cn
 #ifdef HAVE_MDBX
     if (m_useMdbx)
     {
-      cn::BlockHeaderPOD hdr;
-      hdr.majorVersion = block.bl.majorVersion;
-      hdr.minorVersion = block.bl.minorVersion;
-      hdr.timestamp = block.bl.timestamp;
-      hdr.previousBlockHash = block.bl.previousBlockHash;
-      hdr.nonce = block.bl.nonce;
-      hdr.blockCumulativeSize = block.block_cumulative_size;
-      hdr.cumulativeDifficulty = block.cumulative_difficulty;
-      hdr.alreadyGeneratedCoins = block.already_generated_coins;
-      hdr.height = block.height;
-      m_mdbxStorage->pushBlockHeader(block.height, hdr);
+      // Header is now stored atomically inside pushBlockMdbx() via pushCompleteBlock()
+      // No separate pushBlockHeader call needed here — that was the old non‑atomic path
       m_mdbxStorage->flush();
-
-      blocksAt(block.height); // force cache load, optional
     }
 #endif
 
@@ -3582,22 +3720,28 @@ namespace cn
     return true;
   }
 
+  // Returns the total deposit amount currently locked
   uint64_t Blockchain::fullDepositAmount() const
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_depositIndex.fullDepositAmount();
   }
+
+  // Returns the deposit amount at a specific height
   uint64_t Blockchain::depositAmountAtHeight(size_t height) const
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_depositIndex.depositAmountAtHeight(static_cast<DepositIndex::DepositHeight>(height));
   }
+
+  // Returns the deposit interest accrued at a specific height
   uint64_t Blockchain::depositInterestAtHeight(size_t height) const
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_depositIndex.depositInterestAtHeight(static_cast<DepositIndex::DepositHeight>(height));
   }
 
+  // Adds a block's deposit outputs and interest to the deposit index
   void Blockchain::pushToDepositIndex(const BlockEntry &block, uint64_t interest)
   {
     int64_t deposit = 0;
@@ -3621,6 +3765,50 @@ namespace cn
     m_depositIndex.pushBlock(deposit, interest);
   }
 
+  // Writes a complete block to MDBX atomically — entry + header + height mappings + top height in ONE transaction
+  // Called by pushBlock(BlockEntry) when MDBX is active
+  bool Blockchain::pushBlockMdbx(const BlockEntry &block)
+  {
+#ifdef HAVE_MDBX
+    if (!m_mdbxStorage)
+      return false;
+
+    crypto::Hash blockHash = get_block_hash(block.bl);
+    cn::BinaryArray ba = cn::toBinaryArray(block);
+    uint32_t height = block.height;
+
+    // Build the lightweight header POD for the header database
+    cn::BlockHeaderPOD hdr = headerFromBlockEntry(block);
+
+    // ATOMIC: all four writes happen in one MDBX transaction — no orphaned data on crash
+    m_mdbxStorage->pushCompleteBlock(height, blockHash, ba, hdr);
+
+    // Update in‑memory index (only if this is a new height)
+    if (height >= m_blockHashes.size())
+    {
+      m_blockHashes.push_back(blockHash);
+      m_hashToHeight[blockHash] = height;
+    }
+
+    m_timestampIndex.add(block.bl.timestamp, blockHash);
+    m_generatedTransactionsIndex.add(block.bl);
+
+    // Update LRU cache if this block was already loaded during validation
+    for (size_t c = 0; c < m_cachedEntries.size(); ++c)
+    {
+      if (m_cachedEntries[c].height == block.height)
+      {
+        m_cachedEntries[c].entry = block;
+        break;
+      }
+    }
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  // Pushes a fully constructed BlockEntry onto the chain — THE primary method for adding blocks
   bool Blockchain::pushBlock(const BlockEntry &block)
   {
     crypto::Hash blockHash = get_block_hash(block.bl);
@@ -3628,41 +3816,40 @@ namespace cn
 #ifdef HAVE_MDBX
     if (m_useMdbx)
     {
-      cn::BinaryArray ba = cn::toBinaryArray(block);
-      uint32_t height = block.height;
-      m_mdbxStorage->pushBlockEntry(height, ba);
-      m_mdbxStorage->addBlock(block.bl, blockHash, height);
-      m_mdbxStorage->setTopBlockHeight(height);
-
-      // update in‑memory index (only if new height)
-      if (height >= m_blockHashes.size())
-      {
-        m_blockHashes.push_back(blockHash);
-        m_hashToHeight[blockHash] = height;
-      }
-
-      // update LRU cache if this block was already cached (early store)
-      for (size_t c = 0; c < m_cachedEntries.size(); ++c)
-      {
-        if (m_cachedEntries[c].height == block.height)
-        {
-          m_cachedEntries[c].entry = block; // replace with final data
-          break;
-        }
-      }
+      // Use the atomic MDBX push — all writes in one transaction
+      return pushBlockMdbx(block);
     }
-    else
 #endif
-    {
-      m_blocks.push_back(block);
-      m_blockIndex.push(blockHash);
-    }
 
+    // Legacy backend path
+    m_blocks.push_back(block);
+    m_blockIndex.push(blockHash);
     m_timestampIndex.add(block.bl.timestamp, blockHash);
     m_generatedTransactionsIndex.add(block.bl);
     return true;
   }
 
+  // Removes a complete block from MDBX atomically — header + entry + both height mappings + top height in ONE transaction
+  void Blockchain::popBlockMdbx(const crypto::Hash &blockHash)
+  {
+#ifdef HAVE_MDBX
+    if (!m_mdbxStorage)
+      return;
+
+    uint32_t top = m_mdbxStorage->topBlockHeight();
+    if (top == 0)
+      return;
+
+    // ATOMIC: all deletions happen in one MDBX transaction — no partial cleanup
+    m_mdbxStorage->removeCompleteBlock(top, blockHash);
+
+    // Update in‑memory state
+    m_blockHashes.pop_back();
+    m_hashToHeight.erase(blockHash);
+#endif
+  }
+
+  // Removes the top block from the chain (pop operation for failed additions or reorgs)
   void Blockchain::popBlock(const crypto::Hash &blockHash)
   {
     if (blocksEmpty())
@@ -3674,6 +3861,7 @@ namespace cn
     BlockEntry entry = blocksBack();
     uint32_t height = static_cast<uint32_t>(blocksSize());
 
+    // Save transactions back to the pool before removing
     std::vector<Transaction> transactions(entry.transactions.size() - 1);
     for (size_t i = 0; i < entry.transactions.size() - 1; ++i)
       transactions[i] = entry.transactions[1 + i].tx;
@@ -3681,6 +3869,7 @@ namespace cn
     saveTransactions(transactions, height);
     popTransactions(entry, getObjectHash(entry.bl.baseTransaction));
 
+    // Remove from indices
     m_timestampIndex.remove(entry.bl.timestamp, blockHash);
     m_generatedTransactionsIndex.remove(entry.bl);
     m_depositIndex.popBlock();
@@ -3688,13 +3877,8 @@ namespace cn
 #ifdef HAVE_MDBX
     if (m_useMdbx)
     {
-      uint32_t top = m_mdbxStorage->topBlockHeight();
-      m_mdbxStorage->popBlockEntry(top);
-      m_mdbxStorage->removeBlock(blockHash);
-      if (top > 0)
-        m_mdbxStorage->setTopBlockHeight(top - 1);
-      m_blockHashes.pop_back();
-      m_hashToHeight.erase(blockHash);
+      // Use the atomic MDBX pop — all deletions in one transaction
+      popBlockMdbx(blockHash);
     }
     else
 #endif
@@ -3711,6 +3895,7 @@ namespace cn
     m_upgradeDetectorV8.blockPopped();
   }
 
+  // Records a transaction in the indices and output map
   bool Blockchain::pushTransaction(BlockEntry &block, const crypto::Hash &transactionHash, TransactionIndex transactionIndex)
   {
     auto result = m_transactionMap.insert(std::make_pair(transactionHash, transactionIndex));
@@ -3727,12 +3912,14 @@ namespace cn
       return false;
     }
 
+    // Mark all key images as spent
     for (size_t i = 0; i < transaction.tx.inputs.size(); ++i)
       if (transaction.tx.inputs[i].type() == typeid(KeyInput))
       {
         const auto &keyImage = ::boost::get<KeyInput>(transaction.tx.inputs[i]).keyImage;
         if (!m_spent_keys.insert(std::make_pair(keyImage, block.height)).second)
         {
+          // Rollback any key images already inserted
           for (size_t j = 0; j < i; ++j)
             m_spent_keys.erase(::boost::get<KeyInput>(transaction.tx.inputs[i - 1 - j]).keyImage);
           m_transactionMap.erase(transactionHash);
@@ -3740,6 +3927,7 @@ namespace cn
         }
       }
 
+    // Mark multisig outputs as spent
     for (const auto &inv : transaction.tx.inputs)
       if (inv.type() == typeid(MultisignatureInput))
       {
@@ -3747,6 +3935,7 @@ namespace cn
         m_multisignatureOutputs[in.amount][in.outputIndex].isUsed = true;
       }
 
+    // Add new outputs to the global output index
     transaction.m_global_output_indexes.resize(transaction.tx.outputs.size());
     for (uint32_t output = 0; output < transaction.tx.outputs.size(); ++output)
     {
@@ -3767,6 +3956,7 @@ namespace cn
     return true;
   }
 
+  // Removes a single transaction from the indices
   void Blockchain::popTransaction(const Transaction &transaction, const crypto::Hash &transactionHash)
   {
     TransactionIndex transactionIndex = m_transactionMap.at(transactionHash);
@@ -3814,6 +4004,7 @@ namespace cn
     m_transactionMap.erase(transactionHash);
   }
 
+  // Removes all transactions from a block (during a pop operation)
   void Blockchain::popTransactions(const BlockEntry &block, const crypto::Hash &minerTransactionHash)
   {
     for (size_t i = 0; i < block.transactions.size() - 1; ++i)
@@ -3821,6 +4012,7 @@ namespace cn
     popTransaction(block.bl.baseTransaction, minerTransactionHash);
   }
 
+  // Validates a multisignature input's signatures against the referenced output's keys
   bool Blockchain::validateInput(const MultisignatureInput &input, const crypto::Hash &transactionHash, const crypto::Hash &transactionPrefixHash, const std::vector<crypto::Signature> &transactionSignatures)
   {
     assert(input.signatureCount == transactionSignatures.size());
@@ -3853,6 +4045,7 @@ namespace cn
     return true;
   }
 
+  // Rolls back the main chain to a given height
   bool Blockchain::rollbackBlockchainTo(uint32_t height)
   {
     try
@@ -3880,6 +4073,7 @@ namespace cn
     }
   }
 
+  // Removes the last block from the chain (rolls back by one)
   bool Blockchain::removeLastBlock()
   {
 #ifdef HAVE_MDBX
@@ -3900,12 +4094,8 @@ namespace cn
       m_timestampIndex.remove(entry.bl.timestamp, blockHash);
       m_generatedTransactionsIndex.remove(entry.bl);
 
-      m_mdbxStorage->popBlockEntry(top);
-      m_mdbxStorage->removeBlock(blockHash);
-      if (top > 0)
-        m_mdbxStorage->setTopBlockHeight(top - 1);
-      m_blockHashes.pop_back();
-      m_hashToHeight.erase(blockHash);
+      // ATOMIC: all deletions in one transaction
+      popBlockMdbx(blockHash);
       return true;
     }
 #endif
@@ -3921,6 +4111,7 @@ namespace cn
     return true;
   }
 
+  // Binary‑searches the chain to find the first block at or after a given timestamp
   bool Blockchain::getLowerBound(uint64_t timestamp, uint64_t startOffset, uint32_t &height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -3953,6 +4144,7 @@ namespace cn
     return true;
   }
 
+  // Returns up to maxCount block hashes starting from startHeight
   std::vector<crypto::Hash> Blockchain::getBlockIds(uint32_t startHeight, uint32_t maxCount)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -3963,8 +4155,9 @@ namespace cn
       if (m_blockHashes.empty())
         return result;
 
+      // If startHeight is beyond our chain, we have no blocks to send.
       if (startHeight >= m_blockHashes.size())
-        startHeight = (uint32_t)(m_blockHashes.size() - 1);
+        return result; // <-- return empty, not capped
 
       uint32_t end = std::min(startHeight + maxCount, static_cast<uint32_t>(m_blockHashes.size()));
       result.assign(m_blockHashes.begin() + startHeight, m_blockHashes.begin() + end);
@@ -3974,6 +4167,7 @@ namespace cn
     return m_blockIndex.getBlockIds(startHeight, maxCount);
   }
 
+  // Finds which block contains a given transaction
   bool Blockchain::getBlockContainingTransaction(const crypto::Hash &txId, crypto::Hash &blockId, uint32_t &blockHeight)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -3985,6 +4179,7 @@ namespace cn
     return true;
   }
 
+  // Returns the total coins generated up to and including the block with the given hash
   bool Blockchain::getAlreadyGeneratedCoins(const crypto::Hash &hash, uint64_t &generatedCoins)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -4023,6 +4218,7 @@ namespace cn
     return false;
   }
 
+  // Returns the cumulative block size for the block with the given hash
   bool Blockchain::getBlockSize(const crypto::Hash &hash, size_t &size)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -4061,6 +4257,7 @@ namespace cn
     return false;
   }
 
+  // Resolves a multisignature input to the actual output it references
   bool Blockchain::getMultisigOutputReference(const MultisignatureInput &txInMultisig, std::pair<crypto::Hash, size_t> &outputReference)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -4074,6 +4271,7 @@ namespace cn
     return true;
   }
 
+  // Saves the blockchain explorer indices to disk
   bool Blockchain::storeBlockchainIndices()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -4095,6 +4293,7 @@ namespace cn
     return true;
   }
 
+  // Loads the blockchain explorer indices from disk (or rebuilds if missing)
   bool Blockchain::loadBlockchainIndices()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -4130,7 +4329,7 @@ namespace cn
         hash = get_block_hash(blocksAt(b).bl);
 #endif
         m_timestampIndex.add(hdr.timestamp, hash);
-        const BlockEntry &block = blocksAt(b); // needed for transactions
+        const BlockEntry &block = blocksAt(b);
         m_generatedTransactionsIndex.add(block.bl);
         for (size_t t = 0; t < block.transactions.size(); ++t)
           m_paymentIdIndex.add(block.transactions[t].tx);
@@ -4140,27 +4339,35 @@ namespace cn
     return true;
   }
 
+  // Returns the number of generated transactions at a given height
   bool Blockchain::getGeneratedTransactionsNumber(uint32_t height, uint64_t &generatedTransactions)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_generatedTransactionsIndex.find(height, generatedTransactions);
   }
+
+  // Returns orphan block hashes at a given height
   bool Blockchain::getOrphanBlockIdsByHeight(uint32_t height, std::vector<crypto::Hash> &blockHashes)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_orthanBlocksIndex.find(height, blockHashes);
   }
+
+  // Finds block hashes within a timestamp range
   bool Blockchain::getBlockIdsByTimestamp(uint64_t timestampBegin, uint64_t timestampEnd, uint32_t blocksNumberLimit, std::vector<crypto::Hash> &hashes, uint32_t &blocksNumberWithinTimestamps)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_timestampIndex.find(timestampBegin, timestampEnd, blocksNumberLimit, hashes, blocksNumberWithinTimestamps);
   }
+
+  // Finds transaction hashes by payment ID
   bool Blockchain::getTransactionIdsByPaymentId(const crypto::Hash &paymentId, std::vector<crypto::Hash> &transactionHashes)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     return m_paymentIdIndex.find(paymentId, transactionHashes);
   }
 
+  // Loads transactions from the pool — returns false if any are missing
   bool Blockchain::loadTransactions(const Block &block, std::vector<Transaction> &transactions, uint32_t height)
   {
     transactions.resize(block.transactionHashes.size());
@@ -4178,6 +4385,7 @@ namespace cn
     return true;
   }
 
+  // Saves transactions back to the pool
   void Blockchain::saveTransactions(const std::vector<Transaction> &transactions, uint32_t height)
   {
     tx_verification_context context;
@@ -4186,15 +4394,20 @@ namespace cn
         throw std::runtime_error("failed to add transaction to pool");
   }
 
+  // Registers a message queue to receive blockchain events
   bool Blockchain::addMessageQueue(MessageQueue<BlockchainMessage> &messageQueue) { return m_messageQueueList.insert(messageQueue); }
+
+  // Unregisters a message queue
   bool Blockchain::removeMessageQueue(MessageQueue<BlockchainMessage> &messageQueue) { return m_messageQueueList.remove(messageQueue); }
 
+  // Sends a message to all registered message queues
   void Blockchain::sendMessage(const BlockchainMessage &message)
   {
     for (auto iter = m_messageQueueList.begin(); iter != m_messageQueueList.end(); ++iter)
       iter->push(message);
   }
 
+  // Checks whether a block hash belongs to the main chain
   bool Blockchain::isBlockInMainChain(const crypto::Hash &blockId) const
   {
 #ifdef HAVE_MDBX
@@ -4204,8 +4417,10 @@ namespace cn
     return m_blockIndex.hasBlock(blockId);
   }
 
+  // Checks whether the given height is inside the checkpoint zone
   bool Blockchain::isInCheckpointZone(const uint32_t height) const { return m_checkpoints.is_in_checkpoint_zone(height); }
 
+  // Internal implementation of findBlockchainSupplement — scans the peer's block IDs to find the best match
   uint32_t Blockchain::findBlockchainSupplementInternal(const std::vector<crypto::Hash> &qblock_ids) const
   {
     uint32_t currentHeight = static_cast<uint32_t>(blocksSize()), bestMatch = 0;
@@ -4232,15 +4447,21 @@ namespace cn
     return bestMatch;
   }
 
+  // Invalidates the cached sparse chain
   void Blockchain::invalidateSparseChainCache()
   {
     std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
     m_sparseChainCacheValid = false;
     m_cachedSparseChain.clear();
   }
+
+  // Returns the cached sparse chain (builds a fresh one if invalid)
   std::vector<crypto::Hash> Blockchain::getCachedSparseChain() { return buildSparseChain(); }
+
+  // Builds a sparse chain without acquiring the blockchain lock (caller must hold it)
   std::vector<crypto::Hash> Blockchain::doBuildSparseChainUnlocked(const crypto::Hash &startBlockId) const { return doBuildSparseChain(startBlockId); }
 
+  // Returns database statistics (MDBX only)
   std::string Blockchain::printDatabaseStats() const
   {
 #ifdef HAVE_MDBX
@@ -4250,6 +4471,7 @@ namespace cn
     return "MDBX not enabled";
   }
 
+  // Registers a callback that fires when a new checkpoint is generated
   void Blockchain::setCheckpointGeneratedCallback(CheckpointGeneratedCallback callback)
   {
     m_checkpointGeneratedCallback = std::move(callback);

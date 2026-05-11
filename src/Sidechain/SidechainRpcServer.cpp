@@ -366,7 +366,7 @@ namespace Sidechain
              R"(","totalSupply":)" + std::to_string(token.totalSupply) +
              R"(,"decimals":)" + std::to_string(token.decimals) + "}";
     }
-    return "null";
+    throw std::runtime_error("Token not found");
   }
 
   bool SidechainRpcServer::checkBalance(const crypto::PublicKey &sender, uint64_t tokenId, uint64_t amount, uint64_t fee)

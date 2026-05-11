@@ -21,8 +21,7 @@ namespace BoltHttp
            "\r\n";
   }
 
-  // --- SseConnection ---
-
+  // SseConnection
   SseConnection::SseConnection(int clientFd)
       : m_fd(clientFd) {}
 
@@ -66,8 +65,7 @@ namespace BoltHttp
     return sent == static_cast<ssize_t>(frame.size());
   }
 
-  // --- SseBroadcaster ---
-
+  // SseBroadcaster
   SseBroadcaster::~SseBroadcaster()
   {
     std::lock_guard<std::mutex> lock(m_mutex);

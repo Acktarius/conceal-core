@@ -275,7 +275,7 @@ namespace Sidechain
     try
     {
       std::cout << "BridgeWatcher: building unlock transaction: "
-                << amount << " CCX → "
+                << amount << " CCX > "
                 << common::podToHex(toAddress).substr(0, 16) << "..."
                 << std::endl;
 
@@ -396,7 +396,7 @@ namespace Sidechain
       std::string txHex = common::toHex(txBytes);
 
       std::cout << "BridgeWatcher: unlock transaction built: "
-                << amount << " CCX → " << common::podToHex(toAddress).substr(0, 16)
+                << amount << " CCX > " << common::podToHex(toAddress).substr(0, 16)
                 << " (change: " << change << " CCX)"
                 << " | size: " << txBytes.size() << " bytes"
                 << std::endl;

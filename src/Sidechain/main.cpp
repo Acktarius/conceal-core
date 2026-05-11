@@ -430,7 +430,7 @@ int main(int argc, char *argv[])
       std::string destHex = common::podToHex(depositTx.to);
       std::string txHashHex = common::podToHex(depositTx.txHash);
       logger(logging::INFO) << "Bridge deposit detected: " << depositTx.amount
-                            << " CCX locked → sidechain destination: "
+                            << " CCX locked > sidechain destination: "
                             << destHex.substr(0, 16) << "...";
       validator.submitTransaction(depositTx);
       rpcServer.pushBridgeDeposit(depositTx.amount, destHex, txHashHex); });

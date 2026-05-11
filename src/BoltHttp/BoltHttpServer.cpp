@@ -312,7 +312,7 @@ namespace BoltHttp
     if (accumulator.find("\r\n\r\n") == std::string::npos)
       return;
 
-    // --- WebSocket upgrade ---
+    // WebSocket upgrade
     if (m_wsHandler &&
         accumulator.find("Upgrade: websocket") != std::string::npos &&
         accumulator.find("Sec-WebSocket-Key:") != std::string::npos)
@@ -349,7 +349,7 @@ namespace BoltHttp
       }
     }
 
-    // --- SSE stream ---
+    // SSE stream
     if (m_sseHandler &&
         accumulator.find("Accept: text/event-stream") != std::string::npos)
     {
@@ -368,7 +368,7 @@ namespace BoltHttp
       return;
     }
 
-    // --- Normal HTTP request ---
+    // Normal HTTP request
     Request req;
     if (parseRequest(accumulator, req))
     {
