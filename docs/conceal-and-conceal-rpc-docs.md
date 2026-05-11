@@ -114,6 +114,7 @@
 | [getAssetRegistry](#getassetregistry) | List all bridged assets |
 | [getEquivalenceGroup](#getequivalencegroup) | Get tokens in equivalence class |
 | [getBridgeStatus](#getbridgestatus) | Get bridge status and pending unlocks |
+| [bridgeUnlock](#sidechain-bridgeunlock) | Request bridge unlock (burns wrapped tokens) |
 
 #### Faucet
 
@@ -181,9 +182,10 @@ The Conceal unified client provides two JSON-RPC 2.0 endpoints plus real-time ev
 | **Sidechain SSE** | 8080 | Server-Sent Events | Sidechain status on connect |
 | **Sidechain WebSocket** | 8080 | WebSocket (RFC 6455) | Real-time DEX order book, trades, blocks, bridge deposits |
 
+### Request Format
+
 All JSON-RPC requests are `POST` to `/json_rpc` with `Content-Type: application/json`.
 
-Request format:
 ```json
 {
   "jsonrpc": "2.0",
@@ -193,7 +195,9 @@ Request format:
 }
 ```
 
-Success response:
+### Response Format
+
+**Success:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -202,7 +206,7 @@ Success response:
 }
 ```
 
-Error response:
+**Error:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -214,14 +218,128 @@ Error response:
 }
 ```
 
-Standard error codes:
+### Standard Error Codes
+
 | Code | Meaning |
 |------|---------|
 | -32600 | Invalid request |
 | -32601 | Method not found |
 | -32603 | Internal error (see message) |
 
+### Sidechain Error Codes
+
+| Code | Meaning |
+|------|---------|
+| -32000 | Insufficient balance |
+| -32001 | Insufficient escrow balance |
+| -32002 | Rate limited (token creation cooldown) |
+| -32003 | Unauthorized mint (not bridge operator) |
+| -32004 | Order not found |
+| -32005 | Order not owned by sender |
+| -32006 | DEX engine not enabled |
+| -32007 | Faucet already claimed |
+| -32008 | Address has no transaction history |
+| -32009 | Deposit not found |
+| -32010 | Deposit not matured |
+| -32011 | Invalid parameters |
+| -32012 | Transaction rejected by validator |
+
+### Atomic Units
+
+All amounts in this API are denominated in **atomic units** (the smallest divisible unit). For CCX, 1 CCX = 1,000,000 atomic units. For sidechain tokens, the number of decimal places is defined per token and can be queried via `getTokens`.
+
+### Retry and Timeout Guidance
+
+During daemon synchronization or validator startup, mutating calls may fail with internal errors. A recommended retry strategy:
+
+- **Query methods** (`getBalance`, `getStatus`, `getTokens`): Retry immediately up to 3 times, then fall back to cached data.
+- **Mutating methods** (`transfer`, `dex_submitOrder`, `createDeposit`): Retry with exponential backoff starting at 1 second, up to 5 attempts. If the daemon is syncing, wait for `synced: true` from `getSyncStatus` before retrying.
+- **SSE/WebSocket connections**: Reconnect with a 1-5 second delay on disconnect.
+
 SSE streams are accessed via HTTP GET with the `Accept: text/event-stream` header. WebSocket connections use the standard HTTP upgrade handshake with `Upgrade: websocket`.
+
+---
+
+## Security Considerations
+
+The Conceal RPC, sidechain RPC, SSE, and WebSocket endpoints do not require API keys or authentication. They are designed to run on localhost or a trusted network. This section describes the security model and recommended deployment practices.
+
+### Key Material Protection
+
+- **Spend key exposure**: The spend key can sign transactions on behalf of your wallet. Anyone with access to the spend key can drain all funds. Use `lock` after every sending session and run in view-only mode for balance monitoring.
+- **State file security**: The wallet state file (`bolt-wallet.state`) contains plaintext view keys and, if the wallet was not locked, the spend key. Restrict filesystem permissions to the user running the daemon only (`chmod 600`).
+- **Key export**: The `exportWallet` RPC returns a base64-encoded blob containing all key material. Treat this blob like a private key. Never log it, store it in version control, or transmit it over unencrypted channels.
+- **In-memory zeroing**: The `lock` RPC method zeroes the spend key from memory and reconstructs the wallet as view-only. This is a defence-in-depth measure: if the process memory is dumped after locking, the spend key will not be recoverable.
+
+### Network Binding
+
+**Always bind to `127.0.0.1` unless you have a specific, well-understood reason to do otherwise.** The default configuration binds all services to localhost:
+
+| Service | Default Bind Address |
+|---------|----------------------|
+| Conceal RPC (wallet) | 127.0.0.1 |
+| Sidechain RPC | 127.0.0.1 |
+| Mainchain P2P | 0.0.0.0 (required for peer discovery) |
+
+If you must expose the RPC endpoints to a network interface, apply compensating controls:
+
+### Reverse Proxy with Authentication
+
+Deploy nginx or Caddy as a TLS-terminating reverse proxy with basic authentication. Example nginx configuration:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name conceal.example.com;
+
+    ssl_certificate     /etc/ssl/conceal.crt;
+    ssl_certificate_key /etc/ssl/conceal.key;
+
+    auth_basic "Conceal RPC";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    location /json_rpc {
+        proxy_pass http://127.0.0.1:8070;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8070;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}
+```
+
+This enables:
+- TLS encryption for all RPC and stream traffic
+- Basic authentication requiring username/password per connection
+- WebSocket upgrade forwarding for real-time DEX streams
+
+### Firewall Rules
+
+If running on a multi-user server or cloud instance, restrict inbound traffic to the RPC ports:
+
+```bash
+# Allow localhost only
+iptables -A INPUT -p tcp --dport 8070 -s 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p tcp --dport 8080 -s 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p tcp --dport 8070 -j DROP
+iptables -A INPUT -p tcp --dport 8080 -j DROP
+```
+
+### Operational Best Practices
+
+| Practice | Rationale |
+|----------|-----------|
+| Run as a dedicated OS user | Limits filesystem access if the daemon process is compromised |
+| Enable disk encryption | Protects the state file at rest |
+| Rotate wallets for large holdings | Separate cold storage from the hot wallet used by conceal-rpc |
+| Monitor `getSyncStatus` before sending | Submitting transactions while the daemon is syncing may result in rejected transactions or unexpected fees |
+| Audit RPC access logs | If using a reverse proxy, log all RPC calls for anomaly detection |
 
 ---
 
@@ -339,7 +457,12 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 }
 ```
 
-**Errors:** "Invalid view key hex", "Invalid spend key hex" if hex is not valid 64-char.
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Invalid view key hex | The `viewKey` parameter is not a valid 64-char hex string |
+| Invalid spend key hex | The `spendKey` parameter is not a valid 64-char hex string |
 
 **Notes:** After import, a full chain rescan begins in the background if the data directory is available. The wallet is persisted to state file immediately.
 
@@ -358,7 +481,12 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
   -d '{"jsonrpc":"2.0","method":"unlock","params":{},"id":1}'
 ```
 
-**Errors:** "No saved keys found. Use importWallet to set keys first." if the wallet was never imported or generated.
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| State manager not configured | Internal error: state file path not set |
+| No saved keys found. Use importWallet to set keys first. | Wallet was never imported or generated |
 
 **Notes:** Uses `StateManager::loadKeys()` internally. If a spend key was saved, the wallet becomes a full wallet; otherwise view-only.
 
@@ -498,7 +626,11 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 }
 ```
 
-**Errors:** "Wallet is locked. Unlock first." if the wallet is locked.
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Wallet is locked. Unlock first. | Cannot export key material while wallet is locked |
 
 **Notes:** The decoded JSON contains: `{"version":1,"viewKey":"...","spendKey":"...","walletHeight":...,"address":"..."}`. Spend key is empty string for view-only wallets.
 
@@ -508,7 +640,7 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 
 #### getBalance
 
-Get the wallet's mainchain CCX balance.
+Get the wallet's mainchain CCX balance. All amounts are in atomic units (1 CCX = 1,000,000 atomic units).
 
 **Parameters:** none
 
@@ -674,7 +806,7 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 
 #### transfer
 
-Send CCX to one or more addresses.
+Send CCX to one or more addresses. Amounts are in atomic units (1 CCX = 1,000,000 atomic units).
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -707,13 +839,22 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 }
 ```
 
-**Errors:** "Cannot send from view-only wallet" if the wallet has no spend key. Transaction build/relay errors are returned as internal errors.
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Cannot send from view-only wallet | Wallet has no spend key. Unlock first. |
+| (wallet engine error) | Build/relay failure; message describes the specific issue |
 
 ---
 
 #### getTransactions
 
-List wallet transaction history derived from tracked outputs, with pagination support. Items are returned in descending block height order (newest first).
+List wallet transaction history derived from tracked outputs, with pagination support.
+
+**CryptoNote output model:** Unlike account-based blockchains, CryptoNote wallets track individual outputs (UTXOs) rather than transactions. There is no "sent transaction" record. When you send CCX, one or more of your existing outputs are consumed and new outputs are created for the recipient. The `spent` field on an output indicates whether it has been used as an input in a subsequent transaction.
+
+Items are returned in descending block height order (newest first).
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -728,8 +869,8 @@ List wallet transaction history derived from tracked outputs, with pagination su
 | `items[].hash` | string | Transaction hash (hex) |
 | `items[].amount` | uint64 | Amount in atomic units |
 | `items[].blockHeight` | uint32 | Block containing the output |
-| `items[].spent` | bool | Whether this output has been spent |
-| `items[].isDeposit` | bool | Whether this output is a deposit |
+| `items[].spent` | bool | Whether this output has been consumed |
+| `items[].isDeposit` | bool | Whether this output is a time-locked deposit |
 | `totalItems` | uint32 | Total number of outputs in the wallet |
 | `firstBlockIndex` | uint32 | The offset that was requested |
 | `blockCount` | uint32 | The limit that was requested (or totalItems if 0) |
@@ -764,12 +905,12 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 
 #### createDeposit
 
-Lock CCX in a time-locked deposit that earns interest.
+Lock CCX in a time-locked deposit that earns interest. Amounts are in atomic units (1 CCX = 1,000,000 atomic units).
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `amount` | uint64 | Yes | Amount to lock |
+| `amount` | uint64 | Yes | Amount to lock (atomic units) |
 | `term` | uint32 | Yes | Lock duration in blocks |
 
 ```bash
@@ -791,6 +932,13 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
   "id": 1
 }
 ```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Cannot send from view-only wallet | Wallet has no spend key |
+| (wallet engine error) | Build/relay failure; message describes the specific issue |
 
 ---
 
@@ -818,6 +966,13 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 }
 ```
 
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Cannot send from view-only wallet | Wallet has no spend key |
+| (wallet engine error) | Deposit not found, not matured, or relay failure |
+
 ---
 
 #### getDeposits
@@ -831,7 +986,7 @@ List all deposits tracked by the wallet.
 |-------|------|-------------|
 | `deposits` | array | Array of deposit objects |
 | `deposits[].id` | uint64 | Deposit ID |
-| `deposits[].amount` | uint64 | Locked amount |
+| `deposits[].amount` | uint64 | Locked amount (atomic units) |
 | `deposits[].term` | uint32 | Lock duration (blocks) |
 | `deposits[].unlockHeight` | uint32 | Block when deposit matures |
 | `deposits[].locked` | bool | Whether still locked |
@@ -868,7 +1023,7 @@ Estimate how many outputs are available for fusion (consolidation).
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `threshold` | uint64 | No | Minimum amount to consider (default: 1,000,000) |
+| `threshold` | uint64 | No | Minimum amount in atomic units to consider (default: 1,000,000) |
 
 ```bash
 curl -s -X POST http://127.0.0.1:8070/json_rpc \
@@ -895,7 +1050,7 @@ Create and send a fusion transaction to consolidate small outputs.
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `threshold` | uint64 | No | Minimum amount (default: 1,000,000) |
+| `threshold` | uint64 | No | Minimum amount in atomic units (default: 1,000,000) |
 | `mixin` | uint64 | No | Ring size (default: network minimum) |
 
 ```bash
@@ -917,6 +1072,13 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
   "id": 1
 }
 ```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Cannot send from view-only wallet | Wallet has no spend key |
+| (wallet engine error) | No fusion outputs available or relay failure |
 
 ---
 
@@ -971,7 +1133,13 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 }
 ```
 
-**Notes:** Also triggered automatically at a configurable interval (walletAutoSaveInterval). Returns `{"status":"error","message":"Failed to write state file"}` on failure.
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Failed to write state file | Disk full, permission denied, or state manager not configured |
+
+**Notes:** Also triggered automatically at a configurable interval (walletAutoSaveInterval).
 
 ---
 
@@ -1062,17 +1230,15 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 
 #### sidechainTransfer
 
-Transfer sidechain tokens between addresses. Proxies to sidechain's `transfer`.
+Transfer sidechain tokens between addresses. Proxies to sidechain's `transfer`. Amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `from` | string | Yes | Sender public key (hex) |
 | `to` | string | Yes | Recipient public key (hex) |
-| `amount` | uint64 | Yes | Amount to send |
+| `amount` | uint64 | Yes | Amount to send (atomic units) |
 | `tokenId` | uint64 | Yes | Token ID |
-
-Returns transaction hash on success.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8070/json_rpc \
@@ -1089,11 +1255,13 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
   }'
 ```
 
+**Errors:** See sidechain `transfer` for error details.
+
 ---
 
 #### sidechainCreateToken
 
-Create a new token on the sidechain. Proxies to sidechain's `createToken`.
+Create a new token on the sidechain. Proxies to sidechain's `createToken`. All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1101,7 +1269,7 @@ Create a new token on the sidechain. Proxies to sidechain's `createToken`.
 | `from` | string | Yes | Creator public key (hex) |
 | `name` | string | Yes | Token name (up to 16 chars) |
 | `symbol` | string | Yes | Token symbol (up to 8 chars) |
-| `initialSupply` | uint64 | Yes | Initial minted supply |
+| `initialSupply` | uint64 | Yes | Initial minted supply (atomic units) |
 | `backingModel` | uint64 | Yes | 0=Unbacked, 1=Backed, 2=Hybrid |
 
 ```bash
@@ -1119,6 +1287,8 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
     "id":1
   }'
 ```
+
+**Errors:** See sidechain `createToken` for error details.
 
 ---
 
@@ -1142,7 +1312,7 @@ Returns an array of open orders (see sidechain `dex_getOrders`).
 
 #### dexPlaceOrder
 
-Submit a new DEX order. Proxies to `dex_submitOrder`.
+Submit a new DEX order. Proxies to `dex_submitOrder`. All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1150,9 +1320,11 @@ Submit a new DEX order. Proxies to `dex_submitOrder`.
 | `owner` | string | Yes | Owner public key (hex) |
 | `baseTokenId` | uint64 | Yes | Base token ID |
 | `quoteTokenId` | uint64 | Yes | Quote token ID |
-| `amount` | uint64 | Yes | Order amount |
-| `price` | uint64 | Yes | Price in quote token units |
+| `amount` | uint64 | Yes | Order amount (atomic units) |
+| `price` | uint64 | Yes | Price in quote token units (atomic units) |
 | `side` | string | Yes | "buy" or "sell" |
+
+**Errors:** See sidechain `dex_submitOrder` for error details.
 
 ---
 
@@ -1166,11 +1338,13 @@ Cancel an open DEX order. Proxies to `dex_cancelOrder`.
 | `orderId` | uint64 | Yes | Order ID to cancel |
 | `owner` | string | Yes | Owner public key (hex) |
 
+**Errors:** See sidechain `dex_cancelOrder` for error details.
+
 ---
 
 #### dexGetMyOrders
 
-Get orders owned by an address for a specific pair. Proxies to `dex_getOrders` and filters by owner.
+Get orders owned by an address for a specific pair. Proxies to `dex_getOrders` and filters by owner on the sidechain.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1191,7 +1365,7 @@ Get recent trades for a trading pair. Proxies to `dex_getTrades`.
 | `baseTokenId` | uint64 | Yes | Base token ID |
 | `quoteTokenId` | uint64 | Yes | Quote token ID |
 
-Returns recent trades for the pair.
+Returns recent trades for the pair (see sidechain `dex_getTrades`).
 
 ---
 
@@ -1205,7 +1379,7 @@ Get DEX escrow balance for a user. Proxies to `dex_getEscrowBalance`.
 | `owner` | string | Yes | Owner public key (hex) |
 | `tokenId` | uint64 | Yes | Token ID |
 
-Returns balance locked in DEX escrow as a plain string.
+Returns balance locked in DEX escrow as a plain string (atomic units).
 
 ---
 
@@ -1221,15 +1395,13 @@ Get bridge status including asset registry and pending unlocks. Proxies to sidec
 
 #### bridgeLock
 
-Lock CCX on mainchain to be bridged to the sidechain. This sends a CCX transfer to the bridge address on mainchain.
+Lock CCX on mainchain to be bridged to the sidechain. This sends a CCX transfer to the bridge address on mainchain. Amounts are in atomic units (1 CCX = 1,000,000 atomic units).
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `amount` | uint64 | Yes | CCX amount to lock |
+| `amount` | uint64 | Yes | CCX amount to lock (atomic units) |
 | `bridgeAddress` | string | Yes | Bridge mainchain address (destination for the CCX transfer) |
-
-Returns the mainchain transaction hash and status `"locked"`.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8070/json_rpc \
@@ -1252,6 +1424,13 @@ curl -s -X POST http://127.0.0.1:8070/json_rpc \
 }
 ```
 
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Cannot send from view-only wallet | Wallet has no spend key |
+| (wallet engine error) | Insufficient balance or relay failure |
+
 ---
 
 #### bridgeUnlock
@@ -1264,6 +1443,8 @@ Request unlocking of CCX from the bridge (burns wrapped tokens on sidechain). Pr
 | `lockId` | uint64 | Yes | ID of the bridge lock to release |
 | `userAddress` | string | Yes | User's sidechain public key (hex) |
 
+**Errors:** See sidechain `bridgeUnlock` for error details.
+
 ---
 
 ## 2. Sidechain RPC (Port 8080)
@@ -1274,7 +1455,7 @@ The sidechain validator exposes its own JSON-RPC 2.0 endpoint. All methods are d
 
 #### sidechain-getBalance
 
-Get native SCCX balance of an address.
+Get native SCCX balance of an address. Balance is returned in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1300,7 +1481,7 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
 
 #### sidechain-getTokenBalance
 
-Get token balance of an address.
+Get token balance of an address. Balance is returned in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1340,12 +1521,12 @@ List all registered tokens on the sidechain.
 | `fingerprint` | string | Asset fingerprint |
 | `name` | string | Token name |
 | `symbol` | string | Token symbol |
-| `totalSupply` | uint64 | Current total supply |
+| `totalSupply` | uint64 | Current total supply (atomic units) |
 | `maxSupply` | uint64 | Maximum supply (0 = unlimited) |
 | `decimals` | uint8 | Decimal places |
 | `backingModel` | uint8 | 0=Unbacked, 1=Backed, 2=Hybrid |
 | `backingRatio` | uint64 | Backing ratio (if backed) |
-| `lockedCCXAmount` | uint64 | CCX locked for backing |
+| `lockedCCXAmount` | uint64 | CCX locked for backing (atomic units) |
 | `sourceChain` | string | Source chain (if bridged asset) |
 | `sourceAsset` | string | Source asset (if bridged asset) |
 | `bridgeOperator` | string | Bridge operator public key (hex) |
@@ -1379,7 +1560,7 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
 
 #### createToken
 
-Create a new token on the sidechain.
+Create a new token on the sidechain. All supply amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1387,13 +1568,11 @@ Create a new token on the sidechain.
 | `from` | string | Yes | Creator public key (hex) |
 | `nameHex` | string | Yes | Token name as hex string (max 16 bytes) |
 | `symbolHex` | string | Yes | Token symbol as hex string (max 8 bytes) |
-| `initialSupply` | uint64 | Yes | Initial supply to mint |
+| `initialSupply` | uint64 | Yes | Initial supply to mint (atomic units) |
 | `backingModel` | uint64 | Yes | 0=Unbacked, 1=Backed, 2=Hybrid |
 | `decimals` | uint8 | No | Decimal places (default 6) |
 | `backingRatio` | uint64 | No | For backed models |
-| `lockedCCXAmount` | uint64 | No | CCX amount locked for backing |
-
-Returns the transaction hash on success, or `false` on failure.
+| `lockedCCXAmount` | uint64 | No | CCX amount locked for backing (atomic units) |
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
@@ -1411,23 +1590,42 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
   }'
 ```
 
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "txHash": "abc123...",
+    "symbol": "MTK"
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Token creation rejected by validator | Duplicate symbol, rate limited, or validation failure |
+
 ---
 
 ### 2.3 Transaction Methods
 
 #### sidechain-transfer
 
-Transfer tokens between sidechain addresses.
+Transfer tokens between sidechain addresses. All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `from` | string | Yes | Sender public key (hex) |
 | `to` | string | Yes | Recipient public key (hex) |
-| `amount` | uint64 | Yes | Amount to send |
+| `amount` | uint64 | Yes | Amount to send (atomic units) |
 | `tokenId` | uint64 | Yes | Token ID |
 
-A fee is automatically added (DEFAULT_FEE or TESTNET_FEE, in token ID 0 = SCCX). Returns the transaction hash on success, or `false` on failure.
+A fee is automatically added (DEFAULT_FEE or TESTNET_FEE, in token ID 0 = SCCX).
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
@@ -1444,37 +1642,96 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
   }'
 ```
 
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "txHash": "abc123...",
+    "fee": 10
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Insufficient balance | Sender does not have enough tokens (amount + fee) |
+| Transaction rejected by validator | Validation failure on the sidechain |
+
 ---
 
 #### mintToken
 
-Mint new tokens. Requires authorization from the bridge key (the `from` address must match the bridge operator).
+Mint new tokens. Requires authorization from the bridge key (the `from` address must match the bridge operator). All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `from` | string | Yes | Bridge public key (must match bridge operator) |
 | `to` | string | Yes | Recipient public key |
-| `amount` | uint64 | Yes | Amount to mint |
+| `amount` | uint64 | Yes | Amount to mint (atomic units) |
 | `tokenId` | uint64 | Yes | Token ID |
 | `mainChainTxHash` | string | No | Associated mainchain tx hash |
 
-Returns transaction hash on success, or `false` on failure.
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "txHash": "abc123...",
+    "mintedAmount": 1000,
+    "tokenId": 1,
+    "recipient": "a1b2c3..."
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Sender is not the bridge operator for this token | The `from` address does not match the registered bridge operator |
+| Mint transaction rejected by validator | Validation failure on the sidechain |
 
 ---
 
 #### burnToken
 
-Burn tokens (for bridge unlock).
+Burn tokens (for bridge unlock). All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `from` | string | Yes | Owner public key |
-| `amount` | uint64 | Yes | Amount to burn |
+| `amount` | uint64 | Yes | Amount to burn (atomic units) |
 | `tokenId` | uint64 | Yes | Token ID |
 
-Returns transaction hash on success, or `false` on failure.
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "txHash": "abc123...",
+    "burnedAmount": 500,
+    "tokenId": 1
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Insufficient balance to burn | Sender does not have enough tokens (amount + fee) |
+| Burn transaction rejected by validator | Validation failure on the sidechain |
 
 ---
 
@@ -1494,9 +1751,9 @@ Get transaction history for an address. Scans all sidechain blocks from genesis 
 | `type` | string | "Transfer", "CreateToken", "Mint", or "Burn" |
 | `from` | string | Sender public key |
 | `to` | string | Recipient public key |
-| `amount` | uint64 | Amount |
+| `amount` | uint64 | Amount (atomic units) |
 | `tokenId` | uint64 | Token ID |
-| `fee` | uint64 | Fee paid |
+| `fee` | uint64 | Fee paid (atomic units) |
 | `blockHeight` | uint64 | Block containing the transaction |
 | `timestamp` | uint64 | Unix timestamp |
 
@@ -1604,8 +1861,8 @@ List all bridged assets with full provenance information.
 | `verified` | bool | Verification status |
 | `name` | string | Token name |
 | `symbol` | string | Token symbol |
-| `totalSupply` | uint64 | Current supply |
-| `lockedCCXAmount` | uint64 | CCX locked in backing |
+| `totalSupply` | uint64 | Current supply (atomic units) |
+| `lockedCCXAmount` | uint64 | CCX locked in backing (atomic units) |
 | `backingModel` | uint8 | Backing model |
 | `backingRatio` | uint64 | Backing ratio |
 | `decimals` | uint8 | Decimal places |
@@ -1655,18 +1912,54 @@ Returns bridge-related information: a list of bridge assets with locked amounts,
 | `bridgeAssets[].sourceChain` | string | Origin chain |
 | `bridgeAssets[].sourceAsset` | string | Origin asset |
 | `bridgeAssets[].bridgeOperator` | string | Bridge operator public key (hex) |
-| `bridgeAssets[].totalLocked` | uint64 | Total CCX locked for this asset |
+| `bridgeAssets[].totalLocked` | uint64 | Total CCX locked for this asset (atomic units) |
 | `pendingUnlocks` | uint64 | Total number of queued CCX unlocks |
 | `pendingUnlockDetails` | array | First 20 unlock entries |
 | `pendingUnlockDetails[].lockId` | uint64 | Lock ID |
 | `pendingUnlockDetails[].userAddress` | string | User public key (hex) |
 | `pendingUnlockDetails[].tokenId` | uint64 | Token ID |
-| `pendingUnlockDetails[].amount` | uint64 | Unlock amount |
+| `pendingUnlockDetails[].amount` | uint64 | Unlock amount (atomic units) |
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
   -d '{"jsonrpc":"2.0","method":"getBridgeStatus","params":{},"id":1}'
 ```
+
+---
+
+#### sidechain-bridgeUnlock
+
+Request an unlock of bridged CCX. Submits a burn transaction for the locked tokens. When the burn is processed in a block, the bridge lock is marked as unlocked and CCX is queued for release on the mainchain.
+
+**Parameters:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `lockId` | uint64 | Yes | Bridge lock ID to release |
+| `userAddress` | string | Yes | User's sidechain public key (hex) |
+
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "txHash": "abc123...",
+    "lockId": 5,
+    "burnedAmount": 100000,
+    "tokenId": 2
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Bridge lock not found | The `lockId` does not exist |
+| Bridge lock does not belong to this address | The `userAddress` does not match the lock owner |
+| Bridge lock already unlocked | The lock has already been processed |
+| Bridge unlock transaction rejected by validator | Validation failure on the sidechain |
 
 ---
 
@@ -1681,19 +1974,12 @@ Claim test SCCX tokens on testnet. Requires the address to have prior transactio
 |-------|------|----------|-------------|
 | `address` | string | Yes | Public key (hex) |
 
-**Response:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | "ok" or "error" |
-| `amount` | uint64 | Amount credited (if ok) |
-| `balance` | uint64 | New balance after credit (if ok) |
-| `message` | string | Error description (if error) |
-
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
   -d '{"jsonrpc":"2.0","method":"faucet","params":{"address":"a1b2..."},"id":1}'
 ```
 
+**Response on success:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -1706,7 +1992,12 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
 }
 ```
 
-**Errors:** Returns `{"status":"error","message":"already claimed"}` if the address has already used the faucet. Returns `{"status":"error","message":"address has no transaction history"}` if the address has no prior transactions.
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| Faucet already claimed by this address | Each address can only claim once |
+| Address has no transaction history | The address must have received a transaction first |
 
 ---
 
@@ -1730,9 +2021,9 @@ Get open orders for a trading pair.
 | `id` | uint64 | Order ID |
 | `type` | string | "buy" or "sell" |
 | `owner` | string | Owner public key (hex) |
-| `amount` | uint64 | Total order amount |
-| `price` | uint64 | Price in quote token units |
-| `filled` | uint64 | Amount already filled |
+| `amount` | uint64 | Total order amount (atomic units) |
+| `price` | uint64 | Price in quote token units (atomic units) |
+| `filled` | uint64 | Amount already filled (atomic units) |
 | `status` | string | "open", "filled", or "cancelled" |
 
 ```bash
@@ -1744,6 +2035,12 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
     "id":1
   }'
 ```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
 
 ---
 
@@ -1764,8 +2061,8 @@ Get recent trades for a pair.
 | `id` | uint64 | Trade ID |
 | `buyer` | string | Buyer public key (hex) |
 | `seller` | string | Seller public key (hex) |
-| `amount` | uint64 | Trade amount |
-| `price` | uint64 | Execution price |
+| `amount` | uint64 | Trade amount (atomic units) |
+| `price` | uint64 | Execution price (atomic units) |
 | `settled` | bool | Whether settlement completed |
 | `timestamp` | uint64 | Unix timestamp |
 
@@ -1778,6 +2075,12 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
     "id":1
   }'
 ```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
 
 ---
 
@@ -1798,16 +2101,22 @@ Get the most recent trades across all pairs.
 | `seller` | string | Seller public key (hex) |
 | `baseTokenId` | uint64 | Base token ID |
 | `quoteTokenId` | uint64 | Quote token ID |
-| `amount` | uint64 | Trade amount |
-| `price` | uint64 | Execution price |
+| `amount` | uint64 | Trade amount (atomic units) |
+| `price` | uint64 | Execution price (atomic units) |
 | `settled` | bool | Whether settlement completed |
 | `timestamp` | uint64 | Unix timestamp |
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
 
 ---
 
 #### dex_submitOrder
 
-Submit a new order to the DEX order book. The owner must have sufficient escrow balance.
+Submit a new order to the DEX order book. The owner must have sufficient escrow balance. All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1816,10 +2125,8 @@ Submit a new order to the DEX order book. The owner must have sufficient escrow 
 | `owner` | string | Yes | Owner public key (hex) |
 | `baseTokenId` | uint64 | Yes | Base token ID |
 | `quoteTokenId` | uint64 | Yes | Quote token ID |
-| `amount` | uint64 | Yes | Order amount |
-| `price` | uint64 | Yes | Price in quote token units |
-
-Returns `true` on success, `false` on failure (insufficient escrow balance).
+| `amount` | uint64 | Yes | Order amount (atomic units) |
+| `price` | uint64 | Yes | Price in quote token units (atomic units) |
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
@@ -1838,6 +2145,32 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
   }'
 ```
 
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "orderId": 42,
+    "type": "buy",
+    "baseTokenId": 0,
+    "quoteTokenId": 1,
+    "amount": 1000,
+    "price": 500
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
+| Order amount must be greater than zero | The `amount` parameter is zero |
+| Order price must be greater than zero | The `price` parameter is zero |
+| Insufficient escrow balance | Owner does not have enough funds in DEX escrow |
+
 ---
 
 #### dex_cancelOrder
@@ -1850,7 +2183,24 @@ Cancel an open order. Funds are returned to escrow.
 | `orderId` | uint64 | Yes | Order ID to cancel |
 | `owner` | string | Yes | Owner public key (hex) |
 
-Returns `true` on success, `false` on failure.
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "orderId": 42
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
+| Order not found or not owned by sender | The `orderId` does not exist or the `owner` does not match |
 
 ---
 
@@ -1882,20 +2232,24 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
 
 **Notes:** Users initiate a standard sidechain `transfer` to this address to deposit tokens into DEX escrow. Deposits are detected automatically when the transfer is included in a block.
 
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
+
 ---
 
 #### dex_withdraw
 
-Withdraw tokens from DEX escrow back to the user's sidechain balance.
+Withdraw tokens from DEX escrow back to the user's sidechain balance. All amounts are in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `owner` | string | Yes | Owner public key (hex) |
 | `tokenId` | uint64 | Yes | Token to withdraw |
-| `amount` | uint64 | Yes | Amount to withdraw |
-
-Returns `true` on success, `false` on failure (insufficient escrow balance).
+| `amount` | uint64 | Yes | Amount to withdraw (atomic units) |
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/json_rpc \
@@ -1907,11 +2261,33 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
   }'
 ```
 
+**Response on success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "success": true,
+    "owner": "a1b2c3...",
+    "tokenId": 0,
+    "amount": 500
+  },
+  "id": 1
+}
+```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
+| Withdrawal amount must be greater than zero | The `amount` parameter is zero |
+| Insufficient escrow balance | Owner does not have enough funds in DEX escrow |
+
 ---
 
 #### sidechain-dex_getEscrowBalance
 
-Get the DEX escrow balance of a user for a specific token.
+Get the DEX escrow balance of a user for a specific token. Balance is in atomic units.
 
 **Parameters:**
 | Field | Type | Required | Description |
@@ -1933,6 +2309,12 @@ curl -s -X POST http://127.0.0.1:8080/json_rpc \
   "id": 1
 }
 ```
+
+**Errors:**
+
+| Error Message | Cause |
+|---------------|-------|
+| DEX engine not enabled | Sidechain was started without `--enable-dex` |
 
 ---
 
@@ -1985,8 +2367,8 @@ Broadcast every 2 seconds with the current wallet status.
 | Field | Type | Description |
 |-------|------|-------------|
 | `mainchainHeight` | uint32 | Current wallet scan height |
-| `availableBalance` | uint64 | Spendable CCX |
-| `lockedBalance` | uint64 | Pending/locked CCX |
+| `availableBalance` | uint64 | Spendable CCX (atomic units) |
+| `lockedBalance` | uint64 | Pending/locked CCX (atomic units) |
 | `address` | string | Mainchain wallet address |
 
 ---
@@ -2079,7 +2461,7 @@ All messages are JSON text frames (opcode 0x1). The server also handles ping/pon
 
 ##### subscribe_orders
 
-Request a snapshot of the current order book for a trading pair. After connecting, clients may also receive real-time updates for this pair via the `block`, `dexTrade`, and `bridgeDeposit` server push events (these are broadcast to all connected WebSocket clients).
+Request a snapshot of the current order book for a trading pair. After connecting, the client will also receive real-time updates via the `block`, `dexTrade`, and `bridgeDeposit` server push events (these are broadcast to all connected WebSocket clients).
 
 **Message format:**
 ```json
@@ -2153,9 +2535,9 @@ Sent in response to a `subscribe_orders` message. Contains the full current orde
 | `orders` | array | Array of open orders |
 | `orders[].id` | uint64 | Order ID |
 | `orders[].type` | string | "buy" or "sell" |
-| `orders[].amount` | uint64 | Total order amount |
-| `orders[].price` | uint64 | Price in quote token units |
-| `orders[].filled` | uint64 | Amount already filled |
+| `orders[].amount` | uint64 | Total order amount (atomic units) |
+| `orders[].price` | uint64 | Price in quote token units (atomic units) |
+| `orders[].filled` | uint64 | Amount already filled (atomic units) |
 
 ---
 
@@ -2187,8 +2569,8 @@ Sent in response to a `subscribe_trades` message. Contains the 20 most recent tr
 | `quoteTokenId` | uint64 | Quote token ID |
 | `trades` | array | Array of recent trades |
 | `trades[].id` | uint64 | Trade ID |
-| `trades[].amount` | uint64 | Trade amount |
-| `trades[].price` | uint64 | Execution price |
+| `trades[].amount` | uint64 | Trade amount (atomic units) |
+| `trades[].price` | uint64 | Execution price (atomic units) |
 | `trades[].timestamp` | uint64 | Unix timestamp |
 
 ---
@@ -2247,8 +2629,8 @@ Broadcast to all connected WebSocket clients when a new DEX trade is executed.
 | `data.seller` | string | Seller public key (hex) |
 | `data.baseTokenId` | uint64 | Base token ID |
 | `data.quoteTokenId` | uint64 | Quote token ID |
-| `data.amount` | uint64 | Trade amount |
-| `data.price` | uint64 | Execution price |
+| `data.amount` | uint64 | Trade amount (atomic units) |
+| `data.price` | uint64 | Execution price (atomic units) |
 | `data.timestamp` | uint64 | Unix timestamp |
 
 ---
@@ -2272,7 +2654,7 @@ Broadcast to all connected WebSocket clients when a bridge deposit is detected.
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | "bridgeDeposit" |
-| `data.amount` | uint64 | CCX amount deposited |
+| `data.amount` | uint64 | CCX amount deposited (atomic units) |
 | `data.destination` | string | Destination public key (hex) |
 | `data.txHash` | string | Mainchain transaction hash (hex) |
 
@@ -2300,7 +2682,3 @@ When the sidechain and wallet run in the same process, the wallet automatically 
 | Sidechain RPC | 8080 |
 | Sidechain Gossip | 9080 (RPC port + GOSSIP_PORT_OFFSET) |
 | Wallet RPC (conceal-rpc) | 8070 |
-
-### No Authentication
-
-The Conceal RPC, sidechain RPC, SSE, and WebSocket endpoints do not require API keys or authentication. They are designed to run on localhost or a trusted network. For production deployments, use a reverse proxy with authentication or firewall rules to restrict access.
