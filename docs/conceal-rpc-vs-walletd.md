@@ -89,3 +89,31 @@
 * Every feature, mainchain, sidechain, DEX, bridge, is one HTTP POST and one JSON response.
 * Any HTTP client in any language can integrate with it. No special libraries needed.
 * The server can run in setup mode with no keys, letting the GUI drive the entire wallet lifecycle through RPC calls alone.
+
+---
+
+## What the user experience is like now
+
+A user visits the webwallet. The server starts `conceal-rpc` in the background. It is ready to accept RPC calls within seconds. The user is not blocked by sync progress.
+
+The first screen offers two buttons: Create Wallet or Import Wallet.
+
+If they click Create Wallet, the frontend sends one POST request to `generateWallet`. The server generates cryptographically random keys, creates the wallet, saves it to disk, and returns the address, view key, and spend key. The user sees their keys displayed once and is told to save them. That is it. Wallet created.
+
+If they already have keys, they paste them into the Import Wallet form. One POST to `importWallet` and their wallet is loaded. If they only have a view key, they get a view only wallet for balance checking.
+
+While the wallet is scanning in the background for past transactions, the user can already see their address, share it to receive funds, and monitor the scan progress. The scan does not block any wallet features.
+
+If they close the browser and come back tomorrow, the wallet state file loads instantly. No rescan. The background sync monitor picks up any new blocks from where it left off.
+
+If they want to use sidechain tokens, they click the Tokens tab. The webwallet sends a request to the same port 8070 and gets back the token list, balances, and transfer options. The DEX tab shows live order books and lets them trade. The bridge tab lets them move assets between chains. All through the same single endpoint.
+
+If something goes wrong and the wallet gets out of sync, they click a Reset button. The server clears the state, rescans from block 0 in minutes with multi threaded scanning, and the wallet is correct again.
+
+---
+
+## The practical difference hosting it
+
+Before, hosting a webwallet meant running a full daemon, managing wallet files per user, dealing with crash recovery, and accepting that first time users would stare at a progress bar for hours. Support requests were constant: why is it slow, why did it crash, why do I have to start over.
+
+Now, hosting a webwallet means running three small binaries (daemon, sidechain, conceal-rpc) and writing a frontend that makes HTTP requests to a single port. First time users are using their wallet within seconds of arriving. Returning users are in instantly. The only thing the hosting team needs to manage is keeping the blockchain synced on the server, which happens independently of any user's wallet state.
