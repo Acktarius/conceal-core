@@ -139,11 +139,6 @@ namespace Conceal
     cprotocol.set_p2p_endpoint(&p2psrv);
     ccore.set_cryptonote_protocol(&cprotocol);
 
-    // Checkpoint distribution callback
-    ccore.setCheckpointGeneratedCallback(
-        [&cprotocol](uint32_t height, const crypto::Hash &hash)
-        { cprotocol.broadcastCheckpoint(height, hash); });
-
     // Initialize P2P
     logger(logging::INFO) << "Initializing P2P...";
     if (!p2psrv.init(netNodeConfig))

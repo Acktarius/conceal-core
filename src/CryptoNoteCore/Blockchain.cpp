@@ -3707,12 +3707,6 @@ namespace cn
         logger(INFO, BRIGHT_GREEN) << "Auto-generated checkpoint at height " << nextMilestone
                                    << " (buffer: " << (networkHeight - nextMilestone) << " blocks behind tip)";
 
-        // Notify protocol handler to share with peers
-        if (m_checkpointGeneratedCallback)
-        {
-          m_checkpointGeneratedCallback(nextMilestone, milestoneHash);
-        }
-
         nextMilestone += cn::CHECKPOINT_INTERVAL;
       }
     }
