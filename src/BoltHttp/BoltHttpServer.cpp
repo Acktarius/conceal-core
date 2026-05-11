@@ -82,8 +82,7 @@ namespace BoltHttp
     }
   }
 
-  // ── Default classification tables ───────────────────────────
-
+  // Default classification tables
   const std::vector<std::string> Server::DEFAULT_HEAVY_PATHS = {
       "/sendrawtransaction",
       "/submitblock",
@@ -119,8 +118,7 @@ namespace BoltHttp
       "dex_getEscrowBalance",
       "faucet"};
 
-  // ── Constructor ─────────────────────────────────────────────
-
+  // Constructor
   Server::Server(platform_system::Dispatcher *dispatcher, size_t threadCount)
       : m_dispatcher(dispatcher),
         m_threadCount(threadCount),
@@ -144,8 +142,7 @@ namespace BoltHttp
     stop();
   }
 
-  // ── Start / Stop ────────────────────────────────────────────
-
+  // Start / Stop
   void Server::start(const std::string &bindIp, uint16_t port)
   {
     m_serverSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -226,16 +223,14 @@ namespace BoltHttp
     m_workers.clear();
   }
 
-  // ── Handler registration ────────────────────────────────────
-
+  // Handler registration
   void Server::onRequest(RequestHandler handler, WorkClass cls)
   {
     m_handler = std::move(handler);
     m_defaultClass = cls;
   }
 
-  // ── Classification overrides ────────────────────────────────
-
+  // Classification overrides
   void Server::markHeavy(const std::string &pathPrefix)
   {
     m_heavyPaths.push_back(pathPrefix);
@@ -246,8 +241,7 @@ namespace BoltHttp
     m_fastPaths.push_back(pathPrefix);
   }
 
-  // ── Auto-classification ─────────────────────────────────────
-
+  // Auto-classification
   WorkClass Server::classifyRequest(const Request &req) const
   {
     // Check URL path first (for direct endpoints like /sendrawtransaction)
@@ -282,8 +276,7 @@ namespace BoltHttp
     return m_dispatcher ? WorkClass::Fast : WorkClass::Heavy;
   }
 
-  // ── Accept loop ─────────────────────────────────────────────
-
+  // Accept loop
   void Server::acceptLoop()
   {
     while (m_running)
@@ -306,8 +299,7 @@ namespace BoltHttp
     }
   }
 
-  // ── Worker loop ─────────────────────────────────────────────
-
+  // Worker loop
   void Server::workerLoop(int epollFd)
   {
     epoll_event events[64];
@@ -334,8 +326,7 @@ namespace BoltHttp
     }
   }
 
-  // ── Client handler with work classification ─────────────────
-
+  // Client handler with work classification
   void Server::handleClient(int clientFd)
   {
     char buffer[4096];

@@ -709,10 +709,7 @@ namespace cn
     return (size_t)m_currency.upgradeVotingThreshold() * m_currency.upgradeVotingWindow() <= 100 * voteCounter;
   }
 
-  // -----------------------------------------------------------------------
-  // Original Blockchain methods (with Phase 2 modifications)
-  // -----------------------------------------------------------------------
-
+  // Original Blockchain methods
   bool Blockchain::addObserver(IBlockchainStorageObserver *observer)
   {
     return m_observerManager.add(observer);

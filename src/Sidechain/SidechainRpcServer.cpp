@@ -132,8 +132,7 @@ namespace Sidechain
     }
   }
 
-  // ── Account methods ────────────────────────────────────────
-
+  // Account methods
   std::string SidechainRpcServer::methodGetBalance(const common::JsonValue &params)
   {
     std::string address = params("address").getString();
@@ -558,8 +557,6 @@ namespace Sidechain
     return result;
   }
 
-  // ── Remaining methods unchanged ────────────────────────────
-
   std::string SidechainRpcServer::methodFaucet(const common::JsonValue &params)
   {
     std::string address = params("address").getString();
@@ -622,7 +619,7 @@ namespace Sidechain
     return methodCreateToken(params);
   }
 
-  // ── DEX methods unchanged ──────────────────────────────────
+  // DEX methods
   std::string SidechainRpcServer::methodDexGetOrders(const common::JsonValue &params)
   {
     if (!m_dexEngine)

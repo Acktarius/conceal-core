@@ -35,14 +35,21 @@ namespace BoltRPC
     void start(const std::string &bindIp, uint16_t bindPort, size_t threadCount = 1);
     void stop();
 
+    // Connect to a sidechain validator for proxied RPC calls
     void setSidechainConnection(const std::string &host, uint16_t port);
+
+    // Called by SyncMonitor when new outputs are discovered
     void onNewOutputs(const std::vector<BoltCore::OutputInfo> &outputs, uint32_t newHeight);
+
     uint32_t getNodeHeight() const;
 
-    // StateManager so save() RPC can persist wallet state
+    // Wire up state persistence so save() and auto-save can write wallet state
     void setStateManager(StateManager *stateManager,
                          std::vector<BoltCore::OutputInfo> *outputs,
                          std::atomic<uint32_t> *syncedHeight);
+
+    // Public save method for auto-save timer — persists outputs AND keys
+    bool saveWalletState();
 
   private:
     void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);
@@ -50,9 +57,18 @@ namespace BoltRPC
     std::string sidechainRpcCall(const std::string &method, const std::string &params);
     void submitTransaction(const BoltCore::TransferResult &result);
 
-    // Method handlers
+    // System
+    std::string methodGetVersion(const common::JsonValue &params);
+
+    // Wallet lifecycle
     std::string methodImportWallet(const common::JsonValue &params);
     std::string methodGenerateWallet(const common::JsonValue &params);
+    std::string methodUnlock(const common::JsonValue &params);
+    std::string methodLock(const common::JsonValue &params);
+    std::string methodGetViewKey(const common::JsonValue &params);
+    std::string methodGetSpendKey(const common::JsonValue &params);
+
+    // Mainchain
     std::string methodGetBalance(const common::JsonValue &params);
     std::string methodGetAddress(const common::JsonValue &params);
     std::string methodGetStatus(const common::JsonValue &params);
@@ -66,17 +82,23 @@ namespace BoltRPC
     std::string methodSendFusionTransaction(const common::JsonValue &params);
     std::string methodReset(const common::JsonValue &params);
     std::string methodSave(const common::JsonValue &params);
+
+    // Sidechain
     std::string methodGetSidechainStatus(const common::JsonValue &params);
     std::string methodGetSidechainTokens(const common::JsonValue &params);
     std::string methodSidechainTransfer(const common::JsonValue &params);
     std::string methodSidechainCreateToken(const common::JsonValue &params);
     std::string methodGetTokenBalance(const common::JsonValue &params);
+
+    // DEX
     std::string methodDexGetOrderBook(const common::JsonValue &params);
     std::string methodDexPlaceOrder(const common::JsonValue &params);
     std::string methodDexCancelOrder(const common::JsonValue &params);
     std::string methodDexGetMyOrders(const common::JsonValue &params);
     std::string methodDexGetTradeHistory(const common::JsonValue &params);
     std::string methodDexGetEscrowBalance(const common::JsonValue &params);
+
+    // Bridge
     std::string methodBridgeGetStatus(const common::JsonValue &params);
     std::string methodBridgeLock(const common::JsonValue &params);
     std::string methodBridgeUnlock(const common::JsonValue &params);
@@ -98,6 +120,11 @@ namespace BoltRPC
     StateManager *m_stateManager = nullptr;
     std::vector<BoltCore::OutputInfo> *m_outputs = nullptr;
     std::atomic<uint32_t> *m_externalSyncedHeight = nullptr;
+
+    // Locked state (keys zeroed out but RPC stays alive)
+    bool m_locked = false;
+    crypto::SecretKey m_savedViewKey;
+    crypto::SecretKey m_savedSpendKey;
   };
 
 } // namespace BoltRPC

@@ -40,6 +40,12 @@ namespace Sidechain
     // Get the address of the first connected seed (for sync requests)
     std::string getFirstSeedAddress() const;
 
+    size_t getPeerCount() const
+    {
+      std::lock_guard<std::mutex> lock(m_peersMutex);
+      return m_peerSockets.size();
+    }
+
   private:
     void acceptLoop();
     void connectToSeeds();

@@ -61,7 +61,23 @@ struct Config
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("Conceal Sidechain Validator");
-  desc.add_options()("help,h", "Show help")("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key (64-char hex)")("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key (64-char hex, required for unlocks)")("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")("testnet", po::bool_switch(), "Run sidechain in testnet mode")("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")("enable-dex", po::bool_switch(), "Enable built-in DEX engine")("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage");
+  desc.add_options()
+    ("help,h", "Show help")
+    ("data-dir", po::value<std::string>()->default_value("./sidechain-data"), "Sidechain data directory")
+    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Main chain daemon host")
+    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Main chain daemon port")
+    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "Sidechain RPC bind IP")
+    ("bind-port", po::value<uint16_t>()->default_value(8080), "Sidechain RPC bind port")
+    ("bridge-view-key", po::value<std::string>()->default_value(""), "Bridge view key (64-char hex)")
+    ("bridge-spend-key", po::value<std::string>()->default_value(""), "Bridge spend key (64-char hex, required for unlocks)")
+    ("watch-bridge", po::bool_switch(), "Watch main chain for CCX deposits")
+    ("testnet", po::bool_switch(), "Run sidechain in testnet mode")
+    ("seed-host", po::value<std::string>()->default_value(""), "Seed validator host to connect to")
+    ("seed-port", po::value<uint16_t>()->default_value(0), "Seed validator RPC port (gossip port is RPC + 1000)")
+    ("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")
+    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")
+    ("enable-dex", po::bool_switch(), "Enable built-in DEX engine")
+    ("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage");
 
   po::variables_map vm;
   try
@@ -93,7 +109,6 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.seedPort = vm["seed-port"].as<uint16_t>();
   cfg.rewardAddress = vm["reward-address"].as<std::string>();
   cfg.rpcThreads = vm["rpc-threads"].as<size_t>();
-  cfg.enableDex = vm["enable-dex"].as<bool>();
   cfg.dexFee = vm["dex-fee"].as<double>();
 
   return true;

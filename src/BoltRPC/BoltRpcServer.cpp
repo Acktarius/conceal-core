@@ -11,6 +11,7 @@
 #include "BoltHttp/BoltHttpClient.h"
 #include "BoltSync/CryptoHelpers.h"
 #include "StateManager.h"
+#include "version.h"
 
 #include <sstream>
 #include <future>
@@ -18,10 +19,7 @@
 
 namespace BoltRPC
 {
-
-  // ---------------------------------------------------------------------------
   // Helpers
-  // ---------------------------------------------------------------------------
   namespace
   {
 
@@ -44,7 +42,7 @@ namespace BoltRPC
 
   } // namespace
 
-  // ---------------------------------------------------------------------------
+  // Constructor / start / stop
   BoltRpcServer::BoltRpcServer(platform_system::Dispatcher &dispatcher,
                                logging::ILogger &logger,
                                BoltCore::Wallet &wallet,
@@ -102,9 +100,7 @@ namespace BoltRPC
     return m_node.getLastLocalBlockHeight();
   }
 
-  // ---------------------------------------------------------------------------
   // Sidechain RPC proxy
-  // ---------------------------------------------------------------------------
   std::string BoltRpcServer::sidechainRpcCall(const std::string &method,
                                               const std::string &params)
   {
@@ -127,7 +123,7 @@ namespace BoltRPC
     return response.body;
   }
 
-  // ---------------------------------------------------------------------------
+  // Request dispatch
   void BoltRpcServer::handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response)
   {
     if (request.method != "POST" || request.url != "/json_rpc")
@@ -160,10 +156,24 @@ namespace BoltRPC
                                      : common::JsonValue(common::JsonValue::OBJECT);
 
       std::string result;
-      if (method == "importWallet")
+
+      // System
+      if (method == "getVersion")
+        result = methodGetVersion(params);
+      // Wallet lifecycle
+      else if (method == "importWallet")
         result = methodImportWallet(params);
       else if (method == "generateWallet")
         result = methodGenerateWallet(params);
+      else if (method == "unlock")
+        result = methodUnlock(params);
+      else if (method == "lock")
+        result = methodLock(params);
+      else if (method == "getViewKey")
+        result = methodGetViewKey(params);
+      else if (method == "getSpendKey")
+        result = methodGetSpendKey(params);
+      // Mainchain
       else if (method == "getBalance")
         result = methodGetBalance(params);
       else if (method == "getAddress")
@@ -190,7 +200,7 @@ namespace BoltRPC
         result = methodReset(params);
       else if (method == "save")
         result = methodSave(params);
-      // Sidechain methods
+      // Sidechain
       else if (method == "getSidechainStatus")
         result = methodGetSidechainStatus(params);
       else if (method == "getSidechainTokens")
@@ -201,7 +211,7 @@ namespace BoltRPC
         result = methodSidechainCreateToken(params);
       else if (method == "getTokenBalance")
         result = methodGetTokenBalance(params);
-      // DEX methods
+      // DEX
       else if (method == "dexGetOrderBook")
         result = methodDexGetOrderBook(params);
       else if (method == "dexPlaceOrder")
@@ -214,7 +224,7 @@ namespace BoltRPC
         result = methodDexGetTradeHistory(params);
       else if (method == "dexGetEscrowBalance")
         result = methodDexGetEscrowBalance(params);
-      // Bridge methods
+      // Bridge
       else if (method == "bridgeGetStatus")
         result = methodBridgeGetStatus(params);
       else if (method == "bridgeLock")
@@ -233,8 +243,20 @@ namespace BoltRPC
   }
 
   // =========================================================================
-  // Mainchain method implementations
+  // System
   // =========================================================================
+
+  // Return the binary version string for GUI compatibility checks
+  std::string BoltRpcServer::methodGetVersion(const common::JsonValue &)
+  {
+    return R"({"version":")" + std::string(CCX_RELEASE_VERSION) + R"("})";
+  }
+
+  // =========================================================================
+  // Wallet lifecycle
+  // =========================================================================
+
+  // Import an existing wallet by view key and optional spend key, no restart needed
   std::string BoltRpcServer::methodImportWallet(const common::JsonValue &params)
   {
     std::string viewKeyHex = params("viewKey").getString();
@@ -258,6 +280,11 @@ namespace BoltRPC
 
     m_address = m_currency.accountAddressAsString({spendPub, viewPub});
 
+    // Save keys for lock/unlock cycle
+    m_savedViewKey = viewKey;
+    m_savedSpendKey = spendKey;
+    m_locked = false;
+
     m_logger(logging::INFO) << "Wallet imported: " << m_address;
 
     if (m_stateManager && m_outputs)
@@ -265,25 +292,31 @@ namespace BoltRPC
       uint32_t h = m_externalSyncedHeight
                        ? m_externalSyncedHeight->load(std::memory_order_relaxed)
                        : m_syncedHeight.load(std::memory_order_relaxed);
-      m_stateManager->save(*m_outputs, h);
+      // Save keys alongside outputs for unlock support
+      m_stateManager->save(*m_outputs, h, viewKeyHex, spendKeyHex);
     }
 
     return R"({"status":"ok","address":")" + m_address + R"("})";
   }
 
+  // Generate a new random wallet, return keys for backup
   std::string BoltRpcServer::methodGenerateWallet(const common::JsonValue &)
   {
     crypto::SecretKey viewKey, spendKey;
     crypto::PublicKey viewPub, spendPub;
 
-    // Generate random keys
     crypto::generate_keys(viewPub, viewKey);
     crypto::generate_keys(spendPub, spendKey);
 
-    // Reconstruct wallet
+    // Reconstruct wallet with new keys
     m_wallet.~Wallet();
     new (&m_wallet) BoltCore::Wallet(viewKey, spendKey, viewPub, spendPub, m_node, m_currency);
     m_address = m_currency.accountAddressAsString({spendPub, viewPub});
+
+    // Save keys for lock/unlock cycle
+    m_savedViewKey = viewKey;
+    m_savedSpendKey = spendKey;
+    m_locked = false;
 
     std::string viewKeyHex = common::podToHex(viewKey);
     std::string spendKeyHex = common::podToHex(spendKey);
@@ -300,14 +333,97 @@ namespace BoltRPC
       uint32_t h = m_externalSyncedHeight
                        ? m_externalSyncedHeight->load(std::memory_order_relaxed)
                        : m_syncedHeight.load(std::memory_order_relaxed);
-      m_stateManager->save(*m_outputs, h);
+      // Save keys alongside outputs for unlock support
+      m_stateManager->save(*m_outputs, h, viewKeyHex, spendKeyHex);
     }
 
     return ss.str();
   }
 
+  // Unlock: reload keys from the state file without the user re-entering hex
+  std::string BoltRpcServer::methodUnlock(const common::JsonValue &)
+  {
+    if (!m_stateManager)
+      throw std::runtime_error("State manager not configured");
+
+    std::string viewKeyHex, spendKeyHex;
+    if (!m_stateManager->loadKeys(viewKeyHex, spendKeyHex))
+      throw std::runtime_error("No saved keys found. Use importWallet to set keys first.");
+
+    if (viewKeyHex.empty())
+      throw std::runtime_error("No saved keys found. Use importWallet to set keys first.");
+
+    // Reuse importWallet logic by building a params object
+    common::JsonValue params(common::JsonValue::OBJECT);
+    params.insert("viewKey", viewKeyHex);
+    if (!spendKeyHex.empty())
+      params.insert("spendKey", spendKeyHex);
+
+    return methodImportWallet(params);
+  }
+
+  // Lock the wallet: zero out keys in memory, RPC stays alive for unlock
+  std::string BoltRpcServer::methodLock(const common::JsonValue &)
+  {
+    if (m_locked)
+      return R"({"status":"ok","message":"Already locked"})";
+
+    BoltCore::WalletType type = m_wallet.getType();
+    if (type == BoltCore::WalletType::ViewOnly)
+    {
+      m_locked = true;
+      return R"({"status":"ok","message":"View-only wallet locked"})";
+    }
+
+    // Full wallet: zero out keys and reconstruct as view-only
+    crypto::PublicKey viewPub = m_wallet.getViewPublicKey();
+
+    m_wallet.~Wallet();
+    new (&m_wallet) BoltCore::Wallet(crypto::SecretKey{}, crypto::SecretKey{},
+                                     viewPub, crypto::PublicKey{}, m_node, m_currency);
+    m_locked = true;
+
+    // Save state with empty keys to respect locked state
+    saveWalletState();
+
+    return R"({"status":"ok","message":"Wallet locked. Use unlock to restore keys."})";
+  }
+
+  // Return the current view key for backup purposes
+  std::string BoltRpcServer::methodGetViewKey(const common::JsonValue &)
+  {
+    if (m_locked)
+      return R"({"viewKey":""})";
+
+    return R"({"viewKey":")" + common::podToHex(m_savedViewKey) + R"("})";
+  }
+
+  // Return the current spend key if available (full wallet only)
+  std::string BoltRpcServer::methodGetSpendKey(const common::JsonValue &)
+  {
+    if (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
+      return R"({"spendKey":""})";
+
+    return R"({"spendKey":")" + common::podToHex(m_savedSpendKey) + R"("})";
+  }
+
+  // =========================================================================
+  // Mainchain wallet methods
+  // =========================================================================
+
   std::string BoltRpcServer::methodGetBalance(const common::JsonValue &)
   {
+    // Fast path: if wallet has no outputs, return zeros without blocking
+    {
+      std::lock_guard<std::mutex> lock(m_walletMutex);
+      auto outputs = m_wallet.getOutputs();
+      if (outputs.empty())
+      {
+        return R"({"availableBalance":0,"lockedAmount":0,"lockedDepositBalance":0,"unlockedDepositBalance":0})";
+      }
+    }
+
+    // Wallet has outputs, take the lock again for the full balance query
     std::lock_guard<std::mutex> lock(m_walletMutex);
     auto bal = m_wallet.getBalance();
     std::ostringstream ss;
@@ -328,9 +444,22 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodGetStatus(const common::JsonValue &)
   {
-    uint32_t nodeHeight = m_node.getLastLocalBlockHeight();
-    uint32_t networkHeight = m_node.getLastKnownBlockHeight();
-    size_t peerCount = m_node.getPeerCount();
+    uint32_t nodeHeight = 0;
+    uint32_t networkHeight = 0;
+    size_t peerCount = 0;
+
+    // Try to get daemon status, return zeros if daemon is unreachable
+    try
+    {
+      nodeHeight = m_node.getLastLocalBlockHeight();
+      networkHeight = m_node.getLastKnownBlockHeight();
+      peerCount = m_node.getPeerCount();
+    }
+    catch (...)
+    {
+      // Daemon not reachable, return zeros
+    }
+
     uint32_t syncedHeight = m_syncedHeight.load(std::memory_order_relaxed);
 
     std::ostringstream ss;
@@ -339,7 +468,6 @@ namespace BoltRPC
        << R"(,"peerCount":)" << peerCount
        << R"(,"walletHeight":)" << syncedHeight;
 
-    // Include sidechain status if connected
     if (m_sidechainConnected)
     {
       ss << R"(,"sidechainHost":")" << m_sidechainHost << R"(")"
@@ -353,12 +481,21 @@ namespace BoltRPC
   std::string BoltRpcServer::methodGetSyncStatus(const common::JsonValue &params)
   {
     uint32_t walletHeight = m_syncedHeight.load();
-    uint32_t nodeHeight = m_node.getLastLocalBlockHeight();
+    uint32_t nodeHeight = 0;
+
+    try
+    {
+      nodeHeight = m_node.getLastLocalBlockHeight();
+    }
+    catch (...)
+    {
+      // Daemon not reachable
+    }
 
     std::ostringstream ss;
     ss << R"({"walletHeight":)" << walletHeight
        << R"(,"nodeHeight":)" << nodeHeight
-       << R"(,"synced":)" << (walletHeight >= nodeHeight ? "true" : "false");
+       << R"(,"synced":)" << (walletHeight >= nodeHeight && nodeHeight > 0 ? "true" : "false");
 
     if (m_sidechainConnected)
     {
@@ -395,7 +532,6 @@ namespace BoltRPC
     if (!result.success)
       throw std::runtime_error(result.error);
 
-    // Submit to daemon
     submitTransaction(result);
 
     std::ostringstream ss;
@@ -524,64 +660,65 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodReset(const common::JsonValue &)
   {
-    // Clear outputs in memory
     if (m_outputs)
-    {
       m_outputs->clear();
-    }
 
-    // Reset synced height so SyncMonitor rescans from genesis
     m_syncedHeight.store(0, std::memory_order_relaxed);
     if (m_externalSyncedHeight)
-    {
       m_externalSyncedHeight->store(0, std::memory_order_relaxed);
-    }
 
-    // Clear wallet outputs in memory
     {
       std::lock_guard<std::mutex> lock(m_walletMutex);
       std::vector<BoltCore::OutputInfo> empty;
       m_wallet.loadOutputs(empty);
     }
 
-    // Save empty state to disk
     if (m_stateManager)
     {
       std::vector<BoltCore::OutputInfo> empty;
-      m_stateManager->save(empty, 0);
+      // Preserve keys across reset so unlock still works
+      std::string vkHex = m_locked ? "" : common::podToHex(m_savedViewKey);
+      std::string skHex = (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
+                              ? ""
+                              : common::podToHex(m_savedSpendKey);
+      m_stateManager->save(empty, 0, vkHex, skHex);
     }
 
     m_logger(logging::INFO) << "Wallet reset — will rescan from genesis";
-
     return R"({"status":"ok","message":"Wallet reset. Rescan will begin on next sync cycle."})";
   }
 
   std::string BoltRpcServer::methodSave(const common::JsonValue &)
+  {
+    if (saveWalletState())
+      return R"({"status":"ok"})";
+    return R"({"status":"error","message":"Failed to write state file"})";
+  }
+
+  bool BoltRpcServer::saveWalletState()
   {
     if (m_stateManager && m_outputs)
     {
       uint32_t height = m_externalSyncedHeight
                             ? m_externalSyncedHeight->load(std::memory_order_relaxed)
                             : m_syncedHeight.load(std::memory_order_relaxed);
-      if (m_stateManager->save(*m_outputs, height))
-        return R"({"status":"ok"})";
-      else
-        return R"({"status":"error","message":"Failed to write state file"})";
+
+      // Persist keys alongside outputs so unlock works across restarts
+      std::string vkHex = m_locked ? "" : common::podToHex(m_savedViewKey);
+      std::string skHex = (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
+                              ? ""
+                              : common::podToHex(m_savedSpendKey);
+
+      return m_stateManager->save(*m_outputs, height, vkHex, skHex);
     }
-    return R"({"status":"ok","message":"No state manager configured"})";
+    return false;
   }
 
-  // =========================================================================
-  // Sidechain method implementations
-  // =========================================================================
-
+  // Sidechain methods
   std::string BoltRpcServer::methodGetSidechainStatus(const common::JsonValue &)
   {
     if (m_sidechainConnected)
-    {
-      // Proxy to sidechain for full status
       return sidechainRpcCall("getStatus", "{}");
-    }
 
     std::ostringstream ss;
     ss << R"({"sidechainEnabled":false})";
@@ -628,10 +765,7 @@ namespace BoltRPC
     return sidechainRpcCall("getTokenBalance", sideParams.str());
   }
 
-  // =========================================================================
-  // DEX method implementations
-  // =========================================================================
-
+  // DEX methods
   std::string BoltRpcServer::methodDexGetOrderBook(const common::JsonValue &params)
   {
     std::ostringstream sideParams;
@@ -697,10 +831,7 @@ namespace BoltRPC
     return sidechainRpcCall("dex_getEscrowBalance", sideParams.str());
   }
 
-  // =========================================================================
-  // Bridge method implementations
-  // =========================================================================
-
+  // Bridge methods
   std::string BoltRpcServer::methodBridgeGetStatus(const common::JsonValue &)
   {
     return sidechainRpcCall("getBridgeStatus", "{}");
@@ -708,13 +839,10 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodBridgeLock(const common::JsonValue &params)
   {
-    // Lock CCX on mainchain to bridge to sidechain
-    // This requires a mainchain deposit transaction
     std::lock_guard<std::mutex> lock(m_walletMutex);
 
     uint64_t amount = static_cast<uint64_t>(params("amount").getInteger());
 
-    // Build a deposit that the bridge watcher will detect
     BoltCore::Transfer bridgeTransfer;
     bridgeTransfer.address = params("bridgeAddress").getString();
     bridgeTransfer.amount = amount;
@@ -743,18 +871,12 @@ namespace BoltRPC
     return sidechainRpcCall("bridgeUnlock", sideParams.str());
   }
 
-  // =========================================================================
   // Transaction submission
-  // =========================================================================
-
   void BoltRpcServer::submitTransaction(const BoltCore::TransferResult &result)
   {
-    // Wallet already relays internally via RelayHandler.
-    // This method exists for future use if we need to re-relay or verify.
     if (!result.success)
       throw std::runtime_error(result.error);
 
     m_logger(logging::INFO) << "Transaction completed: " << result.txHash;
   }
-
 } // namespace BoltRPC
