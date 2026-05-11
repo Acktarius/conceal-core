@@ -48,6 +48,8 @@ namespace Sidechain
     void setBridgeKey(const crypto::PublicKey &key) { m_consensus.setBridgeKey(key); }
     void onBridgeBurn(std::function<void(const Transaction &)> cb) { m_consensus.onBridgeBurn(cb); }
 
+    void onSseBlock(std::function<void(uint64_t, uint64_t, size_t)> cb) { m_consensus.onBlockEvent(std::move(cb)); }
+
   private:
     void consensusLoop();
     bool validateTransaction(const Transaction &tx) const;

@@ -10,6 +10,24 @@
 
 namespace Sidechain
 {
+  // JSON-RPC error codes for sidechain-specific errors
+  namespace RpcErrorCode
+  {
+    const int INSUFFICIENT_BALANCE = -32000;
+    const int INSUFFICIENT_ESCROW = -32001;
+    const int RATE_LIMITED = -32002;
+    const int UNAUTHORIZED_MINT = -32003;
+    const int ORDER_NOT_FOUND = -32004;
+    const int ORDER_NOT_OWNER = -32005;
+    const int DEX_NOT_ENABLED = -32006;
+    const int FAUCET_ALREADY_CLAIMED = -32007;
+    const int FAUCET_NO_HISTORY = -32008;
+    const int DEPOSIT_NOT_FOUND = -32009;
+    const int DEPOSIT_NOT_MATURED = -32010;
+    const int INVALID_PARAMS = -32011;
+    const int TRANSACTION_REJECTED = -32012;
+  }
+
   SidechainRpcServer::SidechainRpcServer(logging::ILogger &logger,
                                          SidechainStorage &storage,
                                          SidechainValidator &validator)
@@ -22,6 +40,7 @@ namespace Sidechain
   void SidechainRpcServer::start(const std::string &bindIp, uint16_t bindPort, size_t threadCount)
   {
     m_httpServer.reset(new BoltHttp::Server(nullptr, threadCount));
+
     m_httpServer->onRequest([this](const BoltHttp::Request &req, BoltHttp::Response &resp)
                             {
         if (req.url == "/json_rpc" && req.method == "POST")
@@ -34,8 +53,21 @@ namespace Sidechain
             resp.status = 404;
             resp.setBody("Not found");
         } });
+
+    m_httpServer->onWebSocket([this](BoltHttp::WebSocket &ws)
+                              { handleWebSocketConnection(ws); });
+
+    m_httpServer->onSse([this](BoltHttp::SseConnection &conn)
+                        {
+        m_logger(logging::INFO) << "SSE client connected to sidechain";
+        std::ostringstream data;
+        data << R"({"height":)" << m_storage.topBlockHeight()
+             << R"(,"tokens":)" << m_storage.getAllTokens().size() << "}";
+        conn.sendEvent("status", data.str()); });
+
     m_httpServer->start(bindIp, bindPort);
-    m_logger(logging::INFO) << "Sidechain RPC server started on " << bindIp << ":" << bindPort;
+    m_logger(logging::INFO) << "Sidechain RPC server started on " << bindIp << ":" << bindPort
+                            << " (HTTP + WebSocket + SSE)";
   }
 
   void SidechainRpcServer::stop()
@@ -45,8 +77,144 @@ namespace Sidechain
     m_logger(logging::INFO) << "Sidechain RPC server stopped";
   }
 
+  void SidechainRpcServer::handleWebSocketConnection(BoltHttp::WebSocket &ws)
+  {
+    m_logger(logging::INFO) << "WebSocket client connected to sidechain DEX";
+
+    {
+      std::lock_guard<std::mutex> lock(m_wsMutex);
+      m_wsClients.push_back(&ws);
+    }
+
+    ws.onMessage([this, &ws](const std::string &message)
+                 {
+        try
+        {
+            common::JsonValue req = common::JsonValue::fromString(message);
+            std::string type = req.contains("type") ? req("type").getString() : "";
+
+            if (type == "subscribe_orders" && m_dexEngine)
+            {
+                uint64_t baseTokenId = static_cast<uint64_t>(req("baseTokenId").getInteger());
+                uint64_t quoteTokenId = static_cast<uint64_t>(req("quoteTokenId").getInteger());
+                auto orders = m_dexEngine->getOrders(baseTokenId, quoteTokenId);
+                std::ostringstream snapshot;
+                snapshot << R"({"type":"orderBookSnapshot","baseTokenId":)" << baseTokenId
+                         << R"(,"quoteTokenId":)" << quoteTokenId << R"(,"orders":[)";
+                for (size_t i = 0; i < orders.size(); ++i)
+                {
+                    if (i > 0) snapshot << ",";
+                    snapshot << R"({"id":)" << orders[i].id
+                             << R"(,"type":")" << (orders[i].type == BoltDex::OrderType::Buy ? "buy" : "sell") << R"(")"
+                             << R"(,"amount":)" << orders[i].amount
+                             << R"(,"price":)" << orders[i].price
+                             << R"(,"filled":)" << orders[i].filled << "}";
+                }
+                snapshot << "]}";
+                ws.sendText(snapshot.str());
+            }
+            else if (type == "subscribe_trades" && m_dexEngine)
+            {
+                uint64_t baseTokenId = static_cast<uint64_t>(req("baseTokenId").getInteger());
+                uint64_t quoteTokenId = static_cast<uint64_t>(req("quoteTokenId").getInteger());
+                auto trades = m_dexEngine->getTrades(baseTokenId, quoteTokenId, 20);
+                std::ostringstream snapshot;
+                snapshot << R"({"type":"tradeHistory","baseTokenId":)" << baseTokenId
+                         << R"(,"quoteTokenId":)" << quoteTokenId << R"(,"trades":[)";
+                for (size_t i = 0; i < trades.size(); ++i)
+                {
+                    if (i > 0) snapshot << ",";
+                    snapshot << R"({"id":)" << trades[i].id
+                             << R"(,"amount":)" << trades[i].amount
+                             << R"(,"price":)" << trades[i].price
+                             << R"(,"timestamp":)" << trades[i].timestamp << "}";
+                }
+                snapshot << "]}";
+                ws.sendText(snapshot.str());
+            }
+        }
+        catch (const std::exception &e)
+        {
+            m_logger(logging::WARNING) << "WebSocket message error: " << e.what();
+        } });
+
+    ws.onClose([this, &ws]()
+               {
+        std::lock_guard<std::mutex> lock(m_wsMutex);
+        m_wsClients.erase(
+            std::remove(m_wsClients.begin(), m_wsClients.end(), &ws),
+            m_wsClients.end());
+        m_logger(logging::INFO) << "WebSocket client disconnected from sidechain"; });
+  }
+
+  void SidechainRpcServer::pushBlockEvent(uint64_t height, uint64_t txCount, size_t votes)
+  {
+    std::ostringstream data;
+    data << R"({"height":)" << height
+         << R"(,"txCount":)" << txCount
+         << R"(,"votes":)" << votes << "}";
+
+    std::lock_guard<std::mutex> lock(m_wsMutex);
+    for (auto *client : m_wsClients)
+    {
+      std::ostringstream msg;
+      msg << R"({"type":"block","data":)" << data.str() << "}";
+      client->sendText(msg.str());
+    }
+  }
+
+  void SidechainRpcServer::pushDexTrade(const Sidechain::BoltDex::Trade &trade)
+  {
+    std::ostringstream data;
+    data << R"({"id":)" << trade.id
+         << R"(,"buyer":")" << common::podToHex(trade.buyer) << R"(")"
+         << R"(,"seller":")" << common::podToHex(trade.seller) << R"(")"
+         << R"(,"baseTokenId":)" << trade.baseTokenId
+         << R"(,"quoteTokenId":)" << trade.quoteTokenId
+         << R"(,"amount":)" << trade.amount
+         << R"(,"price":)" << trade.price
+         << R"(,"timestamp":)" << trade.timestamp << "}";
+
+    std::lock_guard<std::mutex> lock(m_wsMutex);
+    for (auto *client : m_wsClients)
+    {
+      std::ostringstream msg;
+      msg << R"({"type":"dexTrade","data":)" << data.str() << "}";
+      client->sendText(msg.str());
+    }
+  }
+
+  void SidechainRpcServer::pushBridgeDeposit(uint64_t amount, const std::string &destHex, const std::string &txHash)
+  {
+    std::ostringstream data;
+    data << R"({"amount":)" << amount
+         << R"(,"destination":")" << destHex << R"(")"
+         << R"(,"txHash":")" << txHash << R"("})";
+
+    std::lock_guard<std::mutex> lock(m_wsMutex);
+    for (auto *client : m_wsClients)
+    {
+      std::ostringstream msg;
+      msg << R"({"type":"bridgeDeposit","data":)" << data.str() << "}";
+      client->sendText(msg.str());
+    }
+  }
+
+  namespace
+  {
+    std::string buildError(int code, const std::string &message, const std::string &id)
+    {
+      std::ostringstream err;
+      err << R"({"jsonrpc":"2.0","error":{"code":)" << code
+          << R"(,"message":")" << message << R"("},"id":)" << id << "}";
+      return err.str();
+    }
+  }
+
   std::string SidechainRpcServer::handleJsonRpc(const std::string &body)
   {
+    std::string id = "null";
+
     try
     {
       std::stringstream stream(body);
@@ -56,7 +224,6 @@ namespace Sidechain
       std::string method = request("method").getString();
       common::JsonValue params = request("params");
 
-      std::string id = "null";
       const common::JsonValue &idVal = request("id");
       if (idVal.isInteger())
         id = std::to_string(idVal.getInteger());
@@ -98,6 +265,8 @@ namespace Sidechain
         result = methodGetEquivalenceGroup(params);
       else if (method == "getBridgeStatus")
         result = methodGetBridgeStatus(params);
+      else if (method == "bridgeUnlock")
+        result = methodBridgeUnlock(params);
       else if (method == "faucet")
         result = methodFaucet(params);
       else if (method == "dex_getOrders")
@@ -117,18 +286,13 @@ namespace Sidechain
       else if (method == "dex_getEscrowBalance")
         result = methodDexGetEscrowBalance(params);
       else
-      {
-        std::string error = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":" + id + "}";
-        return error;
-      }
+        return buildError(-32601, "Method not found", id);
 
-      std::string response = "{\"jsonrpc\":\"2.0\",\"result\":" + result + ",\"id\":" + id + "}";
-      return response;
+      return R"({"jsonrpc":"2.0","result":)" + result + R"(,"id":)" + id + "}";
     }
     catch (const std::exception &e)
     {
-      std::string error = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"" + std::string(e.what()) + "\"},\"id\":null}";
-      return error;
+      return buildError(-32603, e.what(), id);
     }
   }
 
@@ -205,6 +369,13 @@ namespace Sidechain
     return "null";
   }
 
+  bool SidechainRpcServer::checkBalance(const crypto::PublicKey &sender, uint64_t tokenId, uint64_t amount, uint64_t fee)
+  {
+    uint64_t balance = 0;
+    m_storage.getBalance(sender, tokenId, balance);
+    return balance >= (amount + fee);
+  }
+
   std::string SidechainRpcServer::methodTransfer(const common::JsonValue &params)
   {
     Transaction tx;
@@ -217,6 +388,9 @@ namespace Sidechain
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
     tx.feeTokenId = 0;
 
+    if (!checkBalance(tx.from, tx.tokenId, tx.amount, tx.fee))
+      throw std::runtime_error("Insufficient balance");
+
     tx.signature = crypto::Signature{};
     tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
     tx.extra.clear();
@@ -224,9 +398,11 @@ namespace Sidechain
     cn::BinaryArray txBytes = cn::toBinaryArray(tx);
     crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
 
-    if (m_validator.submitTransaction(tx))
-      return "\"" + common::podToHex(tx.txHash) + "\"";
-    return "false";
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Transaction rejected by validator");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) +
+           R"(","fee":)" + std::to_string(tx.fee) + "}";
   }
 
   std::string SidechainRpcServer::methodCreateToken(const common::JsonValue &params)
@@ -234,70 +410,65 @@ namespace Sidechain
     Transaction tx;
     tx.type = TransactionType::CreateToken;
 
-    try
+    const common::JsonValue &fromVal = params("from");
+    const common::JsonValue &nameHexVal = params("nameHex");
+    const common::JsonValue &symbolHexVal = params("symbolHex");
+    const common::JsonValue &supplyVal = params("initialSupply");
+    const common::JsonValue &modelVal = params("backingModel");
+
+    std::string fromStr = fromVal.getString();
+    common::podFromHex(fromStr, tx.from);
+    tx.to = tx.from;
+    tx.amount = static_cast<uint64_t>(supplyVal.getInteger());
+
+    tx.fee = 0;
+    tx.feeTokenId = 0;
+    tx.tokenId = 0;
+
+    uint8_t backingModel = static_cast<uint8_t>(static_cast<uint64_t>(modelVal.getInteger()));
+
+    uint8_t decimals = 6;
+    if (params.contains("decimals"))
+      decimals = static_cast<uint8_t>(static_cast<uint64_t>(params("decimals").getInteger()));
+
+    uint64_t backingRatio = 0;
+    uint64_t lockedCCXAmount = 0;
+
+    if (backingModel == static_cast<uint8_t>(TokenBackingModel::Backed) ||
+        backingModel == static_cast<uint8_t>(TokenBackingModel::Hybrid))
     {
-      const common::JsonValue &fromVal = params("from");
-      const common::JsonValue &nameHexVal = params("nameHex");
-      const common::JsonValue &symbolHexVal = params("symbolHex");
-      const common::JsonValue &supplyVal = params("initialSupply");
-      const common::JsonValue &modelVal = params("backingModel");
+      if (params.contains("backingRatio"))
+        backingRatio = static_cast<uint64_t>(params("backingRatio").getInteger());
+      else
+        backingRatio = SidechainConfig::DEFAULT_BACKING_RATIO;
 
-      std::string fromStr = fromVal.getString();
-      common::podFromHex(fromStr, tx.from);
-      tx.to = tx.from;
-      tx.amount = static_cast<uint64_t>(supplyVal.getInteger());
-
-      tx.fee = 0;
-      tx.feeTokenId = 0;
-      tx.tokenId = 0;
-
-      uint8_t backingModel = static_cast<uint8_t>(static_cast<uint64_t>(modelVal.getInteger()));
-
-      uint8_t decimals = 6;
-      if (params.contains("decimals"))
-        decimals = static_cast<uint8_t>(static_cast<uint64_t>(params("decimals").getInteger()));
-
-      uint64_t backingRatio = 0;
-      uint64_t lockedCCXAmount = 0;
-
-      if (backingModel == static_cast<uint8_t>(TokenBackingModel::Backed) ||
-          backingModel == static_cast<uint8_t>(TokenBackingModel::Hybrid))
-      {
-        if (params.contains("backingRatio"))
-          backingRatio = static_cast<uint64_t>(params("backingRatio").getInteger());
-        else
-          backingRatio = SidechainConfig::DEFAULT_BACKING_RATIO;
-
-        if (params.contains("lockedCCXAmount"))
-          lockedCCXAmount = static_cast<uint64_t>(params("lockedCCXAmount").getInteger());
-      }
-
-      std::string nameHex = nameHexVal.getString();
-      std::string symbolHex = symbolHexVal.getString();
-
-      cn::BinaryArray nameBytes = common::fromHex(nameHex);
-      cn::BinaryArray symbolBytes = common::fromHex(symbolHex);
-
-      std::string name(nameBytes.begin(), nameBytes.end());
-      std::string symbol(symbolBytes.begin(), symbolBytes.end());
-
-      std::string combined = name + ":" + symbol + ":" + std::to_string(backingModel) +
-                             ":" + std::to_string(decimals) +
-                             ":" + std::to_string(backingRatio) +
-                             ":" + std::to_string(lockedCCXAmount);
-      tx.extra.assign(combined.begin(), combined.end());
-
-      cn::BinaryArray txBytes = cn::toBinaryArray(tx);
-      crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
-
-      if (m_validator.submitTransaction(tx))
-        return "\"" + common::podToHex(tx.txHash) + "\"";
+      if (params.contains("lockedCCXAmount"))
+        lockedCCXAmount = static_cast<uint64_t>(params("lockedCCXAmount").getInteger());
     }
-    catch (const std::exception &e)
-    {
-      return "false";
-    }
-    return "false";
+
+    std::string nameHex = nameHexVal.getString();
+    std::string symbolHex = symbolHexVal.getString();
+
+    cn::BinaryArray nameBytes = common::fromHex(nameHex);
+    cn::BinaryArray symbolBytes = common::fromHex(symbolHex);
+
+    std::string name(nameBytes.begin(), nameBytes.end());
+    std::string symbol(symbolBytes.begin(), symbolBytes.end());
+
+    std::string combined = name + ":" + symbol + ":" + std::to_string(backingModel) +
+                           ":" + std::to_string(decimals) +
+                           ":" + std::to_string(backingRatio) +
+                           ":" + std::to_string(lockedCCXAmount);
+    tx.extra.assign(combined.begin(), combined.end());
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Token creation rejected by validator");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) +
+           R"(","symbol":")" + symbol + R"(")";
   }
 
   std::string SidechainRpcServer::methodMintToken(const common::JsonValue &params)
@@ -308,6 +479,12 @@ namespace Sidechain
     common::podFromHex(params("to").getString(), tx.to);
     tx.amount = static_cast<uint64_t>(params("amount").getInteger());
     tx.tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
+
+    // Verify the sender is authorized as a bridge operator for this token
+    AssetRegistryEntry assetEntry;
+    if (!m_storage.getAssetByTokenId(tx.tokenId, assetEntry) ||
+        assetEntry.bridgeOperator != tx.from)
+      throw std::runtime_error("Sender is not the bridge operator for this token");
 
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
     tx.feeTokenId = 0;
@@ -324,9 +501,13 @@ namespace Sidechain
     cn::BinaryArray txBytes = cn::toBinaryArray(tx);
     crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
 
-    if (m_validator.submitTransaction(tx))
-      return "\"" + common::podToHex(tx.txHash) + "\"";
-    return "false";
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Mint transaction rejected by validator");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) +
+           R"(","mintedAmount":)" + std::to_string(tx.amount) +
+           R"(,"tokenId":)" + std::to_string(tx.tokenId) +
+           R"(,"recipient":")" + common::podToHex(tx.to) + R"(")";
   }
 
   std::string SidechainRpcServer::methodBurnToken(const common::JsonValue &params)
@@ -341,6 +522,9 @@ namespace Sidechain
     tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
     tx.feeTokenId = 0;
 
+    if (!checkBalance(tx.from, tx.tokenId, tx.amount, tx.fee))
+      throw std::runtime_error("Insufficient balance to burn");
+
     tx.signature = crypto::Signature{};
     tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
     tx.extra.clear();
@@ -348,9 +532,12 @@ namespace Sidechain
     cn::BinaryArray txBytes = cn::toBinaryArray(tx);
     crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
 
-    if (m_validator.submitTransaction(tx))
-      return "\"" + common::podToHex(tx.txHash) + "\"";
-    return "false";
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Burn transaction rejected by validator");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) +
+           R"(","burnedAmount":)" + std::to_string(tx.amount) +
+           R"(,"tokenId":)" + std::to_string(tx.tokenId) + "}";
   }
 
   std::string SidechainRpcServer::methodGetStatus(const common::JsonValue &)
@@ -557,6 +744,54 @@ namespace Sidechain
     return result;
   }
 
+  std::string SidechainRpcServer::methodBridgeUnlock(const common::JsonValue &params)
+  {
+    uint64_t lockId = static_cast<uint64_t>(params("lockId").getInteger());
+    std::string userAddress = params("userAddress").getString();
+    crypto::PublicKey userPubKey;
+    common::podFromHex(userAddress, userPubKey);
+
+    // Verify the lock exists and belongs to this user
+    BridgeLockEntry lockEntry;
+    if (!m_storage.getBridgeLock(lockId, lockEntry))
+      throw std::runtime_error("Bridge lock not found");
+
+    if (lockEntry.userAddress != userPubKey)
+      throw std::runtime_error("Bridge lock does not belong to this address");
+
+    if (lockEntry.unlocked)
+      throw std::runtime_error("Bridge lock already unlocked");
+
+    // Create a burn transaction for the locked token amount
+    Transaction tx;
+    tx.type = TransactionType::Burn;
+    tx.from = userPubKey;
+    tx.to = userPubKey;
+    tx.amount = lockEntry.amount;
+    tx.tokenId = lockEntry.tokenId;
+    tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
+    tx.feeTokenId = 0;
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    tx.extra.clear();
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Bridge unlock transaction rejected by validator");
+
+    // applyTransaction (called during block commit) will handle:
+    // - Burning the tokens
+    // - Calling markBridgeLockUnlocked(lockId) for matching locks
+    // - Reducing lockedCCXAmount on the token
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) +
+           R"(","lockId":)" + std::to_string(lockId) +
+           R"(,"burnedAmount":)" + std::to_string(lockEntry.amount) +
+           R"(,"tokenId":)" + std::to_string(lockEntry.tokenId) + "}";
+  }
+
   std::string SidechainRpcServer::methodFaucet(const common::JsonValue &params)
   {
     std::string address = params("address").getString();
@@ -566,7 +801,7 @@ namespace Sidechain
     std::string claimKey = "faucet_" + common::podToHex(pubKey);
     std::vector<uint8_t> claimed;
     if (m_storage.getMeta(claimKey, claimed) && !claimed.empty())
-      return R"({"status":"error","message":"already claimed"})";
+      throw std::runtime_error("Faucet already claimed by this address");
 
     uint64_t topHeight = m_storage.topBlockHeight();
     bool hasHistory = false;
@@ -586,7 +821,7 @@ namespace Sidechain
     }
 
     if (!hasHistory)
-      return R"({"status":"error","message":"address has no transaction history"})";
+      throw std::runtime_error("Address has no transaction history");
 
     uint64_t faucetAmount = SidechainConfig::FAUCET_AMOUNT;
     uint64_t currentBalance = 0;
@@ -623,7 +858,7 @@ namespace Sidechain
   std::string SidechainRpcServer::methodDexGetOrders(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "[]";
+      throw std::runtime_error("DEX engine not enabled");
     uint64_t baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
     uint64_t quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
     auto orders = m_dexEngine->getOrders(baseTokenId, quoteTokenId);
@@ -653,7 +888,7 @@ namespace Sidechain
   std::string SidechainRpcServer::methodDexGetTrades(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "[]";
+      throw std::runtime_error("DEX engine not enabled");
     uint64_t baseTokenId = static_cast<uint64_t>(params("baseTokenId").getInteger());
     uint64_t quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
     size_t limit = params.contains("limit") ? static_cast<size_t>(params("limit").getInteger()) : 50;
@@ -679,7 +914,7 @@ namespace Sidechain
   std::string SidechainRpcServer::methodDexGetAllTrades(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "[]";
+      throw std::runtime_error("DEX engine not enabled");
     size_t limit = params.contains("limit") ? static_cast<size_t>(params("limit").getInteger()) : 100;
     auto trades = m_dexEngine->getAllTrades(limit);
     std::string result = "[";
@@ -705,7 +940,8 @@ namespace Sidechain
   std::string SidechainRpcServer::methodDexSubmitOrder(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "false";
+      throw std::runtime_error("DEX engine not enabled");
+
     BoltDex::Order order;
     order.type = params("type").getString() == "buy" ? BoltDex::OrderType::Buy : BoltDex::OrderType::Sell;
     common::podFromHex(params("owner").getString(), order.owner);
@@ -713,27 +949,49 @@ namespace Sidechain
     order.quoteTokenId = static_cast<uint64_t>(params("quoteTokenId").getInteger());
     order.amount = static_cast<uint64_t>(params("amount").getInteger());
     order.price = static_cast<uint64_t>(params("price").getInteger());
-    if (m_dexEngine->submitOrder(order))
-      return "true";
-    return "false";
+
+    if (order.amount == 0)
+      throw std::runtime_error("Order amount must be greater than zero");
+    if (order.price == 0)
+      throw std::runtime_error("Order price must be greater than zero");
+
+    // Read the next ID before submission — submitOrder increments it internally
+    uint64_t nextId = m_dexEngine->getNextOrderId();
+
+    if (!m_dexEngine->submitOrder(order))
+      throw std::runtime_error("Insufficient escrow balance");
+
+    // The order that was just created has ID = (nextId before increment)
+    uint64_t assignedId = nextId;
+
+    return R"({"success":true,"orderId":)" + std::to_string(assignedId) +
+           R"(,"type":")" + std::string(order.type == BoltDex::OrderType::Buy ? "buy" : "sell") + R"(")"
+                                                                                                  R"(,"baseTokenId":)" +
+           std::to_string(order.baseTokenId) +
+           R"(,"quoteTokenId":)" + std::to_string(order.quoteTokenId) +
+           R"(,"amount":)" + std::to_string(order.amount) +
+           R"(,"price":)" + std::to_string(order.price) + "}";
   }
 
   std::string SidechainRpcServer::methodDexCancelOrder(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "false";
+      throw std::runtime_error("DEX engine not enabled");
+
     uint64_t orderId = static_cast<uint64_t>(params("orderId").getInteger());
     crypto::PublicKey owner;
     common::podFromHex(params("owner").getString(), owner);
-    if (m_dexEngine->cancelOrder(orderId, owner))
-      return "true";
-    return "false";
+
+    if (!m_dexEngine->cancelOrder(orderId, owner))
+      throw std::runtime_error("Order not found or not owned by sender");
+
+    return R"({"success":true,"orderId":)" + std::to_string(orderId) + "}";
   }
 
   std::string SidechainRpcServer::methodDexDeposit(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "{}";
+      throw std::runtime_error("DEX engine not enabled");
     crypto::PublicKey dexPub = m_dexEngine->getDexPublicKey();
     return R"({"dexAddress":")" + common::podToHex(dexPub) + R"("})";
   }
@@ -741,20 +999,28 @@ namespace Sidechain
   std::string SidechainRpcServer::methodDexWithdraw(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "false";
+      throw std::runtime_error("DEX engine not enabled");
+
     crypto::PublicKey owner;
     common::podFromHex(params("owner").getString(), owner);
     uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
     uint64_t amount = static_cast<uint64_t>(params("amount").getInteger());
-    if (m_dexEngine->withdraw(owner, tokenId, amount))
-      return "true";
-    return "false";
+
+    if (amount == 0)
+      throw std::runtime_error("Withdrawal amount must be greater than zero");
+
+    if (!m_dexEngine->withdraw(owner, tokenId, amount))
+      throw std::runtime_error("Insufficient escrow balance");
+
+    return R"({"success":true,"owner":")" + common::podToHex(owner) +
+           R"(","tokenId":)" + std::to_string(tokenId) +
+           R"(,"amount":)" + std::to_string(amount) + "}";
   }
 
   std::string SidechainRpcServer::methodDexGetEscrowBalance(const common::JsonValue &params)
   {
     if (!m_dexEngine)
-      return "0";
+      throw std::runtime_error("DEX engine not enabled");
     crypto::PublicKey owner;
     common::podFromHex(params("owner").getString(), owner);
     uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());

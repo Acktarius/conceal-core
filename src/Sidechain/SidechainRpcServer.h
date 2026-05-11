@@ -5,6 +5,9 @@
 #pragma once
 
 #include <memory>
+#include <functional>
+#include <vector>
+#include <mutex>
 
 #include "BoltDex.h"
 #include "SidechainTypes.h"
@@ -13,6 +16,8 @@
 #include "Common/JsonValue.h"
 #include "Logging/LoggerRef.h"
 #include "BoltHttp/BoltHttpServer.h"
+#include "BoltHttp/BoltWebSocket.h"
+#include "BoltHttp/BoltSse.h"
 
 namespace Sidechain
 {
@@ -36,8 +41,27 @@ namespace Sidechain
 
     void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_dexEngine = engine; }
 
+    // Access the underlying HTTP server for WebSocket/SSE setup
+    BoltHttp::Server *server() { return m_httpServer.get(); }
+
+    // Push a sidechain block event to all connected clients
+    void pushBlockEvent(uint64_t height, uint64_t txCount, size_t votes);
+
+    // Push a DEX trade event to all WebSocket clients
+    void pushDexTrade(const Sidechain::BoltDex::Trade &trade);
+
+    // Push a bridge deposit event
+    void pushBridgeDeposit(uint64_t amount, const std::string &destHex, const std::string &txHash);
+
   private:
     std::string handleJsonRpc(const std::string &body);
+
+    // WebSocket handler: manages real-time DEX order book subscriptions
+    void handleWebSocketConnection(BoltHttp::WebSocket &ws);
+
+    // Balance check helper for transfer and burn validation
+    bool checkBalance(const crypto::PublicKey &sender, uint64_t tokenId,
+                      uint64_t amount, uint64_t fee);
 
     // Account methods
     std::string methodGetBalance(const common::JsonValue &params);
@@ -58,6 +82,7 @@ namespace Sidechain
     std::string methodGetAssetRegistry(const common::JsonValue &params);
     std::string methodGetEquivalenceGroup(const common::JsonValue &params);
     std::string methodGetBridgeStatus(const common::JsonValue &params);
+    std::string methodBridgeUnlock(const common::JsonValue &params);
 
     // Legacy sidechain aliases
     std::string methodGetSidechainStatus(const common::JsonValue &params);
@@ -74,6 +99,10 @@ namespace Sidechain
     std::string methodDexDeposit(const common::JsonValue &params);
     std::string methodDexWithdraw(const common::JsonValue &params);
     std::string methodDexGetEscrowBalance(const common::JsonValue &params);
+
+    // Active WebSocket connections for real-time push
+    std::vector<BoltHttp::WebSocket *> m_wsClients;
+    std::mutex m_wsMutex;
 
     logging::LoggerRef m_logger;
     SidechainStorage &m_storage;

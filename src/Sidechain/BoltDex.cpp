@@ -393,6 +393,10 @@ namespace Sidechain
       if (m_tradeCallback)
         m_tradeCallback(trade);
 
+        // Push trade event to SSE/WebSocket clients
+      if (m_tradeEventCallback)
+        m_tradeEventCallback(trade);
+
       return true;
     }
 

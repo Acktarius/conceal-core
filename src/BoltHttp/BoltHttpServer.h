@@ -1,4 +1,4 @@
-// BoltHttpServer.h — Hybrid HTTP server with fiber I/O and thread pool
+// BoltHttpServer.h — Hybrid HTTP server with fiber I/O, WebSocket, and SSE
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 // Distributed under the MIT/X11 software license
 
@@ -6,6 +6,8 @@
 
 #include "BoltHttpRequest.h"
 #include "BoltHttpResponse.h"
+#include "BoltWebSocket.h"
+#include "BoltSse.h"
 #include "IExecutor.h"
 #include "ThreadPool.h"
 
@@ -26,6 +28,8 @@ namespace platform_system
 namespace BoltHttp
 {
   using RequestHandler = std::function<void(const Request &, Response &)>;
+  using WebSocketConnectHandler = std::function<void(WebSocket &)>;
+  using SseConnectHandler = std::function<void(SseConnection &)>;
 
   enum class WorkClass
   {
@@ -44,12 +48,20 @@ namespace BoltHttp
     void start(const std::string &bindIp, uint16_t port);
     void stop();
 
-    // Register handler with optional work classification (defaults to Auto)
+    // Register HTTP request handler
     void onRequest(RequestHandler handler, WorkClass cls = WorkClass::Auto);
+
+    // Register WebSocket upgrade handler (for /websocket or similar paths)
+    void onWebSocket(WebSocketConnectHandler handler);
+
+    // Register SSE stream handler (for /events or similar paths)
+    void onSse(SseConnectHandler handler);
+
+    // Access the SSE broadcaster for pushing events
+    SseBroadcaster &sseBroadcaster() { return m_sseBroadcaster; }
 
     // Add a path pattern that should always be treated as heavy work
     void markHeavy(const std::string &pathPrefix);
-
     // Add a path pattern that should always be treated as fast work
     void markFast(const std::string &pathPrefix);
 
@@ -77,6 +89,12 @@ namespace BoltHttp
 
     RequestHandler m_handler;
     WorkClass m_defaultClass = WorkClass::Auto;
+
+    // WebSocket and SSE handlers
+    WebSocketConnectHandler m_wsHandler;
+    SseConnectHandler m_sseHandler;
+    SseBroadcaster m_sseBroadcaster;
+    std::unordered_map<int, WebSocket *> m_wsConnections;
 
     // Path-based classification tables
     std::vector<std::string> m_heavyPaths;

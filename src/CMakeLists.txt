@@ -93,7 +93,8 @@ add_dependencies(SidechainLib version)
 
 # BoltRPC static library (for Conceal to link against)
 add_library(BoltRpcLib STATIC ${BOLTRPC_FILES})
-target_link_libraries(BoltRpcLib PUBLIC NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(BoltRpcLib PUBLIC Mnemonics NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+add_dependencies(BoltRpcLib version)
 
 add_executable(Daemon ${Daemon})
 add_executable(ConcealWallet ${ConcealWallet})
@@ -133,7 +134,7 @@ target_link_libraries(BoltClientWallet BoltSync BoltCore NodeRpcProxy Rpc Http S
   ${CMAKE_THREAD_LIBS_INIT}
 )
 
-target_link_libraries(BoltRPC BoltSync BoltCore BoltHttp NodeRpcProxy Rpc Http System CryptoNoteCore Serialization Logging
+target_link_libraries(BoltRPC BoltSync BoltCore BoltHttp Mnemonics NodeRpcProxy Rpc Http System CryptoNoteCore Serialization Logging
   -Wl,--start-group
       Common
       crypto

@@ -51,6 +51,10 @@ namespace BoltRPC
     // Public save method for auto-save timer — persists outputs AND keys
     bool saveWalletState();
 
+    // Access the underlying HTTP server for SSE/WebSocket setup
+    void setSseBroadcaster(BoltHttp::SseBroadcaster *broadcaster);
+    BoltHttp::Server *server() { return m_server.get(); }
+
   private:
     void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);
     std::string handleJsonRpc(const std::string &body);
@@ -67,6 +71,8 @@ namespace BoltRPC
     std::string methodLock(const common::JsonValue &params);
     std::string methodGetViewKey(const common::JsonValue &params);
     std::string methodGetSpendKey(const common::JsonValue &params);
+    std::string methodExportWallet(const common::JsonValue &params);
+    std::string methodGetWalletHeight(const common::JsonValue &params);
 
     // Mainchain
     std::string methodGetBalance(const common::JsonValue &params);
@@ -82,6 +88,7 @@ namespace BoltRPC
     std::string methodSendFusionTransaction(const common::JsonValue &params);
     std::string methodReset(const common::JsonValue &params);
     std::string methodSave(const common::JsonValue &params);
+    std::string methodGetNetworkHeight(const common::JsonValue &params);
 
     // Sidechain
     std::string methodGetSidechainStatus(const common::JsonValue &params);
@@ -125,6 +132,9 @@ namespace BoltRPC
     bool m_locked = false;
     crypto::SecretKey m_savedViewKey;
     crypto::SecretKey m_savedSpendKey;
+
+    // SSE support
+    BoltHttp::SseBroadcaster *m_sseBroadcaster = nullptr;
   };
 
 } // namespace BoltRPC

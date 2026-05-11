@@ -233,6 +233,40 @@ namespace Conceal
     rpcServer.start(cfg.rpcBindIp, cfg.walletBindPort, cfg.rpcThreads);
     logger(logging::INFO) << "Wallet RPC on " << cfg.rpcBindIp << ":" << cfg.walletBindPort;
 
+    // Wire SSE broadcaster for real-time push to GUI
+    rpcServer.setSseBroadcaster(&rpcServer.server()->sseBroadcaster());
+
+    // SSE keep-alive ping every 30 seconds to prevent connection drops
+    BoltHttp::SseBroadcaster *broadcaster = &rpcServer.server()->sseBroadcaster();
+    std::thread sseKeepAlive([broadcaster, &stopRequested]()
+                             {
+      while (!stopRequested)
+      {
+          for (int i = 0; i < 30 && !stopRequested; ++i)
+              std::this_thread::sleep_for(std::chrono::seconds(1));
+          if (!stopRequested)
+              broadcaster->pingAll();
+      } });
+
+    // Periodic status broadcast via SSE every 2 seconds
+    std::thread statusBroadcast([broadcaster, &status, &stopRequested]()
+                                {
+      while (!stopRequested)
+      {
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+          if (!stopRequested)
+          {
+              std::ostringstream data;
+              data << "{"
+                   << R"("mainchainHeight":)" << status.walletHeight << ","
+                   << R"("availableBalance":)" << status.availableBalance << ","
+                   << R"("lockedBalance":)" << status.lockedBalance << ","
+                   << R"("address":")" << status.getAddress() << R"(")"
+                   << "}";
+              broadcaster->broadcast("status", data.str());
+          }
+      } });
+
     // Auto-save timer: periodically persist wallet state without RPC calls
     std::thread autoSaveThread;
     if (cfg.walletAutoSaveInterval > 0)
@@ -241,7 +275,6 @@ namespace Conceal
                                    {
         while (!stopRequested)
         {
-          // Sleep in 1-second chunks so we can respond to shutdown quickly
           for (uint32_t i = 0; i < cfg.walletAutoSaveInterval && !stopRequested; ++i)
             std::this_thread::sleep_for(std::chrono::seconds(1));
           if (!stopRequested)
@@ -268,6 +301,10 @@ namespace Conceal
     }
 
     // Graceful shutdown
+    if (sseKeepAlive.joinable())
+      sseKeepAlive.join();
+    if (statusBroadcast.joinable())
+      statusBroadcast.join();
     if (autoSaveThread.joinable())
       autoSaveThread.join();
     if (syncMonitor)

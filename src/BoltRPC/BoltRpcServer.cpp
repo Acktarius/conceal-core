@@ -11,6 +11,7 @@
 #include "BoltHttp/BoltHttpClient.h"
 #include "BoltSync/CryptoHelpers.h"
 #include "StateManager.h"
+#include "Mnemonics/Mnemonics.h"
 #include "version.h"
 
 #include <sstream>
@@ -22,6 +23,27 @@ namespace BoltRPC
   // Helpers
   namespace
   {
+    std::string base64Encode(const std::string &input)
+    {
+      static const char *chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      std::string result;
+      int val = 0, valb = -6;
+      for (unsigned char c : input)
+      {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0)
+        {
+          result.push_back(chars[(val >> valb) & 0x3F]);
+          valb -= 6;
+        }
+      }
+      if (valb > -6)
+        result.push_back(chars[((val << 8) >> (valb + 8)) & 0x3F]);
+      while (result.size() % 4)
+        result.push_back('=');
+      return result;
+    }
 
     std::string makeResult(const std::string &resultJson, const common::JsonValue &id)
     {
@@ -85,6 +107,11 @@ namespace BoltRPC
     m_externalSyncedHeight = syncedHeight;
   }
 
+  void BoltRpcServer::setSseBroadcaster(BoltHttp::SseBroadcaster *broadcaster)
+  {
+    m_sseBroadcaster = broadcaster;
+  }
+
   void BoltRpcServer::onNewOutputs(const std::vector<BoltCore::OutputInfo> &outputs,
                                    uint32_t newHeight)
   {
@@ -93,6 +120,15 @@ namespace BoltRPC
     m_syncedHeight.store(newHeight, std::memory_order_relaxed);
     m_logger(logging::INFO) << "Synced to height " << newHeight
                             << " (" << outputs.size() << " new outputs)";
+
+    // Push sync event to SSE clients
+    if (m_sseBroadcaster)
+    {
+      std::ostringstream data;
+      data << R"({"newHeight":)" << newHeight
+           << R"(,"newOutputs":)" << outputs.size() << "}";
+      m_sseBroadcaster->broadcast("walletSync", data.str());
+    }
   }
 
   uint32_t BoltRpcServer::getNodeHeight() const
@@ -173,6 +209,10 @@ namespace BoltRPC
         result = methodGetViewKey(params);
       else if (method == "getSpendKey")
         result = methodGetSpendKey(params);
+      else if (method == "getWalletHeight")
+        result = methodGetWalletHeight(params);
+      else if (method == "exportWallet")
+        result = methodExportWallet(params);
       // Mainchain
       else if (method == "getBalance")
         result = methodGetBalance(params);
@@ -200,6 +240,8 @@ namespace BoltRPC
         result = methodReset(params);
       else if (method == "save")
         result = methodSave(params);
+      else if (method == "getNetworkHeight")
+        result = methodGetNetworkHeight(params);
       // Sidechain
       else if (method == "getSidechainStatus")
         result = methodGetSidechainStatus(params);
@@ -308,12 +350,10 @@ namespace BoltRPC
     crypto::generate_keys(viewPub, viewKey);
     crypto::generate_keys(spendPub, spendKey);
 
-    // Reconstruct wallet with new keys
     m_wallet.~Wallet();
     new (&m_wallet) BoltCore::Wallet(viewKey, spendKey, viewPub, spendPub, m_node, m_currency);
     m_address = m_currency.accountAddressAsString({spendPub, viewPub});
 
-    // Save keys for lock/unlock cycle
     m_savedViewKey = viewKey;
     m_savedSpendKey = spendKey;
     m_locked = false;
@@ -321,11 +361,23 @@ namespace BoltRPC
     std::string viewKeyHex = common::podToHex(viewKey);
     std::string spendKeyHex = common::podToHex(spendKey);
 
+    // Generate mnemonic seed phrase from the spend key (25 words)
+    std::string mnemonic;
+    try
+    {
+      mnemonic = mnemonics::privateKeyToMnemonic(spendKey);
+    }
+    catch (...)
+    {
+      mnemonic = "";
+    }
+
     std::ostringstream ss;
     ss << R"({"status":"ok")"
        << R"(,"address":")" << m_address << R"(")"
        << R"(,"viewKey":")" << viewKeyHex << R"(")"
        << R"(,"spendKey":")" << spendKeyHex << R"(")"
+       << R"(,"mnemonic":")" << mnemonic << R"(")"
        << "}";
 
     if (m_stateManager && m_outputs)
@@ -333,10 +385,23 @@ namespace BoltRPC
       uint32_t h = m_externalSyncedHeight
                        ? m_externalSyncedHeight->load(std::memory_order_relaxed)
                        : m_syncedHeight.load(std::memory_order_relaxed);
-      // Save keys alongside outputs for unlock support
       m_stateManager->save(*m_outputs, h, viewKeyHex, spendKeyHex);
     }
 
+    return ss.str();
+  }
+
+  std::string BoltRpcServer::methodGetWalletHeight(const common::JsonValue &)
+  {
+    uint32_t walletHeight = m_syncedHeight.load(std::memory_order_relaxed);
+    uint32_t outputCount = 0;
+    {
+      std::lock_guard<std::mutex> lock(m_walletMutex);
+      outputCount = static_cast<uint32_t>(m_wallet.getOutputs().size());
+    }
+    std::ostringstream ss;
+    ss << R"({"walletHeight":)" << walletHeight
+       << R"(,"outputCount":)" << outputCount << "}";
     return ss.str();
   }
 
@@ -405,6 +470,33 @@ namespace BoltRPC
       return R"({"spendKey":""})";
 
     return R"({"spendKey":")" + common::podToHex(m_savedSpendKey) + R"("})";
+  }
+
+  std::string BoltRpcServer::methodExportWallet(const common::JsonValue &)
+  {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first.");
+
+    std::string viewKeyHex = common::podToHex(m_savedViewKey);
+    std::string spendKeyHex = m_wallet.getType() == BoltCore::WalletType::ViewOnly
+                                  ? ""
+                                  : common::podToHex(m_savedSpendKey);
+
+    uint32_t walletHeight = m_syncedHeight.load(std::memory_order_relaxed);
+
+    // Build a JSON blob and base64 encode it for easy copy-paste
+    std::ostringstream blob;
+    blob << R"({"version":1,"viewKey":")" << viewKeyHex << R"(")"
+         << R"(,"spendKey":")" << spendKeyHex << R"(")"
+         << R"(,"walletHeight":)" << walletHeight
+         << R"(,"address":")" << m_address << R"("})";
+
+    std::string jsonBlob = blob.str();
+    std::string encoded = base64Encode(jsonBlob);
+
+    std::ostringstream ss;
+    ss << R"({"wallet":")" << encoded << R"("})";
+    return ss.str();
   }
 
   // =========================================================================
@@ -544,11 +636,37 @@ namespace BoltRPC
     std::lock_guard<std::mutex> lock(m_walletMutex);
     auto outputs = m_wallet.getOutputs();
 
+    // Pagination support
+    uint32_t firstBlockIndex = params.contains("firstBlockIndex")
+                                   ? static_cast<uint32_t>(params("firstBlockIndex").getInteger())
+                                   : 0;
+    uint32_t blockCount = params.contains("blockCount")
+                              ? static_cast<uint32_t>(params("blockCount").getInteger())
+                              : 0;
+
+    uint32_t totalItems = static_cast<uint32_t>(outputs.size());
+
+    // Sort by block height descending (newest first) for predictable pagination
+    std::sort(outputs.begin(), outputs.end(),
+              [](const BoltCore::OutputInfo &a, const BoltCore::OutputInfo &b)
+              { return a.blockHeight > b.blockHeight; });
+
     std::ostringstream ss;
     ss << R"({"items":[)";
     bool first = true;
+    uint32_t index = 0;
     for (const auto &out : outputs)
     {
+      // Skip items before the requested start index
+      if (index < firstBlockIndex)
+      {
+        ++index;
+        continue;
+      }
+      // Stop if we've reached the requested page size
+      if (blockCount > 0 && (index - firstBlockIndex) >= blockCount)
+        break;
+
       if (!first)
         ss << ",";
       first = false;
@@ -558,8 +676,11 @@ namespace BoltRPC
          << R"(,"spent":)" << (out.spent ? "true" : "false")
          << R"(,"isDeposit":)" << (out.isDeposit ? "true" : "false")
          << "}";
+      ++index;
     }
-    ss << "]}";
+    ss << R"(],"totalItems":)" << totalItems
+       << R"(,"firstBlockIndex":)" << firstBlockIndex
+       << R"(,"blockCount":)" << (blockCount > 0 ? blockCount : totalItems) << "}";
     return ss.str();
   }
 
@@ -712,6 +833,21 @@ namespace BoltRPC
       return m_stateManager->save(*m_outputs, height, vkHex, skHex);
     }
     return false;
+  }
+
+  std::string BoltRpcServer::methodGetNetworkHeight(const common::JsonValue &)
+  {
+    uint32_t height = 0;
+    try
+    {
+      height = m_node.getLastKnownBlockHeight();
+    }
+    catch (...)
+    {
+    }
+    std::ostringstream ss;
+    ss << R"({"networkHeight":)" << height << "}";
+    return ss.str();
   }
 
   // Sidechain methods
@@ -878,5 +1014,13 @@ namespace BoltRPC
       throw std::runtime_error(result.error);
 
     m_logger(logging::INFO) << "Transaction completed: " << result.txHash;
+
+    // Push transaction event to SSE clients
+    if (m_sseBroadcaster)
+    {
+      std::ostringstream data;
+      data << R"({"txHash":")" << result.txHash << R"("})";
+      m_sseBroadcaster->broadcast("transaction", data.str());
+    }
   }
 } // namespace BoltRPC

@@ -31,6 +31,9 @@ namespace Sidechain
     using BlockCommittedCallback = std::function<void(const Block &)>;
     using BridgeBurnCallback = std::function<void(const Transaction &)>;
 
+    // Callback for real-time push: height, txCount, voteCount
+    using BlockEventCallback = std::function<void(uint64_t height, uint64_t txCount, size_t votes)>;
+
     BftConsensus(SidechainStorage &storage,
                  const ValidatorInfo &self,
                  GossipManager &gossip);
@@ -40,6 +43,9 @@ namespace Sidechain
 
     // Register callback for committed blocks
     void onBlockCommitted(BlockCommittedCallback callback);
+
+    // Register callback for SSE/WebSocket block push
+    void onBlockEvent(BlockEventCallback callback) { m_blockEventCallback = std::move(callback); }
 
     // Handle incoming gossip message
     void handleMessage(const std::vector<uint8_t> &data, const std::string &fromIp);
@@ -77,6 +83,7 @@ namespace Sidechain
     GossipManager &m_gossip;
     BlockCommittedCallback m_onBlockCommitted;
     BridgeBurnCallback m_onBridgeBurn;
+    BlockEventCallback m_blockEventCallback;
 
     std::atomic<uint64_t> m_currentHeight{0};
     bool m_validatorsSynced = false;

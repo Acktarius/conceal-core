@@ -63,14 +63,19 @@ namespace Sidechain
       // Get escrow balance for an address
       uint64_t getEscrowBalance(const crypto::PublicKey &owner, uint64_t tokenId) const;
 
-      // Set callback for when a trade executes
+      // Set callback for when a trade executes (internal use)
       void onTrade(TradeCallback callback);
+
+      // Set callback for SSE/WebSocket trade push (real-time to GUI)
+      void onTradeEvent(TradeCallback callback) { m_tradeEventCallback = std::move(callback); }
 
       // Process all pending settlements
       void processSettlements();
 
       // Set the trading fee percentage (e.g. 0.5 = 0.5%)
       void setTradingFee(double feePercent) { m_tradingFee = feePercent; }
+
+      uint64_t getNextOrderId() const { return m_nextOrderId; }
 
     private:
       void matchOrders(uint64_t baseTokenId, uint64_t quoteTokenId);
@@ -85,6 +90,7 @@ namespace Sidechain
       uint64_t m_nextTradeId = 1;
       mutable std::mutex m_mutex;
       TradeCallback m_tradeCallback;
+      TradeCallback m_tradeEventCallback;
 
       double m_tradingFee = 0.0;
 

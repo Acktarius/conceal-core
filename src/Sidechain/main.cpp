@@ -326,8 +326,16 @@ int main(int argc, char *argv[])
   logger(logging::INFO) << "RPC server listening on " << cfg.bindIp << ":" << cfg.bindPort;
 
   if (dexEngine)
-  {
     rpcServer.setDexEngine(dexEngine.get());
+
+  // Wire real-time event push from consensus and DEX to WebSocket/SSE clients
+  validator.onSseBlock([&rpcServer](uint64_t height, uint64_t txCount, size_t votes)
+                       { rpcServer.pushBlockEvent(height, txCount, votes); });
+
+  if (dexEngine)
+  {
+    dexEngine->onTradeEvent([&rpcServer](const Sidechain::BoltDex::Trade &trade)
+                            { rpcServer.pushDexTrade(trade); });
   }
 
   // Daemon connection (for bridge)
@@ -419,10 +427,13 @@ int main(int argc, char *argv[])
     // Wire up deposit callback
     bridgeWatcher->start([&](const Sidechain::Transaction &depositTx)
                          {
+      std::string destHex = common::podToHex(depositTx.to);
+      std::string txHashHex = common::podToHex(depositTx.txHash);
       logger(logging::INFO) << "Bridge deposit detected: " << depositTx.amount
                             << " CCX locked → sidechain destination: "
-                            << common::podToHex(depositTx.to).substr(0, 16) << "...";
-      validator.submitTransaction(depositTx); });
+                            << destHex.substr(0, 16) << "...";
+      validator.submitTransaction(depositTx);
+      rpcServer.pushBridgeDeposit(depositTx.amount, destHex, txHashHex); });
 
     // Wire up burn callback — when sidechain burns tokens, queue CCX unlock
     validator.onBridgeBurn([&bridgeWatcher, &logger](const Sidechain::Transaction &burnTx)

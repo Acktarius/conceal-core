@@ -17,6 +17,8 @@
 #include "P2p/NetNodeConfig.h"
 #include "Rpc/RpcServer.h"
 #include "Rpc/RpcServerConfig.h"
+#include "BoltHttp/BoltHttpServer.h"
+#include "BoltHttp/BoltSse.h"
 
 #ifdef HAVE_MDBX
 #include "Storage/MDBXBlockchainStorage.h"
@@ -158,26 +160,74 @@ namespace Conceal
       return;
     }
 
-    // Start RPC
+    // Start legacy RPC server (required for bridge watcher + external tools)
     rpcServer.start(rpcConfig.bindIp, rpcConfig.bindPort);
     rpcServer.enableCors("*");
+
+    // Start BoltHttp SSE server for mainchain event push to GUI
+    uint16_t ssePort = cfg.rpcBindPort + 100;
+    BoltHttp::Server mainchainHttp(nullptr, 1);
+    mainchainHttp.start(cfg.rpcBindIp, ssePort);
+    logger(logging::INFO) << "Mainchain SSE on " << cfg.rpcBindIp << ":" << ssePort;
+
+    auto &sseBroadcaster = mainchainHttp.sseBroadcaster();
+
+    // Send current status immediately on SSE connect
+    mainchainHttp.onSse([&status](BoltHttp::SseConnection &conn)
+                        {
+      std::ostringstream data;
+      data << R"({"localHeight":)" << status.localHeight
+           << R"(,"networkHeight":)" << status.networkHeight
+           << R"(,"peerCount":)" << status.peerCount
+           << R"(,"synced":)" << (status.synced ? "true" : "false")
+           << "}";
+      conn.sendEvent("status", data.str()); });
+
+    // SSE keep-alive ping every 30 seconds
+    std::thread sseKeepAlive([&sseBroadcaster, &stopRequested]()
+                             {
+      while (!stopRequested)
+      {
+        for (int i = 0; i < 30 && !stopRequested; ++i)
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!stopRequested)
+          sseBroadcaster.pingAll();
+      } });
+
+    // Periodic mainchain status push every 2 seconds
+    std::thread mainchainStatusPush([&sseBroadcaster, &status, &stopRequested]()
+                                    {
+      while (!stopRequested)
+      {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (!stopRequested)
+        {
+          std::ostringstream data;
+          data << R"({"localHeight":)" << status.localHeight
+               << R"(,"networkHeight":)" << status.networkHeight
+               << R"(,"peerCount":)" << status.peerCount
+               << R"(,"synced":)" << (status.synced ? "true" : "false")
+               << "}";
+          sseBroadcaster.broadcast("mainchainStatus", data.str());
+        }
+      } });
 
     // Run P2P in background thread
     std::thread p2pThread([&]()
                           { p2psrv.run(); });
 
     // Status update loop
-   while (!stopRequested)
+    while (!stopRequested)
     {
       uint32_t localHeight = 0;
       crypto::Hash topId;
       ccore.get_blockchain_top(localHeight, topId);
 
-      status.localHeight = localHeight;          // MainchainStatus has this
-      status.networkHeight = cprotocol.getObservedHeight();  // MainchainStatus has this
-      status.peerCount = cprotocol.getPeerCount();           // MainchainStatus has this
+      status.localHeight = localHeight;
+      status.networkHeight = cprotocol.getObservedHeight();
+      status.peerCount = cprotocol.getPeerCount();
       status.synced = cprotocol.isSynchronized();
-      status.setHash(common::podToHex(topId));    // MainchainStatus has this
+      status.setHash(common::podToHex(topId));
 
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
@@ -191,6 +241,11 @@ namespace Conceal
     ccore.saveBlockchain();
 
     rpcServer.stop();
+    mainchainHttp.stop();
+    if (sseKeepAlive.joinable())
+      sseKeepAlive.join();
+    if (mainchainStatusPush.joinable())
+      mainchainStatusPush.join();
     ccore.deinit();
     p2psrv.deinit();
     ccore.set_cryptonote_protocol(nullptr);

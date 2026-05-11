@@ -516,6 +516,10 @@ namespace Sidechain
 
       uint64_t txCount = it->second.block.transactions.size();
 
+      // Push event to SSE/WebSocket clients
+      if (m_blockEventCallback)
+        m_blockEventCallback(it->second.block.header.height, txCount, it->second.votes.size());
+
       std::cout << "Block " << it->second.block.header.height
                 << " committed: " << txCount << " txs"
                 << " commit=" << commitTime << "ms"
