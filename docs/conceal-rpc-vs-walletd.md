@@ -117,3 +117,16 @@ If something goes wrong and the wallet gets out of sync, they click a Reset butt
 Before, hosting a webwallet meant running a full daemon, managing wallet files per user, dealing with crash recovery, and accepting that first time users would stare at a progress bar for hours. Support requests were constant: why is it slow, why did it crash, why do I have to start over.
 
 Now, hosting a webwallet means running three small binaries (daemon, sidechain, conceal-rpc) and writing a frontend that makes HTTP requests to a single port. First time users are using their wallet within seconds of arriving. Returning users are in instantly. The only thing the hosting team needs to manage is keeping the blockchain synced on the server, which happens independently of any user's wallet state.
+
+## About threads
+
+The `--rpc-threads` flag only affects the HTTP server inside `conceal-rpc`. It controls how many worker threads handle incoming `JSON-RPC` requests from the GUI.
+
+It does not:
+- Increase the number of connections to the daemon. There is only one connection to `conceald`, regardless of RPC threads.
+- Increase the number of connections to the sidechain. There is only one connection to `conceal-side`.
+- Make `BoltSync` scan faster; that is controlled by `--threads` (scan threads), which is a separate flag.
+- Strain any remote node. The daemon connection is the same lightweight RPC client whether you have 1 or 16 RPC threads.
+
+For a single user desktop wallet, 1 RPC thread is plenty. More threads would only be useful if you were serving many simultaneous users from a single `conceal-rpc` instance, like a web wallet backend handling hundreds of concurrent requests.
+
