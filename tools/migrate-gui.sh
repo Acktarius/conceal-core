@@ -12,7 +12,7 @@ APP_TITLE="Conceal MDBX Migration Tool"
 START_DAEMON=false
 DAEMON_FLAGS=""
 SIZE_FLAGS=""
-EXTRA_FLAGS=""
+# EXTRA_FLAGS=""  # future: optional extra flags (see commented zenity block below)
 
 #Couleurs
 case "$TERM" in
@@ -216,12 +216,14 @@ main() {
             ;;
     esac
 
-    EXTRA_FLAGS=""
-    if zenity --question \
-        --title="$APP_TITLE" \
-        --text="Do you want to migrate in safe mode?"; then
-        EXTRA_FLAGS="--safe-mode"
-    fi
+    # Future use: prompt for extra migration arguments. Restore EXTRA_FLAGS init at top,
+    # the "Extra flags" line in SUMMARY, and ${EXTRA_FLAGS:-} on the conceald-migrate line.
+    # EXTRA_FLAGS=""
+    # if zenity --question \
+    #     --title="$APP_TITLE" \
+    #     --text="Do you want to migrate in safe mode?"; then
+    #     EXTRA_FLAGS="--safe-mode"
+    # fi
 
     START_MODE=$(
         zenity --list \
@@ -265,8 +267,9 @@ main() {
     SUMMARY="Old directory: $OLD_DIR
 New directory: $NEW_DIR
 Migration flags: ${SIZE_FLAGS:-default (128 GB)}
-Extra flags: ${EXTRA_FLAGS:-none}
 Auto-start daemon: $START_DAEMON"
+    # Future: add to SUMMARY when extra flag prompt is restored:
+    # Extra flags: ${EXTRA_FLAGS:-none}
 
     if [ "$START_DAEMON" = true ] && [ -n "$DAEMON_FLAGS" ]; then
         SUMMARY="$SUMMARY
@@ -283,7 +286,8 @@ Daemon flags: $DAEMON_FLAGS"
     echo -e "\n ${WHITE}--- conceald-migrate (live output) ---${TURNOFF}\n"
 
     set +e
-    ./conceald-migrate --old-dir "$OLD_DIR" --new-dir "$NEW_DIR" ${SIZE_FLAGS:-} ${EXTRA_FLAGS:-}
+    ./conceald-migrate --old-dir "$OLD_DIR" --new-dir "$NEW_DIR" ${SIZE_FLAGS:-}
+    # Future: append ${EXTRA_FLAGS:-} when extra flag prompt is restored
     MIGRATE_EXIT=$?
     set -e
 

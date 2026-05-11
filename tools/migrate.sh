@@ -38,6 +38,17 @@ if [ ! -d "$OLD_DIR" ]; then
     exit 1
 fi
 
+if [ ! -f "$OLD_DIR/blocks.dat" ] || [ ! -f "$OLD_DIR/blockindexes.dat" ]; then
+    echo "Error: old directory must contain the legacy blockchain files:"
+    echo ""
+    echo "$OLD_DIR"
+    echo "├── blocks.dat"
+    echo "└── blockindexes.dat"
+    echo ""
+    echo "One or both files are missing."
+    exit 1
+fi
+
 echo ""
 
 # Prompt for new MDBX directory
