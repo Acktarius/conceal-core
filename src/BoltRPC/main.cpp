@@ -54,22 +54,7 @@ struct Config
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("BoltRPC — Conceal RPC Wallet (walletd replacement)");
-  desc.add_options()
-    ("help,h", "Show help")
-    ("view-key", po::value<std::string>()->default_value(""), "64-char hex private view key (optional at startup)")
-    ("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")
-    ("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")
-    ("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")
-    ("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")
-    ("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")
-    ("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")
-    ("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")
-    ("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")
-    ("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")
-    ("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")
-    ("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")
-    ("testnet", po::bool_switch(), "Run in testnet mode")
-    ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count");
+  desc.add_options()("help,h", "Show help")("view-key", po::value<std::string>()->default_value(""), "64-char hex private view key (optional at startup)")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")("testnet", po::bool_switch(), "Run in testnet mode")("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count");
 
   po::variables_map vm;
   try
@@ -285,6 +270,10 @@ int main(int argc, char *argv[])
   // Wire up StateManager so save() RPC can persist wallet state
   rpcServer.setStateManager(&stateManager, &outputInfos, &lastScannedHeight);
 
+  // Pass the data directory to the RPC server so importWallet can start sync
+  if (!cfg.dataDir.empty())
+    rpcServer.setDataDir(cfg.dataDir);
+
   // Connect to sidechain if configured
   if (!cfg.sidechainHost.empty())
   {
@@ -296,25 +285,11 @@ int main(int argc, char *argv[])
     logger(logging::INFO) << "No sidechain configured. Use --sidechain-host to enable sidechain features.";
   }
 
-  // Incremental sync monitor (only if keys provided)
-  std::unique_ptr<BoltRPC::SyncMonitor> syncMonitor;
-
+  // If keys were provided at startup, begin incremental sync now
   if (hasViewKey && !cfg.dataDir.empty())
   {
-    uint32_t startHeight = lastScannedHeight.load(std::memory_order_relaxed);
-    syncMonitor.reset(new BoltRPC::SyncMonitor(
-        node, viewKey, viewPub, hasSpendKey ? &spendKey : nullptr,
-        cfg.dataDir, startHeight,
-        [&](const std::vector<BoltCore::OutputInfo> &newOuts, uint32_t newHeight)
-        {
-          rpcServer.onNewOutputs(newOuts, newHeight);
-          for (const auto &o : newOuts)
-            outputInfos.push_back(o);
-          lastScannedHeight.store(newHeight, std::memory_order_relaxed);
-          stateManager.save(outputInfos, newHeight);
-        }));
-
-    syncMonitor->start();
+    rpcServer.startSync(cfg.dataDir, viewKey, viewPub,
+                        hasSpendKey ? &spendKey : nullptr);
   }
 
   rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
@@ -348,11 +323,6 @@ int main(int argc, char *argv[])
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
   logger(logging::INFO) << "Shutting down...";
-  if (syncMonitor)
-  {
-    syncMonitor->stop();
-    stateManager.save(outputInfos, syncMonitor->lastScannedHeight());
-  }
   rpcServer.stop();
   node.shutdown();
   logger(logging::INFO) << "BoltRPC stopped";

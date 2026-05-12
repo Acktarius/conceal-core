@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <functional>
 
 #include "BoltHttp/BoltHttpServer.h"
 #include "BoltCore/BoltCore.h"
@@ -19,8 +20,8 @@
 
 namespace BoltRPC
 {
-
   class StateManager;
+  class SyncMonitor;
 
   class BoltRpcServer
   {
@@ -54,7 +55,16 @@ namespace BoltRPC
     // Access the underlying HTTP server for SSE/WebSocket setup
     void setSseBroadcaster(BoltHttp::SseBroadcaster *broadcaster);
     BoltHttp::Server *server() { return m_server.get(); }
+
     void setSyncedHeight(uint32_t height) { m_syncedHeight.store(height, std::memory_order_relaxed); }
+
+    // Start incremental sync after wallet import (if not started at boot)
+    using OutputCallback = std::function<void(const std::vector<BoltCore::OutputInfo> &, uint32_t)>;
+    void startSync(const std::string &dataDir,
+                   const crypto::SecretKey &viewKey,
+                   const crypto::PublicKey &viewPub,
+                   const crypto::SecretKey *spendKey);
+    void setDataDir(const std::string &dataDir) { m_dataDir = dataDir; }
 
   private:
     void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);
@@ -136,6 +146,14 @@ namespace BoltRPC
 
     // SSE support
     BoltHttp::SseBroadcaster *m_sseBroadcaster = nullptr;
+
+    // Sync monitor (may be started after boot via importWallet RPC)
+    std::unique_ptr<SyncMonitor> m_syncMonitor;
+    std::string m_dataDir;
+    crypto::SecretKey m_syncViewKey;
+    crypto::PublicKey m_syncViewPub;
+    bool m_hasSpendKeyForSync = false;
+    crypto::SecretKey m_syncSpendKey;
   };
 
 } // namespace BoltRPC

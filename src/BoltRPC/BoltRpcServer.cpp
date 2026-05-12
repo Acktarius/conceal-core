@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "BoltRpcServer.h"
+#include "SyncMonitor.h"
 #include "Rpc/JsonRpc.h"
 #include "Common/JsonValue.h"
 #include "Common/StringTools.h"
@@ -336,6 +337,16 @@ namespace BoltRPC
                        : m_syncedHeight.load(std::memory_order_relaxed);
       // Save keys alongside outputs for unlock support
       m_stateManager->save(*m_outputs, h, viewKeyHex, spendKeyHex);
+    }
+
+    // Start sync monitor if data directory is configured
+    if (!m_dataDir.empty() && !m_locked)
+    {
+      startSync(m_dataDir, m_savedViewKey,
+                m_wallet.getViewPublicKey(),
+                m_wallet.getType() == BoltCore::WalletType::ViewOnly
+                    ? nullptr
+                    : &m_savedSpendKey);
     }
 
     return R"({"status":"ok","address":")" + m_address + R"("})";
@@ -1022,5 +1033,51 @@ namespace BoltRPC
       data << R"({"txHash":")" << result.txHash << R"("})";
       m_sseBroadcaster->broadcast("transaction", data.str());
     }
+  }
+
+  void BoltRpcServer::startSync(const std::string &dataDir,
+                                const crypto::SecretKey &viewKey,
+                                const crypto::PublicKey &viewPub,
+                                const crypto::SecretKey *spendKey)
+  {
+    if (m_syncMonitor)
+      return; // already running
+
+    m_dataDir = dataDir;
+    m_syncViewKey = viewKey;
+    m_syncViewPub = viewPub;
+    if (spendKey)
+    {
+      m_hasSpendKeyForSync = true;
+      m_syncSpendKey = *spendKey;
+    }
+
+    uint32_t startHeight = m_syncedHeight.load(std::memory_order_relaxed);
+
+    m_syncMonitor.reset(new SyncMonitor(
+        m_node, viewKey, viewPub, spendKey, dataDir, startHeight,
+        [this](const std::vector<BoltCore::OutputInfo> &newOuts, uint32_t newHeight)
+        {
+          onNewOutputs(newOuts, newHeight);
+          if (m_outputs)
+          {
+            for (const auto &o : newOuts)
+              m_outputs->push_back(o);
+          }
+          if (m_stateManager && m_outputs)
+          {
+            uint32_t height = m_externalSyncedHeight
+                                  ? m_externalSyncedHeight->load(std::memory_order_relaxed)
+                                  : m_syncedHeight.load(std::memory_order_relaxed);
+            m_stateManager->save(*m_outputs, height,
+                                 m_locked ? "" : common::podToHex(m_savedViewKey),
+                                 (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
+                                     ? ""
+                                     : common::podToHex(m_savedSpendKey));
+          }
+        }));
+
+    m_syncMonitor->start();
+    m_logger(logging::INFO) << "Sync monitor started from height " << startHeight;
   }
 } // namespace BoltRPC
