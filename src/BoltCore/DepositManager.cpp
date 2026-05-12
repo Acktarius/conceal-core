@@ -79,8 +79,7 @@ namespace BoltCore
     }
 
     // The caller handles signing and relaying
-    crypto::Hash txHash = tx->getTransactionHash();
-    result.txHash = common::podToHex(txHash);
+    result.txHash = common::podToHex(tx->getTransactionHash());
     result.fee = fee;
     result.success = true;
 
@@ -128,8 +127,7 @@ namespace BoltCore
     for (auto a : outputAmounts)
       tx->addOutput(a, m_mainAddress);
 
-    crypto::Hash txHash = tx->getTransactionHash();
-    result.txHash = common::podToHex(txHash);
+    result.txHash = common::podToHex(tx->getTransactionHash());
     result.fee = fee;
     result.success = true;
 

@@ -47,6 +47,7 @@ namespace BoltCore
       std::unique_ptr<cn::ITransaction> transaction;
       crypto::SecretKey transactionSecretKey;
       std::vector<OutputInfo> selectedOutputs;
+      std::vector<cn::AccountPublicAddress> destAddresses;
       uint64_t changeAmount;
       uint64_t fee;
       bool success;

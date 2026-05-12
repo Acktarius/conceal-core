@@ -81,7 +81,21 @@ namespace BoltCore
     crypto::SecretKey txKey;
     tx->getTransactionSecretKey(txKey);
 
-    // Shuffle and sort outputs
+    // Parse all destination addresses first so pointers stay valid
+    result.destAddresses.clear();
+    result.destAddresses.reserve(params.transfers.size());
+    for (const auto &t : params.transfers)
+    {
+      cn::AccountPublicAddress destAddr;
+      if (!m_currency.parseAccountAddressString(t.address, destAddr))
+      {
+        result.error = "Invalid destination address: " + t.address;
+        return result;
+      }
+      result.destAddresses.push_back(destAddr);
+    }
+
+    // Build output list with correct destination addresses
     struct AmountToAddress
     {
       const cn::AccountPublicAddress *addr;
@@ -89,14 +103,12 @@ namespace BoltCore
     };
     std::vector<AmountToAddress> outputs;
 
-    for (const auto &t : params.transfers)
+    for (size_t i = 0; i < params.transfers.size(); ++i)
     {
       std::vector<uint64_t> amounts;
-      decomposeAmount(t.amount, m_currency.defaultDustThreshold(), amounts);
+      decomposeAmount(params.transfers[i].amount, m_currency.defaultDustThreshold(), amounts);
       for (auto a : amounts)
-      {
-        outputs.push_back({&params.mainAddress, a}); // FIX: parse transfer address
-      }
+        outputs.push_back({&result.destAddresses[i], a});
     }
 
     if (changeAmount > 0)

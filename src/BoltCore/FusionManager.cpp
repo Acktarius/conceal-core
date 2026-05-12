@@ -132,7 +132,6 @@ namespace BoltCore
     for (auto amount : outputAmounts)
       tx->addOutput(amount, destination);
 
-    crypto::Hash txHash = tx->getTransactionHash();
     result.txHash = common::podToHex(tx->getTransactionHash());
     result.fee = 0; // Fusion has zero fee
     result.success = true;
