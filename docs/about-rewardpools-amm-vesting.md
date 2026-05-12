@@ -1,34 +1,29 @@
 ## Vesting Schedules
 
-Vesting locks tokens on a time based release schedule. A creator deposits tokens that unlock gradually for a beneficiary.
-Useful for team allocations, investor tokens, or any situation where you want to prove tokens are locked long term.
+Vesting locks tokens on a time based release schedule. A creator deposits tokens that unlock gradually for a beneficiary. Useful for team allocations, investor tokens, or any situation where you want to prove tokens are locked long term.
 
 **Create a vesting schedule:**
 ```
 Transaction type: CreateVesting
 Token: the token being vested
 From: the creator who owns the tokens
-Extra data: beneficiary_public_key:total_amount:cliff_block:vesting_end_block:revocable
-Example: ccx7abc...:1000000:50000:150000:1
+Extra data: beneficiary_public_key:total_amount:cliff_timestamp:vesting_end_timestamp:revocable
+Example: ccx7abc...:1000000:1717200000:1748736000:1
 ```
-This locks 1,000,000 tokens. Nothing is released until block 50,000. Between blocks 50,000 and 150,000 the tokens release linearly.
-The 1 at the end means the creator can revoke unvested tokens. The creator must have the tokens in their balance.
+This locks 1,000,000 tokens. Nothing is released until the cliff timestamp of June 1 2024. Between the cliff and the vesting end timestamp of June 1 2025 the tokens release linearly. The 1 at the end means the creator can revoke unvested tokens. The creator must have the tokens in their balance. Timestamps are Unix timestamps in seconds.
 
 **Revoke a vesting schedule:**
 ```
 Transaction type: RevokeVesting
 Extra data: schedule_id
 ```
-Only the creator can revoke. Only if revocable was set to true. Unvested tokens return to the creator. Already vested tokens stay with
-the beneficiary.
+Only the creator can revoke. Only if revocable was set to true. Unvested tokens return to the creator. Already vested tokens stay with the beneficiary.
 
 **How it works automatically:**
-Every block, the validator runs `processVestingReleases`. It checks every active vesting schedule. If the cliff has passed, it calculates
-how many tokens should be released and transfers them from the creator to the beneficiary. No manual claiming needed.
+Every block, the validator runs `processVestingReleases`. It checks every active vesting schedule. If the cliff timestamp has passed, it calculates how many tokens should be released based on wall clock time elapsed and transfers them from the creator to the beneficiary. No manual claiming needed.
 
 **Query vesting schedules:**
-The storage layer has `getActiveVestingSchedules()` and `getVestingSchedulesByBeneficiary()`. The RPC endpoints for these are not added yet
-but the storage methods are ready.
+The storage layer has `getActiveVestingSchedules()` and `getVestingSchedulesByBeneficiary()`. The RPC endpoints for these are not added yet but the storage methods are ready.
 
 ---
 
