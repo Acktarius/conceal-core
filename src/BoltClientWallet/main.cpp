@@ -207,6 +207,23 @@ int main(int argc, char *argv[])
     std::cout << "S6. Quick create token" << std::endl;
     std::cout << "S7. Transaction history" << std::endl;
     std::cout << "------------------------------------" << std::endl;
+    std::cout << "A1. AMM pools" << std::endl;
+    std::cout << "A2. Create AMM pool" << std::endl;
+    std::cout << "A3. Add liquidity" << std::endl;
+    std::cout << "A4. Remove liquidity" << std::endl;
+    std::cout << "A5. AMM swap" << std::endl;
+    std::cout << "A6. AMM positions" << std::endl;
+    std::cout << "------------------------------------" << std::endl;
+    std::cout << "V1. Create vesting schedule" << std::endl;
+    std::cout << "V2. List vesting schedules" << std::endl;
+    std::cout << "V3. Revoke vesting" << std::endl;
+    std::cout << "------------------------------------" << std::endl;
+    std::cout << "R1. List reward pools" << std::endl;
+    std::cout << "R2. Create reward pool" << std::endl;
+    std::cout << "R3. Stake in pool" << std::endl;
+    std::cout << "R4. Unstake from pool" << std::endl;
+    std::cout << "R5. Claim rewards" << std::endl;
+    std::cout << "------------------------------------" << std::endl;
     std::cout << "D0. DEX deposit address" << std::endl;
     std::cout << "D1. DEX order book" << std::endl;
     std::cout << "D2. Place DEX order" << std::endl;
@@ -296,6 +313,34 @@ int main(int argc, char *argv[])
       sidechainQuickCreateMenu(cfg, spendPubHex);
     else if (input == "S7" || input == "s7")
       sidechainTxHistoryMenu();
+    else if (input == "A1" || input == "a1")
+      ammPoolsMenu(cfg);
+    else if (input == "A2" || input == "a2")
+      ammCreatePoolMenu(cfg, spendPubHex);
+    else if (input == "A3" || input == "a3")
+      ammAddLiquidityMenu(cfg, spendPubHex);
+    else if (input == "A4" || input == "a4")
+      ammRemoveLiquidityMenu(cfg, spendPubHex);
+    else if (input == "A5" || input == "a5")
+      ammSwapMenu(cfg, spendPubHex);
+    else if (input == "A6" || input == "a6")
+      ammPositionsMenu(cfg, spendPubHex);
+    else if (input == "V1" || input == "v1")
+      vestingCreateMenu(cfg, spendPubHex, currency);
+    else if (input == "V2" || input == "v2")
+      vestingListMenu(cfg, spendPubHex);
+    else if (input == "V3" || input == "v3")
+      vestingRevokeMenu(cfg, spendPubHex);
+    else if (input == "R1" || input == "r1")
+      rewardPoolListMenu(cfg);
+    else if (input == "R2" || input == "r2")
+      rewardPoolCreateMenu(cfg, spendPubHex);
+    else if (input == "R3" || input == "r3")
+      rewardPoolStakeMenu(cfg, spendPubHex);
+    else if (input == "R4" || input == "r4")
+      rewardPoolUnstakeMenu(cfg, spendPubHex);
+    else if (input == "R5" || input == "r5")
+      rewardPoolClaimMenu(cfg, spendPubHex);
     else if (input == "D0" || input == "d0")
       dexDepositAddressMenu(cfg);
     else if (input == "D1" || input == "d1")

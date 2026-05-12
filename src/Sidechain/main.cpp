@@ -21,6 +21,7 @@
 #include "BridgeWatcher.h"
 #include "GossipManager.h"
 #include "BftConsensus.h"
+#include "BoltAMM.h"
 #include "BoltDex.h"
 
 #include "BoltSync/BoltSync.h"
@@ -56,6 +57,7 @@ struct Config
   size_t rpcThreads = 1;
   bool enableDex = false;
   double dexFee = 0.0;
+  bool enableAmm = false;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
@@ -77,7 +79,8 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
     ("reward-address", po::value<std::string>()->default_value(""), "Base58 address or hex public key for block rewards (optional)")
     ("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")
     ("enable-dex", po::bool_switch(), "Enable built-in DEX engine")
-    ("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage");
+    ("dex-fee", po::value<double>()->default_value(0.0), "DEX trading fee percentage")
+    ("enable-amm", po::bool_switch(), "Enable built-in AMM engine");
 
   po::variables_map vm;
   try
@@ -110,6 +113,7 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.rewardAddress = vm["reward-address"].as<std::string>();
   cfg.rpcThreads = vm["rpc-threads"].as<size_t>();
   cfg.dexFee = vm["dex-fee"].as<double>();
+  cfg.enableAmm = vm["enable-amm"].as<bool>();
 
   return true;
 }
@@ -338,6 +342,18 @@ int main(int argc, char *argv[])
                             { rpcServer.pushDexTrade(trade); });
   }
 
+  // AMM Engine (optional)
+  std::unique_ptr<Sidechain::BoltAMM::Engine> ammEngine;
+  if (cfg.enableAmm)
+  {
+    ammEngine.reset(new Sidechain::BoltAMM::Engine());
+    ammEngine->setStorage(storage);
+    ammEngine->setValidator(validator);
+    validator.setAmmEngine(ammEngine.get());
+    rpcServer.setAmmEngine(ammEngine.get());
+    logger(logging::INFO) << "AMM engine enabled";
+  }
+
   // Daemon connection (for bridge)
   cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
 
@@ -415,7 +431,8 @@ int main(int argc, char *argv[])
 
     // Create bridge watcher
     bridgeWatcher.reset(new Sidechain::BridgeWatcher(
-        storage, *nodePtr, bridgeViewPub, bridgeViewKey, bridgeSpendPub, bridgeSpendKey));
+        storage, *nodePtr, bridgeViewPub, bridgeViewKey, bridgeSpendPub, bridgeSpendKey,
+        cfg.daemonHost, cfg.daemonPort));
 
     // Set bridge key on validator for Mint authorization
     if (hasBridgeSpendKey)
@@ -456,6 +473,7 @@ int main(int argc, char *argv[])
   logger(logging::INFO) << "BFT threshold: " << SidechainConfig::BFT_BLOCK_THRESHOLD;
   logger(logging::INFO) << "Network: " << (cfg.testnet ? "Testnet" : "Mainnet-Staging");
   logger(logging::INFO) << "DEX: " << (cfg.enableDex ? "enabled" : "disabled");
+  logger(logging::INFO) << "AMM: " << (cfg.enableAmm ? "enabled" : "disabled");
   logger(logging::INFO) << "Bridge: " << (cfg.watchBridge ? "watching" : "disabled");
 
   if (cfg.watchBridge)
@@ -469,6 +487,11 @@ int main(int argc, char *argv[])
 
   auto tokens = storage.getAllTokens();
   logger(logging::INFO) << "Registered tokens: " << tokens.size();
+  if (cfg.enableAmm && ammEngine)
+  {
+    auto pools = ammEngine->getPools();
+    logger(logging::INFO) << "AMM pools: " << pools.size();
+  }
   logger(logging::INFO) << "═══════════════════════════════════════";
 
   // Main loop

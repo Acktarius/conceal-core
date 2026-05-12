@@ -22,6 +22,10 @@ namespace Sidechain
   {
     class Engine;
   }
+  namespace BoltAMM
+  {
+    class Engine;
+  }
 }
 
 namespace Sidechain
@@ -45,6 +49,7 @@ namespace Sidechain
 
     void setRewardKey(const crypto::PublicKey &key) { m_consensus.setRewardKey(key); }
     void setDexEngine(Sidechain::BoltDex::Engine *engine) { m_consensus.setDexEngine(engine); }
+    void setAmmEngine(Sidechain::BoltAMM::Engine *engine) { m_ammEngine = engine; }
     void setBridgeKey(const crypto::PublicKey &key) { m_consensus.setBridgeKey(key); }
     void onBridgeBurn(std::function<void(const Transaction &)> cb) { m_consensus.onBridgeBurn(cb); }
 
@@ -60,6 +65,7 @@ namespace Sidechain
     std::vector<ValidatorInfo> m_validators;
     GossipManager &m_gossip;
     BftConsensus m_consensus;
+    Sidechain::BoltAMM::Engine *m_ammEngine = nullptr;
 
     std::queue<Transaction> m_pendingTransactions;
     mutable std::mutex m_txMutex;

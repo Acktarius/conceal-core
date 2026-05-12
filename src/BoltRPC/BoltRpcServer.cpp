@@ -285,20 +285,14 @@ namespace BoltRPC
     }
   }
 
-  // =========================================================================
   // System
-  // =========================================================================
-
   // Return the binary version string for GUI compatibility checks
   std::string BoltRpcServer::methodGetVersion(const common::JsonValue &)
   {
     return R"({"version":")" + std::string(CCX_RELEASE_VERSION) + R"("})";
   }
 
-  // =========================================================================
   // Wallet lifecycle
-  // =========================================================================
-
   // Import an existing wallet by view key and optional spend key, no restart needed
   std::string BoltRpcServer::methodImportWallet(const common::JsonValue &params)
   {
@@ -510,10 +504,7 @@ namespace BoltRPC
     return ss.str();
   }
 
-  // =========================================================================
   // Mainchain wallet methods
-  // =========================================================================
-
   std::string BoltRpcServer::methodGetBalance(const common::JsonValue &)
   {
     // Fast path: if wallet has no outputs, return zeros without blocking

@@ -114,6 +114,34 @@ namespace Sidechain
     uint64_t getTotalLockedForToken(uint64_t tokenId) const;
     uint64_t nextBridgeLockId() const;
 
+    // Vesting operations
+    bool addVestingSchedule(const VestingSchedule &schedule);
+    bool getVestingSchedule(uint64_t scheduleId, VestingSchedule &schedule) const;
+    bool updateVestingSchedule(const VestingSchedule &schedule);
+    std::vector<VestingSchedule> getActiveVestingSchedules() const;
+    std::vector<VestingSchedule> getVestingSchedulesByBeneficiary(const crypto::PublicKey &beneficiary) const;
+    uint64_t nextVestingScheduleId() const;
+
+    // Reward pool operations
+    bool addRewardPool(const RewardPool &pool);
+    bool getRewardPool(uint64_t poolId, RewardPool &pool) const;
+    bool updateRewardPool(const RewardPool &pool);
+    std::vector<RewardPool> getActiveRewardPools() const;
+    std::vector<RewardPool> getRewardPoolsByToken(uint64_t tokenId) const;
+    uint64_t nextRewardPoolId() const;
+
+    // Stake operations
+    bool addStakeEntry(const StakeEntry &entry);
+    bool getStakeEntry(uint64_t entryId, StakeEntry &entry) const;
+    bool updateStakeEntry(const StakeEntry &entry);
+    std::vector<StakeEntry> getStakesByOwner(const crypto::PublicKey &owner) const;
+    std::vector<StakeEntry> getStakesByPool(uint64_t poolId) const;
+    uint64_t nextStakeEntryId() const;
+
+    // Per-block processing
+    void processVestingReleases(uint64_t currentBlock);
+    void processRewardAccrual(uint64_t currentBlock);
+
     // Account operations
     bool getBalance(const crypto::PublicKey &address, uint64_t tokenId, uint64_t &balance) const;
     bool setBalance(const crypto::PublicKey &address, uint64_t tokenId, uint64_t balance);

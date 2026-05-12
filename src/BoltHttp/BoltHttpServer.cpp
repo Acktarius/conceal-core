@@ -82,7 +82,6 @@ namespace BoltHttp
     }
   }
 
-  // Default classification tables — unchanged
   const std::vector<std::string> Server::DEFAULT_HEAVY_PATHS = {
       "/sendrawtransaction", "/submitblock", "/getblocktemplate",
       "createToken", "mintToken", "burnToken", "transfer",
@@ -219,7 +218,7 @@ namespace BoltHttp
   void Server::markHeavy(const std::string &pathPrefix) { m_heavyPaths.push_back(pathPrefix); }
   void Server::markFast(const std::string &pathPrefix) { m_fastPaths.push_back(pathPrefix); }
 
-  WorkClass Server::classifyRequest(const Request &req) const { /* unchanged */ return m_dispatcher ? WorkClass::Fast : WorkClass::Heavy; }
+  WorkClass Server::classifyRequest(const Request &req) const { return m_dispatcher ? WorkClass::Fast : WorkClass::Heavy; }
 
   // Accept loop
   void Server::acceptLoop()

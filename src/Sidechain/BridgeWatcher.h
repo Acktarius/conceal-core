@@ -26,7 +26,9 @@ namespace Sidechain
                   const crypto::PublicKey &bridgeViewPub,
                   const crypto::SecretKey &bridgeViewKey,
                   const crypto::PublicKey &bridgeSpendPub,
-                  const crypto::SecretKey &bridgeSpendKey);
+                  const crypto::SecretKey &bridgeSpendKey,
+                  const std::string &daemonHost = "127.0.0.1",
+                  uint16_t daemonPort = 16000);
 
     ~BridgeWatcher();
 
@@ -57,6 +59,14 @@ namespace Sidechain
     bool submitUnlockTransaction(const crypto::PublicKey &toAddress,
                                  uint64_t amount,
                                  const crypto::Hash &burnTxHash);
+
+    // Select random outputs of the same amount for ring signatures
+    bool selectRingMembers(uint64_t amount,
+                           const std::vector<BoltSync::FoundOutput> &availableOutputs,
+                           const BoltSync::FoundOutput &realOutput,
+                           std::vector<crypto::PublicKey> &ringMembers,
+                           size_t &realOutputIndex);
+
     std::string extractSidechainDestination(const std::vector<uint8_t> &extra) const;
 
     SidechainStorage &m_storage;
@@ -66,12 +76,15 @@ namespace Sidechain
     crypto::PublicKey m_bridgeSpendPub;
     crypto::SecretKey m_bridgeSpendKey;
     bool m_hasSpendKey = false;
+    std::string m_daemonHost;
+    uint16_t m_daemonPort;
 
     std::thread m_watchThread;
     std::thread m_unlockThread;
     std::atomic<bool> m_running{false};
     mutable std::mutex m_lockedAmountsMutex;
     std::unordered_map<uint64_t, uint64_t> m_lockedAmounts; // tokenId -> amount
+    uint64_t m_lastScannedHeight = 0;
 
     // Pending unlocks queue
     struct PendingUnlock

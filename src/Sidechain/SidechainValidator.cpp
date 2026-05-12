@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "SidechainValidator.h"
+#include "BoltAMM.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Common/StringTools.h"
 #include <chrono>
@@ -20,8 +21,13 @@ namespace Sidechain
   {
     // Register for committed blocks
     m_consensus.onBlockCommitted([this](const Block &block)
-                                 { std::cout << "Block " << block.header.height << " committed with "
-                                             << block.transactions.size() << " transactions" << std::endl; });
+                                 {
+    std::cout << "Block " << block.header.height << " committed with "
+              << block.transactions.size() << " transactions" << std::endl;
+
+    // Process vesting releases and reward accrual on each new block
+    m_storage.processVestingReleases(block.header.height);
+    m_storage.processRewardAccrual(block.header.height); });
   }
 
   SidechainValidator::~SidechainValidator()
@@ -130,6 +136,15 @@ namespace Sidechain
         std::cout << "validateTransaction: rate limited, address created token too recently" << std::endl;
         return false;
       }
+      return true;
+    }
+
+    // AMM transactions: validated internally by the engine during execution
+    if (tx.type == TransactionType::AmmCreatePool ||
+        tx.type == TransactionType::AmmAddLiquidity ||
+        tx.type == TransactionType::AmmRemoveLiquidity ||
+        tx.type == TransactionType::AmmSwap)
+    {
       return true;
     }
 

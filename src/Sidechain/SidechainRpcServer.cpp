@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "SidechainRpcServer.h"
+#include "BoltAMM.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Common/Util.h"
 #include "Common/StringTools.h"
@@ -285,6 +286,20 @@ namespace Sidechain
         result = methodDexWithdraw(params);
       else if (method == "dex_getEscrowBalance")
         result = methodDexGetEscrowBalance(params);
+      else if (method == "amm_getPools")
+        result = methodAmmGetPools(params);
+      else if (method == "amm_getQuote")
+        result = methodAmmGetQuote(params);
+      else if (method == "amm_createPool")
+        result = methodAmmCreatePool(params);
+      else if (method == "amm_addLiquidity")
+        result = methodAmmAddLiquidity(params);
+      else if (method == "amm_removeLiquidity")
+        result = methodAmmRemoveLiquidity(params);
+      else if (method == "amm_swap")
+        result = methodAmmSwap(params);
+      else if (method == "amm_getPositions")
+        result = methodAmmGetPositions(params);
       else
         return buildError(-32601, "Method not found", id);
 
@@ -1025,5 +1040,213 @@ namespace Sidechain
     common::podFromHex(params("owner").getString(), owner);
     uint64_t tokenId = static_cast<uint64_t>(params("tokenId").getInteger());
     return std::to_string(m_dexEngine->getEscrowBalance(owner, tokenId));
+  }
+
+  std::string SidechainRpcServer::methodAmmGetPools(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    auto pools = m_ammEngine->getPools();
+    std::string result = "[";
+    for (size_t i = 0; i < pools.size(); ++i)
+    {
+      result += "{";
+      result += R"("poolId":)" + std::to_string(pools[i].poolId) + ",";
+      result += R"("tokenIdA":)" + std::to_string(pools[i].tokenIdA) + ",";
+      result += R"("tokenIdB":)" + std::to_string(pools[i].tokenIdB) + ",";
+      result += R"("reserveA":)" + std::to_string(pools[i].reserveA) + ",";
+      result += R"("reserveB":)" + std::to_string(pools[i].reserveB) + ",";
+      result += R"("totalLiquidity":)" + std::to_string(pools[i].totalLiquidity) + ",";
+      result += R"("feeBasisPoints":)" + std::to_string(pools[i].feeBasisPoints);
+      result += "}";
+      if (i < pools.size() - 1)
+        result += ",";
+    }
+    result += "]";
+    return result;
+  }
+
+  std::string SidechainRpcServer::methodAmmGetQuote(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    uint64_t poolId = static_cast<uint64_t>(params("poolId").getInteger());
+    uint64_t tokenIdIn = static_cast<uint64_t>(params("tokenIdIn").getInteger());
+    uint64_t amountIn = static_cast<uint64_t>(params("amountIn").getInteger());
+
+    uint64_t amountOut = m_ammEngine->getAmountOut(poolId, tokenIdIn, amountIn);
+
+    return R"({"poolId":)" + std::to_string(poolId) +
+           R"(,"tokenIdIn":)" + std::to_string(tokenIdIn) +
+           R"(,"amountIn":)" + std::to_string(amountIn) +
+           R"(,"amountOut":)" + std::to_string(amountOut) + "}";
+  }
+
+  std::string SidechainRpcServer::methodAmmCreatePool(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    uint64_t tokenIdA = static_cast<uint64_t>(params("tokenIdA").getInteger());
+    uint64_t tokenIdB = static_cast<uint64_t>(params("tokenIdB").getInteger());
+    uint64_t amountA = static_cast<uint64_t>(params("amountA").getInteger());
+    uint64_t amountB = static_cast<uint64_t>(params("amountB").getInteger());
+    crypto::PublicKey creator;
+    common::podFromHex(params("creator").getString(), creator);
+    uint16_t feeBps = params.contains("feeBasisPoints")
+                          ? static_cast<uint16_t>(params("feeBasisPoints").getInteger())
+                          : 30;
+
+    Transaction tx;
+    tx.type = TransactionType::AmmCreatePool;
+    tx.from = creator;
+    tx.to = creator;
+    tx.amount = amountA;
+    tx.tokenId = tokenIdA;
+    tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
+    tx.feeTokenId = 0;
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+
+    // Extra: tokenIdB:amountB:feeBasisPoints
+    std::string extra = std::to_string(tokenIdB) + ":" + std::to_string(amountB) + ":" + std::to_string(feeBps);
+    tx.extra.assign(extra.begin(), extra.end());
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Transaction rejected");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) + R"("})";
+  }
+
+  std::string SidechainRpcServer::methodAmmAddLiquidity(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    uint64_t poolId = static_cast<uint64_t>(params("poolId").getInteger());
+    uint64_t amountA = static_cast<uint64_t>(params("amountA").getInteger());
+    uint64_t amountB = static_cast<uint64_t>(params("amountB").getInteger());
+    crypto::PublicKey provider;
+    common::podFromHex(params("provider").getString(), provider);
+
+    Transaction tx;
+    tx.type = TransactionType::AmmAddLiquidity;
+    tx.from = provider;
+    tx.to = provider;
+    tx.amount = amountA;
+    tx.tokenId = 0; // Token A is identified by the pool
+    tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
+    tx.feeTokenId = 0;
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+
+    // Extra: poolId:amountB
+    std::string extra = std::to_string(poolId) + ":" + std::to_string(amountB);
+    tx.extra.assign(extra.begin(), extra.end());
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Transaction rejected");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) + R"("})";
+  }
+
+  std::string SidechainRpcServer::methodAmmRemoveLiquidity(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    uint64_t positionId = static_cast<uint64_t>(params("positionId").getInteger());
+    crypto::PublicKey owner;
+    common::podFromHex(params("owner").getString(), owner);
+
+    Transaction tx;
+    tx.type = TransactionType::AmmRemoveLiquidity;
+    tx.from = owner;
+    tx.to = owner;
+    tx.amount = 0;
+    tx.tokenId = 0;
+    tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
+    tx.feeTokenId = 0;
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+
+    std::string extra = std::to_string(positionId);
+    tx.extra.assign(extra.begin(), extra.end());
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Transaction rejected");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) + R"("})";
+  }
+
+  std::string SidechainRpcServer::methodAmmSwap(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    uint64_t poolId = static_cast<uint64_t>(params("poolId").getInteger());
+    uint64_t tokenIdIn = static_cast<uint64_t>(params("tokenIdIn").getInteger());
+    uint64_t amountIn = static_cast<uint64_t>(params("amountIn").getInteger());
+    uint64_t minAmountOut = static_cast<uint64_t>(params("minAmountOut").getInteger());
+    crypto::PublicKey from;
+    common::podFromHex(params("from").getString(), from);
+
+    Transaction tx;
+    tx.type = TransactionType::AmmSwap;
+    tx.from = from;
+    tx.to = from;
+    tx.amount = amountIn;
+    tx.tokenId = tokenIdIn;
+    tx.fee = m_testnet ? SidechainConfig::TESTNET_FEE : SidechainConfig::DEFAULT_FEE;
+    tx.feeTokenId = 0;
+    tx.signature = crypto::Signature{};
+    tx.timestamp = static_cast<uint64_t>(std::time(nullptr));
+
+    // Extra: poolId:minAmountOut
+    std::string extra = std::to_string(poolId) + ":" + std::to_string(minAmountOut);
+    tx.extra.assign(extra.begin(), extra.end());
+
+    cn::BinaryArray txBytes = cn::toBinaryArray(tx);
+    crypto::cn_fast_hash(txBytes.data(), txBytes.size(), tx.txHash);
+
+    if (!m_validator.submitTransaction(tx))
+      throw std::runtime_error("Transaction rejected");
+
+    return R"({"success":true,"txHash":")" + common::podToHex(tx.txHash) + R"("})";
+  }
+
+  std::string SidechainRpcServer::methodAmmGetPositions(const common::JsonValue &params)
+  {
+    if (!m_ammEngine)
+      throw std::runtime_error("AMM engine not enabled");
+
+    crypto::PublicKey owner;
+    common::podFromHex(params("owner").getString(), owner);
+
+    auto positions = m_ammEngine->getPositions(owner);
+    std::string result = "[";
+    for (size_t i = 0; i < positions.size(); ++i)
+    {
+      result += "{";
+      result += R"("positionId":)" + std::to_string(positions[i].positionId) + ",";
+      result += R"("poolId":)" + std::to_string(positions[i].poolId) + ",";
+      result += R"("liquidity":)" + std::to_string(positions[i].liquidity);
+      result += "}";
+      if (i < positions.size() - 1)
+        result += ",";
+    }
+    result += "]";
+    return result;
   }
 }

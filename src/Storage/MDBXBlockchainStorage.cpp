@@ -18,7 +18,7 @@ using namespace CryptoNote;
 using namespace common;
 using namespace cn;
 
-// ---------- Safe MDBX_val constructors (class static members) ----------
+// ---------- Safe MDBX_val constructors (class static members)
 
 // Builds an MDBX_val from any raw pointer+length — used for both RO and RW transactions
 // MDBX_val.iov_base is non‑const in the API, but the library treats it as const for RO txns

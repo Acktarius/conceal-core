@@ -349,7 +349,31 @@ namespace Sidechain
         }
       }
 
-      uint64_t sellerAmount = totalQuoteAmount - dexFee;
+      // Calculate creator royalty
+      uint64_t royaltyAmount = 0;
+      TokenInfo tokenInfo;
+      if (m_storage && m_storage->getToken(trade.baseTokenId, tokenInfo))
+      {
+        if (tokenInfo.royaltiesEnabled && tokenInfo.royaltyBasisPoints > 0)
+        {
+          royaltyAmount = (totalQuoteAmount * tokenInfo.royaltyBasisPoints) / 10000;
+          if (royaltyAmount > 0 && royaltyAmount < totalQuoteAmount)
+          {
+            Settlement royaltySettlement;
+            royaltySettlement.tradeId = trade.id;
+            royaltySettlement.from = buy.owner;
+            royaltySettlement.to = tokenInfo.creator;
+            royaltySettlement.tokenId = buy.quoteTokenId;
+            royaltySettlement.amount = royaltyAmount;
+            royaltySettlement.description = "Trade #" + std::to_string(trade.id) + " creator royalty (" +
+                                            std::to_string(tokenInfo.royaltyBasisPoints / 100) + "." +
+                                            std::to_string(tokenInfo.royaltyBasisPoints % 100) + "%)";
+            m_pendingSettlements.push_back(royaltySettlement);
+          }
+        }
+      }
+
+      uint64_t sellerAmount = totalQuoteAmount - dexFee - royaltyAmount;
 
       Settlement sellerSettlement;
       sellerSettlement.tradeId = trade.id;
@@ -388,12 +412,12 @@ namespace Sidechain
       std::cout << "DEX: trade executed #" << trade.id
                 << " amount=" << amount
                 << " price=" << trade.price
-                << " fee=" << dexFee << std::endl;
+                << " fee=" << dexFee
+                << " royalty=" << royaltyAmount << std::endl;
 
       if (m_tradeCallback)
         m_tradeCallback(trade);
 
-        // Push trade event to SSE/WebSocket clients
       if (m_tradeEventCallback)
         m_tradeEventCallback(trade);
 

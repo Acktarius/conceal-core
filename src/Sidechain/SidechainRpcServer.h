@@ -21,6 +21,11 @@
 
 namespace Sidechain
 {
+  namespace BoltAMM
+  {
+    class Engine;
+  }
+
   class SidechainRpcServer
   {
   public:
@@ -52,6 +57,8 @@ namespace Sidechain
 
     // Push a bridge deposit event
     void pushBridgeDeposit(uint64_t amount, const std::string &destHex, const std::string &txHash);
+
+    void setAmmEngine(Sidechain::BoltAMM::Engine *engine) { m_ammEngine = engine; }
 
   private:
     std::string handleJsonRpc(const std::string &body);
@@ -100,6 +107,15 @@ namespace Sidechain
     std::string methodDexWithdraw(const common::JsonValue &params);
     std::string methodDexGetEscrowBalance(const common::JsonValue &params);
 
+    // AMM methods
+    std::string methodAmmGetPools(const common::JsonValue &params);
+    std::string methodAmmGetQuote(const common::JsonValue &params);
+    std::string methodAmmCreatePool(const common::JsonValue &params);
+    std::string methodAmmAddLiquidity(const common::JsonValue &params);
+    std::string methodAmmRemoveLiquidity(const common::JsonValue &params);
+    std::string methodAmmSwap(const common::JsonValue &params);
+    std::string methodAmmGetPositions(const common::JsonValue &params);
+
     // Active WebSocket connections for real-time push
     std::vector<BoltHttp::WebSocket *> m_wsClients;
     std::mutex m_wsMutex;
@@ -108,7 +124,9 @@ namespace Sidechain
     SidechainStorage &m_storage;
     SidechainValidator &m_validator;
     std::unique_ptr<BoltHttp::Server> m_httpServer;
+
     Sidechain::BoltDex::Engine *m_dexEngine = nullptr;
+    Sidechain::BoltAMM::Engine *m_ammEngine = nullptr;
 
     std::string m_sidechainHost = "127.0.0.1";
     uint16_t m_sidechainPort = 8080;

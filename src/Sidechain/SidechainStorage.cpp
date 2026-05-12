@@ -423,6 +423,339 @@ namespace Sidechain
     return id;
   }
 
+  // Vesting operations
+  bool SidechainStorage::addVestingSchedule(const VestingSchedule &schedule)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    cn::BinaryArray ba = cn::toBinaryArray(schedule);
+    std::string key = "vesting_" + std::to_string(schedule.scheduleId);
+    m_storage.putMeta(key, ba);
+    m_storage.flush();
+    return true;
+  }
+
+  bool SidechainStorage::getVestingSchedule(uint64_t scheduleId, VestingSchedule &schedule) const
+  {
+    std::string key = "vesting_" + std::to_string(scheduleId);
+    std::vector<uint8_t> value;
+    if (!m_storage.getMeta(key, value))
+      return false;
+    return cn::fromBinaryArray(schedule, value);
+  }
+
+  bool SidechainStorage::updateVestingSchedule(const VestingSchedule &schedule)
+  {
+    return addVestingSchedule(schedule);
+  }
+
+  std::vector<VestingSchedule> SidechainStorage::getActiveVestingSchedules() const
+  {
+    std::vector<VestingSchedule> result;
+    uint64_t id = 1;
+    VestingSchedule schedule;
+    while (getVestingSchedule(id, schedule))
+    {
+      if (schedule.status == VestingStatus::Active)
+        result.push_back(schedule);
+      ++id;
+    }
+    return result;
+  }
+
+  std::vector<VestingSchedule> SidechainStorage::getVestingSchedulesByBeneficiary(const crypto::PublicKey &beneficiary) const
+  {
+    std::vector<VestingSchedule> result;
+    uint64_t id = 1;
+    VestingSchedule schedule;
+    while (getVestingSchedule(id, schedule))
+    {
+      if (schedule.beneficiary == beneficiary)
+        result.push_back(schedule);
+      ++id;
+    }
+    return result;
+  }
+
+  uint64_t SidechainStorage::nextVestingScheduleId() const
+  {
+    uint64_t id = 1;
+    VestingSchedule schedule;
+    while (getVestingSchedule(id, schedule))
+      ++id;
+    return id;
+  }
+
+  // Reward pool operations
+  bool SidechainStorage::addRewardPool(const RewardPool &pool)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    cn::BinaryArray ba = cn::toBinaryArray(pool);
+    std::string key = "reward_pool_" + std::to_string(pool.poolId);
+    m_storage.putMeta(key, ba);
+    m_storage.flush();
+    return true;
+  }
+
+  bool SidechainStorage::getRewardPool(uint64_t poolId, RewardPool &pool) const
+  {
+    std::string key = "reward_pool_" + std::to_string(poolId);
+    std::vector<uint8_t> value;
+    if (!m_storage.getMeta(key, value))
+      return false;
+    return cn::fromBinaryArray(pool, value);
+  }
+
+  bool SidechainStorage::updateRewardPool(const RewardPool &pool)
+  {
+    return addRewardPool(pool);
+  }
+
+  std::vector<RewardPool> SidechainStorage::getActiveRewardPools() const
+  {
+    std::vector<RewardPool> result;
+    uint64_t id = 1;
+    RewardPool pool;
+    while (getRewardPool(id, pool))
+    {
+      if (pool.active)
+        result.push_back(pool);
+      ++id;
+    }
+    return result;
+  }
+
+  std::vector<RewardPool> SidechainStorage::getRewardPoolsByToken(uint64_t tokenId) const
+  {
+    std::vector<RewardPool> result;
+    uint64_t id = 1;
+    RewardPool pool;
+    while (getRewardPool(id, pool))
+    {
+      if (pool.tokenId == tokenId)
+        result.push_back(pool);
+      ++id;
+    }
+    return result;
+  }
+
+  uint64_t SidechainStorage::nextRewardPoolId() const
+  {
+    uint64_t id = 1;
+    RewardPool pool;
+    while (getRewardPool(id, pool))
+      ++id;
+    return id;
+  }
+
+  // Stake operations
+  bool SidechainStorage::addStakeEntry(const StakeEntry &entry)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    cn::BinaryArray ba = cn::toBinaryArray(entry);
+    std::string key = "stake_" + std::to_string(entry.entryId);
+    m_storage.putMeta(key, ba);
+    m_storage.flush();
+    return true;
+  }
+
+  bool SidechainStorage::getStakeEntry(uint64_t entryId, StakeEntry &entry) const
+  {
+    std::string key = "stake_" + std::to_string(entryId);
+    std::vector<uint8_t> value;
+    if (!m_storage.getMeta(key, value))
+      return false;
+    return cn::fromBinaryArray(entry, value);
+  }
+
+  bool SidechainStorage::updateStakeEntry(const StakeEntry &entry)
+  {
+    return addStakeEntry(entry);
+  }
+
+  std::vector<StakeEntry> SidechainStorage::getStakesByOwner(const crypto::PublicKey &owner) const
+  {
+    std::vector<StakeEntry> result;
+    uint64_t id = 1;
+    StakeEntry entry;
+    while (getStakeEntry(id, entry))
+    {
+      if (entry.owner == owner)
+        result.push_back(entry);
+      ++id;
+    }
+    return result;
+  }
+
+  std::vector<StakeEntry> SidechainStorage::getStakesByPool(uint64_t poolId) const
+  {
+    std::vector<StakeEntry> result;
+    uint64_t id = 1;
+    StakeEntry entry;
+    while (getStakeEntry(id, entry))
+    {
+      if (entry.poolId == poolId)
+        result.push_back(entry);
+      ++id;
+    }
+    return result;
+  }
+
+  uint64_t SidechainStorage::nextStakeEntryId() const
+  {
+    uint64_t id = 1;
+    StakeEntry entry;
+    while (getStakeEntry(id, entry))
+      ++id;
+    return id;
+  }
+
+  // Per-block processing
+  void SidechainStorage::processVestingReleases(uint64_t currentBlock)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+    uint64_t id = 1;
+    VestingSchedule schedule;
+
+    while (getVestingSchedule(id, schedule))
+    {
+      if (schedule.status != VestingStatus::Active)
+      {
+        ++id;
+        continue;
+      }
+
+      if (now < schedule.cliffTimestamp)
+      {
+        ++id;
+        continue;
+      }
+
+      uint64_t totalVested = 0;
+      if (now >= schedule.vestingEndTimestamp)
+      {
+        totalVested = schedule.totalAllocated;
+        schedule.status = VestingStatus::Completed;
+      }
+      else
+      {
+        uint64_t totalDuration = schedule.vestingEndTimestamp - schedule.cliffTimestamp;
+        uint64_t elapsed = now - schedule.cliffTimestamp;
+        totalVested = (schedule.totalAllocated * elapsed) / totalDuration;
+      }
+
+      if (totalVested > schedule.releasedAmount)
+      {
+        uint64_t toRelease = totalVested - schedule.releasedAmount;
+        schedule.releasedAmount = totalVested;
+
+        uint64_t balance = 0;
+        getBalance(schedule.creator, schedule.tokenId, balance);
+        if (balance >= toRelease)
+        {
+          setBalance(schedule.creator, schedule.tokenId, balance - toRelease);
+          uint64_t beneficiaryBalance = 0;
+          getBalance(schedule.beneficiary, schedule.tokenId, beneficiaryBalance);
+          setBalance(schedule.beneficiary, schedule.tokenId, beneficiaryBalance + toRelease);
+        }
+      }
+
+      updateVestingSchedule(schedule);
+      ++id;
+    }
+
+    m_storage.flush();
+  }
+
+  void SidechainStorage::processRewardAccrual(uint64_t currentBlock)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+    uint64_t poolId = 1;
+    RewardPool pool;
+
+    while (getRewardPool(poolId, pool))
+    {
+      if (!pool.active || pool.totalStaked == 0 || pool.remainingRewards == 0)
+      {
+        ++poolId;
+        continue;
+      }
+
+      if (now < pool.startBlock)
+      {
+        ++poolId;
+        continue;
+      }
+
+      if (pool.endBlock > 0 && now > pool.endBlock)
+      {
+        pool.active = false;
+        updateRewardPool(pool);
+        ++poolId;
+        continue;
+      }
+
+      // Calculate elapsed time since last accrual
+      uint64_t elapsed = 10; // Default for first accrual
+      if (pool.lastAccrualTimestamp > 0 && now > pool.lastAccrualTimestamp)
+        elapsed = now - pool.lastAccrualTimestamp;
+
+      pool.lastAccrualTimestamp = now;
+
+      // Calculate rewards per second based on annual rate
+      // Annual rate in basis points, 31,536,000 seconds per year
+      uint64_t annualRate = pool.rewardRateBasisPoints;
+      uint64_t rewardsPerSecond = (pool.totalStaked * annualRate) / 10000 / 31536000;
+
+      if (rewardsPerSecond > 0)
+      {
+        uint64_t rewardsForElapsed = rewardsPerSecond * elapsed;
+
+        if (rewardsForElapsed > 0 && rewardsForElapsed <= pool.remainingRewards)
+        {
+          auto stakes = getStakesByPool(poolId);
+          for (auto &stake : stakes)
+          {
+            uint64_t stakeReward = (rewardsForElapsed * stake.amount) / pool.totalStaked;
+            if (stakeReward > 0)
+            {
+              stake.pendingRewards += stakeReward;
+              updateStakeEntry(stake);
+            }
+          }
+
+          pool.remainingRewards -= rewardsForElapsed;
+          updateRewardPool(pool);
+        }
+        else if (rewardsForElapsed > pool.remainingRewards && pool.remainingRewards > 0)
+        {
+          // Distribute remaining rewards proportionally
+          auto stakes = getStakesByPool(poolId);
+          uint64_t remaining = pool.remainingRewards;
+          for (auto &stake : stakes)
+          {
+            uint64_t stakeReward = (remaining * stake.amount) / pool.totalStaked;
+            if (stakeReward > 0)
+            {
+              stake.pendingRewards += stakeReward;
+              updateStakeEntry(stake);
+            }
+          }
+          pool.remainingRewards = 0;
+          pool.active = false;
+          updateRewardPool(pool);
+        }
+      }
+
+      ++poolId;
+    }
+
+    m_storage.flush();
+  }
+
   // Account operations
   bool SidechainStorage::getBalance(const crypto::PublicKey &address, uint64_t tokenId, uint64_t &balance) const
   {
@@ -476,6 +809,8 @@ namespace Sidechain
 
       size_t thirdColon = extraStr.find(':', secondColon + 1);
       size_t fourthColon = std::string::npos;
+      size_t fifthColon = std::string::npos;
+      size_t sixthColon = std::string::npos;
       uint8_t backingModel = 0;
       uint8_t decimals = 6;
       uint64_t backingRatio = 0;
@@ -490,12 +825,12 @@ namespace Sidechain
         {
           decimals = static_cast<uint8_t>(std::stoi(extraStr.substr(thirdColon + 1, fourthColon - thirdColon - 1)));
 
-          size_t fifthColon = extraStr.find(':', fourthColon + 1);
+          fifthColon = extraStr.find(':', fourthColon + 1);
           if (fifthColon != std::string::npos)
           {
             backingRatio = std::stoull(extraStr.substr(fourthColon + 1, fifthColon - fourthColon - 1));
 
-            size_t sixthColon = extraStr.find(':', fifthColon + 1);
+            sixthColon = extraStr.find(':', fifthColon + 1);
             if (sixthColon != std::string::npos)
             {
               lockedCCXAmount = std::stoull(extraStr.substr(fifthColon + 1, sixthColon - fifthColon - 1));
@@ -547,17 +882,56 @@ namespace Sidechain
       if (tx.txHash != crypto::Hash())
         newToken.backingTxHash = tx.txHash;
 
+      // Parse royalty fields from extra
+      // The last parsed colon depends on what fields were provided
+      size_t lastParsedColon = std::string::npos;
+      if (sixthColon != std::string::npos)
+        lastParsedColon = sixthColon;
+      else if (fifthColon != std::string::npos)
+        lastParsedColon = fifthColon;
+      else if (fourthColon != std::string::npos)
+        lastParsedColon = fourthColon;
+      else if (thirdColon != std::string::npos)
+        lastParsedColon = thirdColon;
+      else
+        lastParsedColon = secondColon;
+
+      size_t royaltyColon = extraStr.find(':', lastParsedColon + 1);
+      if (royaltyColon != std::string::npos)
+      {
+        std::string royaltyBpsStr = extraStr.substr(lastParsedColon + 1, royaltyColon - lastParsedColon - 1);
+        newToken.royaltyBasisPoints = static_cast<uint16_t>(std::stoi(royaltyBpsStr));
+
+        size_t creatorColon = extraStr.find(':', royaltyColon + 1);
+        std::string creatorHex;
+        if (creatorColon != std::string::npos)
+        {
+          creatorHex = extraStr.substr(royaltyColon + 1, creatorColon - royaltyColon - 1);
+        }
+        else
+        {
+          creatorHex = extraStr.substr(royaltyColon + 1);
+        }
+
+        if (!creatorHex.empty())
+        {
+          common::podFromHex(creatorHex, newToken.creator);
+          newToken.royaltiesEnabled = true;
+        }
+      }
+
       addToken(newToken);
       setBalance(tx.from, newToken.id, tx.amount);
 
       if (backingModel == static_cast<uint8_t>(TokenBackingModel::Backed) ||
           backingModel == static_cast<uint8_t>(TokenBackingModel::Hybrid))
       {
-        // User-created backed tokens use their own public key as bridge operator
         registerAsset("conceal", "native", tx.from, newToken.id, false);
       }
 
-      std::cout << "applyTransaction CreateToken: token created successfully id=" << newToken.id << std::endl;
+      std::cout << "applyTransaction CreateToken: token created successfully id=" << newToken.id
+                << " royalties=" << (newToken.royaltiesEnabled ? "yes" : "no")
+                << " royaltyBps=" << newToken.royaltyBasisPoints << std::endl;
       break;
     }
 
@@ -697,6 +1071,646 @@ namespace Sidechain
                   << " queued CCX unlock for " << common::podToHex(tx.from).substr(0, 16) << std::endl;
       }
 
+      break;
+    }
+
+    case TransactionType::CreateVesting:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+
+      size_t firstColon = extraStr.find(':');
+      size_t secondColon = extraStr.find(':', firstColon + 1);
+      size_t thirdColon = extraStr.find(':', secondColon + 1);
+      size_t fourthColon = extraStr.find(':', thirdColon + 1);
+
+      if (firstColon == std::string::npos || secondColon == std::string::npos ||
+          thirdColon == std::string::npos || fourthColon == std::string::npos)
+      {
+        std::cout << "applyTransaction CreateVesting: PARSE FAILED" << std::endl;
+        return false;
+      }
+
+      crypto::PublicKey beneficiary;
+      std::string beneficiaryHex = extraStr.substr(0, firstColon);
+      common::podFromHex(beneficiaryHex, beneficiary);
+
+      uint64_t totalAllocated = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
+      uint64_t cliffTimestamp = std::stoull(extraStr.substr(secondColon + 1, thirdColon - secondColon - 1));
+      uint64_t vestingEndTimestamp = std::stoull(extraStr.substr(thirdColon + 1, fourthColon - thirdColon - 1));
+
+      bool revocable = false;
+      size_t fifthColon = extraStr.find(':', fourthColon + 1);
+      if (fifthColon != std::string::npos)
+      {
+        revocable = (std::stoi(extraStr.substr(fourthColon + 1, fifthColon - fourthColon - 1)) != 0);
+      }
+      else
+      {
+        revocable = (std::stoi(extraStr.substr(fourthColon + 1)) != 0);
+      }
+
+      getBalance(tx.from, tx.tokenId, fromBalance);
+      if (fromBalance < totalAllocated + tx.fee)
+      {
+        std::cout << "applyTransaction CreateVesting: insufficient balance" << std::endl;
+        return false;
+      }
+
+      setBalance(tx.from, tx.tokenId, fromBalance - totalAllocated);
+
+      VestingSchedule schedule;
+      schedule.scheduleId = nextVestingScheduleId();
+      schedule.creator = tx.from;
+      schedule.beneficiary = beneficiary;
+      schedule.tokenId = tx.tokenId;
+      schedule.totalAllocated = totalAllocated;
+      schedule.releasedAmount = 0;
+      schedule.cliffTimestamp = cliffTimestamp;
+      schedule.vestingEndTimestamp = vestingEndTimestamp;
+      schedule.createdAt = static_cast<uint64_t>(std::time(nullptr));
+      schedule.revocable = revocable;
+      schedule.status = VestingStatus::Active;
+
+      addVestingSchedule(schedule);
+
+      std::cout << "applyTransaction CreateVesting: schedule created id=" << schedule.scheduleId
+                << " total=" << totalAllocated << std::endl;
+      break;
+    }
+
+    case TransactionType::RevokeVesting:
+    {
+      // Parse schedule ID from extra
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+      uint64_t scheduleId = std::stoull(extraStr);
+
+      VestingSchedule schedule;
+      if (!getVestingSchedule(scheduleId, schedule))
+      {
+        std::cout << "applyTransaction RevokeVesting: schedule not found" << std::endl;
+        return false;
+      }
+
+      if (schedule.creator != tx.from)
+      {
+        std::cout << "applyTransaction RevokeVesting: not the creator" << std::endl;
+        return false;
+      }
+
+      if (!schedule.revocable || schedule.status != VestingStatus::Active)
+      {
+        std::cout << "applyTransaction RevokeVesting: not revocable or not active" << std::endl;
+        return false;
+      }
+
+      // Return unvested tokens to creator
+      uint64_t unvested = schedule.totalAllocated - schedule.releasedAmount;
+      getBalance(tx.from, schedule.tokenId, fromBalance);
+      setBalance(tx.from, schedule.tokenId, fromBalance + unvested);
+
+      schedule.status = VestingStatus::Revoked;
+      updateVestingSchedule(schedule);
+
+      std::cout << "applyTransaction RevokeVesting: schedule " << scheduleId
+                << " revoked, returned " << unvested << " tokens" << std::endl;
+      break;
+    }
+
+    case TransactionType::CreateRewardPool:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+
+      size_t firstColon = extraStr.find(':');
+      size_t secondColon = extraStr.find(':', firstColon + 1);
+      size_t thirdColon = extraStr.find(':', secondColon + 1);
+
+      if (firstColon == std::string::npos || secondColon == std::string::npos || thirdColon == std::string::npos)
+      {
+        std::cout << "applyTransaction CreateRewardPool: PARSE FAILED" << std::endl;
+        return false;
+      }
+
+      uint64_t rewardAmount = std::stoull(extraStr.substr(0, firstColon));
+      uint64_t rewardRate = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
+      uint64_t endBlock = std::stoull(extraStr.substr(secondColon + 1, thirdColon - secondColon - 1));
+
+      // Check creator has enough tokens for the reward pool
+      getBalance(tx.from, tx.tokenId, fromBalance);
+      if (fromBalance < rewardAmount + tx.fee)
+      {
+        std::cout << "applyTransaction CreateRewardPool: insufficient balance" << std::endl;
+        return false;
+      }
+
+      setBalance(tx.from, tx.tokenId, fromBalance - rewardAmount);
+
+      RewardPool pool;
+      pool.poolId = nextRewardPoolId();
+      pool.creator = tx.from;
+      pool.tokenId = tx.tokenId;
+      pool.totalRewards = rewardAmount;
+      pool.remainingRewards = rewardAmount;
+      pool.rewardRateBasisPoints = static_cast<uint16_t>(rewardRate);
+      pool.totalStaked = 0;
+      pool.startBlock = topBlockHeight();
+      pool.endBlock = endBlock;
+      pool.active = true;
+
+      addRewardPool(pool);
+
+      std::cout << "applyTransaction CreateRewardPool: pool created id=" << pool.poolId
+                << " rewards=" << rewardAmount << std::endl;
+      break;
+    }
+
+    case TransactionType::FundRewardPool:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+
+      size_t firstColon = extraStr.find(':');
+      uint64_t poolId = std::stoull(extraStr.substr(0, firstColon));
+      uint64_t fundAmount = tx.amount;
+
+      if (firstColon != std::string::npos)
+      {
+        fundAmount = std::stoull(extraStr.substr(firstColon + 1));
+      }
+
+      RewardPool pool;
+      if (!getRewardPool(poolId, pool))
+      {
+        std::cout << "applyTransaction FundRewardPool: pool not found" << std::endl;
+        return false;
+      }
+
+      getBalance(tx.from, pool.tokenId, fromBalance);
+      if (fromBalance < fundAmount + tx.fee)
+      {
+        std::cout << "applyTransaction FundRewardPool: insufficient balance" << std::endl;
+        return false;
+      }
+
+      setBalance(tx.from, pool.tokenId, fromBalance - fundAmount);
+      pool.totalRewards += fundAmount;
+      pool.remainingRewards += fundAmount;
+      updateRewardPool(pool);
+
+      std::cout << "applyTransaction FundRewardPool: pool " << poolId
+                << " funded with " << fundAmount << std::endl;
+      break;
+    }
+    case TransactionType::Stake:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+      uint64_t poolId = std::stoull(extraStr);
+
+      RewardPool pool;
+      if (!getRewardPool(poolId, pool) || !pool.active)
+      {
+        std::cout << "applyTransaction Stake: pool not found or inactive" << std::endl;
+        return false;
+      }
+
+      getBalance(tx.from, tx.tokenId, fromBalance);
+      if (fromBalance < tx.amount + tx.fee)
+      {
+        std::cout << "applyTransaction Stake: insufficient balance" << std::endl;
+        return false;
+      }
+
+      setBalance(tx.from, tx.tokenId, fromBalance - tx.amount);
+
+      StakeEntry entry;
+      entry.entryId = nextStakeEntryId();
+      entry.owner = tx.from;
+      entry.poolId = poolId;
+      entry.tokenId = tx.tokenId;
+      entry.amount = tx.amount;
+      entry.startBlock = topBlockHeight();
+      entry.lastClaimBlock = topBlockHeight();
+      entry.pendingRewards = 0;
+
+      addStakeEntry(entry);
+
+      pool.totalStaked += tx.amount;
+      updateRewardPool(pool);
+
+      std::cout << "applyTransaction Stake: staked " << tx.amount
+                << " in pool " << poolId << std::endl;
+      break;
+    }
+
+    case TransactionType::Unstake:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+      uint64_t entryId = std::stoull(extraStr);
+
+      StakeEntry entry;
+      if (!getStakeEntry(entryId, entry) || entry.owner != tx.from)
+      {
+        std::cout << "applyTransaction Unstake: entry not found or not owner" << std::endl;
+        return false;
+      }
+
+      RewardPool pool;
+      if (!getRewardPool(entry.poolId, pool))
+      {
+        std::cout << "applyTransaction Unstake: pool not found" << std::endl;
+        return false;
+      }
+
+      // Return staked tokens and pending rewards
+      uint64_t returnAmount = entry.amount + entry.pendingRewards;
+      getBalance(tx.from, entry.tokenId, fromBalance);
+      setBalance(tx.from, entry.tokenId, fromBalance + returnAmount);
+
+      if (pool.totalStaked >= entry.amount)
+        pool.totalStaked -= entry.amount;
+      updateRewardPool(pool);
+
+      // Remove entry by zeroing it
+      entry.amount = 0;
+      entry.pendingRewards = 0;
+      updateStakeEntry(entry);
+
+      std::cout << "applyTransaction Unstake: unstaked " << entry.amount
+                << " from pool " << entry.poolId << std::endl;
+      break;
+    }
+
+    case TransactionType::ClaimReward:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+      uint64_t entryId = std::stoull(extraStr);
+
+      StakeEntry entry;
+      if (!getStakeEntry(entryId, entry) || entry.owner != tx.from)
+      {
+        std::cout << "applyTransaction ClaimReward: entry not found or not owner" << std::endl;
+        return false;
+      }
+
+      if (entry.pendingRewards == 0)
+      {
+        std::cout << "applyTransaction ClaimReward: no pending rewards" << std::endl;
+        return false;
+      }
+
+      uint64_t reward = entry.pendingRewards;
+      entry.pendingRewards = 0;
+      entry.lastClaimBlock = topBlockHeight();
+      updateStakeEntry(entry);
+
+      getBalance(tx.from, entry.tokenId, fromBalance);
+      setBalance(tx.from, entry.tokenId, fromBalance + reward);
+
+      std::cout << "applyTransaction ClaimReward: claimed " << reward << std::endl;
+      break;
+    }
+
+    case TransactionType::AmmCreatePool:
+    {
+      // Parse extra: tokenIdB:amountA:amountB:feeBasisPoints
+      // tokenIdA comes from tx.tokenId, amountA from tx.amount
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+
+      size_t firstColon = extraStr.find(':');
+      size_t secondColon = extraStr.find(':', firstColon + 1);
+      size_t thirdColon = extraStr.find(':', secondColon + 1);
+
+      if (firstColon == std::string::npos || secondColon == std::string::npos || thirdColon == std::string::npos)
+      {
+        std::cout << "applyTransaction AmmCreatePool: PARSE FAILED" << std::endl;
+        return false;
+      }
+
+      uint64_t tokenIdB = std::stoull(extraStr.substr(0, firstColon));
+      uint64_t amountA = tx.amount;
+      uint64_t amountB = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
+      uint16_t feeBasisPoints = static_cast<uint16_t>(std::stoi(extraStr.substr(secondColon + 1, thirdColon - secondColon - 1)));
+
+      // Verify creator has sufficient balances
+      getBalance(tx.from, tx.tokenId, fromBalance);
+      uint64_t balanceB = 0;
+      getBalance(tx.from, tokenIdB, balanceB);
+
+      if (fromBalance < amountA || balanceB < amountB)
+      {
+        std::cout << "applyTransaction AmmCreatePool: insufficient balance" << std::endl;
+        return false;
+      }
+
+      // Deduct from creator
+      setBalance(tx.from, tx.tokenId, fromBalance - amountA);
+      setBalance(tx.from, tokenIdB, balanceB - amountB);
+
+      // Find next pool ID
+      uint64_t poolId = 1;
+      std::vector<uint8_t> poolData;
+      while (getMeta("amm_pool_" + std::to_string(poolId), poolData))
+      {
+        ++poolId;
+      }
+
+      // Create the pool
+      AmmPool pool;
+      pool.poolId = poolId;
+      pool.creator = tx.from;
+      pool.tokenIdA = tx.tokenId;
+      pool.tokenIdB = tokenIdB;
+      pool.reserveA = amountA;
+      pool.reserveB = amountB;
+      pool.totalLiquidity = static_cast<uint64_t>(std::sqrt(amountA * amountB));
+      pool.feeBasisPoints = feeBasisPoints;
+      pool.active = true;
+
+      cn::BinaryArray ba = cn::toBinaryArray(pool);
+      putMeta("amm_pool_" + std::to_string(poolId), ba);
+
+      // Give LP tokens to creator
+      AmmPosition pos;
+      pos.positionId = 1;
+      pos.owner = tx.from;
+      pos.poolId = poolId;
+      pos.liquidity = pool.totalLiquidity;
+      pos.lastFeeCheckpoint = 0;
+
+      cn::BinaryArray posBa = cn::toBinaryArray(pos);
+      putMeta("amm_pos_1", posBa);
+
+      std::cout << "applyTransaction AmmCreatePool: pool created id=" << poolId << std::endl;
+      break;
+    }
+
+    case TransactionType::AmmAddLiquidity:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+
+      size_t firstColon = extraStr.find(':');
+      size_t secondColon = extraStr.find(':', firstColon + 1);
+
+      if (firstColon == std::string::npos || secondColon == std::string::npos)
+      {
+        std::cout << "applyTransaction AmmAddLiquidity: PARSE FAILED" << std::endl;
+        return false;
+      }
+
+      uint64_t poolId = std::stoull(extraStr.substr(0, firstColon));
+      uint64_t amountA = tx.amount;
+      uint64_t amountB = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
+
+      // Load pool
+      AmmPool pool;
+      std::vector<uint8_t> poolData;
+      if (!getMeta("amm_pool_" + std::to_string(poolId), poolData))
+      {
+        std::cout << "applyTransaction AmmAddLiquidity: pool not found" << std::endl;
+        return false;
+      }
+      cn::fromBinaryArray(pool, poolData);
+
+      if (!pool.active)
+      {
+        std::cout << "applyTransaction AmmAddLiquidity: pool inactive" << std::endl;
+        return false;
+      }
+
+      // Verify balance
+      getBalance(tx.from, tx.tokenId, fromBalance);
+      uint64_t balanceB = 0;
+      getBalance(tx.from, pool.tokenIdB, balanceB);
+
+      if (fromBalance < amountA || balanceB < amountB)
+      {
+        std::cout << "applyTransaction AmmAddLiquidity: insufficient balance" << std::endl;
+        return false;
+      }
+
+      // Deduct from provider
+      setBalance(tx.from, tx.tokenId, fromBalance - amountA);
+      setBalance(tx.from, pool.tokenIdB, balanceB - amountB);
+
+      // Calculate LP tokens
+      uint64_t liquidityMinted = 0;
+      if (pool.totalLiquidity == 0)
+        liquidityMinted = static_cast<uint64_t>(std::sqrt(amountA * amountB));
+      else
+      {
+        uint64_t shareA = (amountA * pool.totalLiquidity) / pool.reserveA;
+        uint64_t shareB = (amountB * pool.totalLiquidity) / pool.reserveB;
+        liquidityMinted = std::min(shareA, shareB);
+      }
+
+      // Update pool
+      pool.reserveA += amountA;
+      pool.reserveB += amountB;
+      pool.totalLiquidity += liquidityMinted;
+
+      cn::BinaryArray updatedBa = cn::toBinaryArray(pool);
+      putMeta("amm_pool_" + std::to_string(poolId), updatedBa);
+
+      // Find or create position
+      uint64_t posId = 1;
+      std::vector<uint8_t> posData;
+      AmmPosition pos;
+      bool found = false;
+
+      while (getMeta("amm_pos_" + std::to_string(posId), posData))
+      {
+        cn::fromBinaryArray(pos, posData);
+        if (pos.poolId == poolId && pos.owner == tx.from)
+        {
+          pos.liquidity += liquidityMinted;
+          found = true;
+          break;
+        }
+        ++posId;
+        posData.clear();
+      }
+
+      if (!found)
+      {
+        pos.positionId = posId;
+        pos.owner = tx.from;
+        pos.poolId = poolId;
+        pos.liquidity = liquidityMinted;
+        pos.lastFeeCheckpoint = 0;
+      }
+
+      cn::BinaryArray posBa = cn::toBinaryArray(pos);
+      putMeta("amm_pos_" + std::to_string(pos.positionId), posBa);
+
+      std::cout << "applyTransaction AmmAddLiquidity: pool=" << poolId
+                << " amountA=" << amountA << " amountB=" << amountB << std::endl;
+      break;
+    }
+
+    case TransactionType::AmmRemoveLiquidity:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+      uint64_t positionId = std::stoull(extraStr);
+
+      // Load position
+      AmmPosition pos;
+      std::vector<uint8_t> posData;
+      if (!getMeta("amm_pos_" + std::to_string(positionId), posData))
+      {
+        std::cout << "applyTransaction AmmRemoveLiquidity: position not found" << std::endl;
+        return false;
+      }
+      cn::fromBinaryArray(pos, posData);
+
+      if (pos.owner != tx.from)
+      {
+        std::cout << "applyTransaction AmmRemoveLiquidity: not position owner" << std::endl;
+        return false;
+      }
+
+      if (pos.liquidity == 0)
+      {
+        std::cout << "applyTransaction AmmRemoveLiquidity: position empty" << std::endl;
+        return false;
+      }
+
+      // Load pool
+      AmmPool pool;
+      std::vector<uint8_t> poolData;
+      if (!getMeta("amm_pool_" + std::to_string(pos.poolId), poolData))
+      {
+        std::cout << "applyTransaction AmmRemoveLiquidity: pool not found" << std::endl;
+        return false;
+      }
+      cn::fromBinaryArray(pool, poolData);
+
+      // Calculate share
+      uint64_t shareA = (pos.liquidity * pool.reserveA) / pool.totalLiquidity;
+      uint64_t shareB = (pos.liquidity * pool.reserveB) / pool.totalLiquidity;
+
+      // Update pool
+      pool.reserveA -= shareA;
+      pool.reserveB -= shareB;
+      pool.totalLiquidity -= pos.liquidity;
+
+      cn::BinaryArray updatedBa = cn::toBinaryArray(pool);
+      putMeta("amm_pool_" + std::to_string(pos.poolId), updatedBa);
+
+      // Return tokens
+      getBalance(tx.from, pool.tokenIdA, fromBalance);
+      uint64_t balanceB = 0;
+      getBalance(tx.from, pool.tokenIdB, balanceB);
+      setBalance(tx.from, pool.tokenIdA, fromBalance + shareA);
+      setBalance(tx.from, pool.tokenIdB, balanceB + shareB);
+
+      // Zero position
+      pos.liquidity = 0;
+      cn::BinaryArray posBa = cn::toBinaryArray(pos);
+      putMeta("amm_pos_" + std::to_string(positionId), posBa);
+
+      std::cout << "applyTransaction AmmRemoveLiquidity: position=" << positionId
+                << " shareA=" << shareA << " shareB=" << shareB << std::endl;
+      break;
+    }
+
+    case TransactionType::AmmSwap:
+    {
+      std::string extraStr(tx.extra.begin(), tx.extra.end());
+
+      size_t firstColon = extraStr.find(':');
+      size_t secondColon = extraStr.find(':', firstColon + 1);
+
+      if (firstColon == std::string::npos || secondColon == std::string::npos)
+      {
+        std::cout << "applyTransaction AmmSwap: PARSE FAILED" << std::endl;
+        return false;
+      }
+
+      uint64_t poolId = std::stoull(extraStr.substr(0, firstColon));
+      uint64_t minAmountOut = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
+
+      // Load pool
+      AmmPool pool;
+      std::vector<uint8_t> poolData;
+      if (!getMeta("amm_pool_" + std::to_string(poolId), poolData))
+      {
+        std::cout << "applyTransaction AmmSwap: pool not found" << std::endl;
+        return false;
+      }
+      cn::fromBinaryArray(pool, poolData);
+
+      if (!pool.active)
+      {
+        std::cout << "applyTransaction AmmSwap: pool inactive" << std::endl;
+        return false;
+      }
+
+      // Determine input/output tokens
+      uint64_t tokenIdIn = tx.tokenId;
+      uint64_t tokenIdOut;
+      uint64_t reserveIn, reserveOut;
+
+      if (tokenIdIn == pool.tokenIdA)
+      {
+        tokenIdOut = pool.tokenIdB;
+        reserveIn = pool.reserveA;
+        reserveOut = pool.reserveB;
+      }
+      else if (tokenIdIn == pool.tokenIdB)
+      {
+        tokenIdOut = pool.tokenIdA;
+        reserveIn = pool.reserveB;
+        reserveOut = pool.reserveA;
+      }
+      else
+      {
+        std::cout << "applyTransaction AmmSwap: token not in pool" << std::endl;
+        return false;
+      }
+
+      // Calculate output
+      uint64_t amountInAfterFee = tx.amount * (10000 - pool.feeBasisPoints) / 10000;
+      uint64_t k = reserveIn * reserveOut;
+      uint64_t newReserveIn = reserveIn + amountInAfterFee;
+      uint64_t newReserveOut = k / newReserveIn;
+      uint64_t amountOut = reserveOut - newReserveOut;
+
+      if (amountOut < minAmountOut)
+      {
+        std::cout << "applyTransaction AmmSwap: slippage exceeded" << std::endl;
+        return false;
+      }
+
+      // Verify balance
+      getBalance(tx.from, tokenIdIn, fromBalance);
+      if (fromBalance < tx.amount)
+      {
+        std::cout << "applyTransaction AmmSwap: insufficient balance" << std::endl;
+        return false;
+      }
+
+      // Execute swap
+      setBalance(tx.from, tokenIdIn, fromBalance - tx.amount);
+
+      uint64_t outBalance = 0;
+      getBalance(tx.to, tokenIdOut, outBalance);
+      setBalance(tx.to, tokenIdOut, outBalance + amountOut);
+
+      // Update pool reserves
+      if (tokenIdIn == pool.tokenIdA)
+      {
+        pool.reserveA += tx.amount;
+        pool.reserveB -= amountOut;
+      }
+      else
+      {
+        pool.reserveB += tx.amount;
+        pool.reserveA -= amountOut;
+      }
+
+      cn::BinaryArray updatedBa = cn::toBinaryArray(pool);
+      putMeta("amm_pool_" + std::to_string(poolId), updatedBa);
+
+      std::cout << "applyTransaction AmmSwap: pool=" << poolId
+                << " in=" << tx.amount << " out=" << amountOut << std::endl;
       break;
     }
 
