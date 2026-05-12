@@ -424,9 +424,9 @@ namespace cn
     return m_blocks.empty();
   }
 
-  // Returns a const reference to the BlockEntry at the given height
-  // When MDBX is active, checks an LRU cache first, then loads and deserialises from the database
-  const Blockchain::BlockEntry &Blockchain::blocksAt(size_t i) const
+  // Returns a copy of the BlockEntry at the given height for MDBX path
+  // (return by value avoids dangling references from the LRU cache)
+  Blockchain::BlockEntry Blockchain::blocksAt(size_t i) const
   {
 #ifdef HAVE_MDBX
     if (m_useMdbx && m_mdbxStorage)
@@ -435,7 +435,7 @@ namespace cn
       for (size_t c = 0; c < m_cachedEntries.size(); ++c)
       {
         if (m_cachedEntries[c].height == i)
-          return m_cachedEntries[c].entry;
+          return m_cachedEntries[c].entry; // return copy, not reference
       }
 
       // Load from MDBX
@@ -450,25 +450,25 @@ namespace cn
       // Insert into the circular LRU cache
       if (m_cachedEntries.size() < MDBX_CACHE_SIZE)
       {
-        m_cachedEntries.push_back({i, std::move(entry)});
-        return m_cachedEntries.back().entry;
+        m_cachedEntries.push_back({i, entry}); // store a copy
+        return entry;                          // return by value
       }
       else
       {
-        m_cachedEntries[m_cacheIndex] = {i, std::move(entry)};
-        size_t insertedIndex = m_cacheIndex;
+        m_cachedEntries[m_cacheIndex] = {i, entry};
         m_cacheIndex = (m_cacheIndex + 1) % MDBX_CACHE_SIZE;
-        return m_cachedEntries[insertedIndex].entry;
+        return entry; // return by value
       }
     }
 #endif
     return const_cast<Blocks &>(m_blocks)[i];
   }
 
-  // Returns a mutable reference to the BlockEntry at the given height (delegates to const version via const_cast)
-  Blockchain::BlockEntry &Blockchain::blocksAt(size_t i)
+  // Returns a copy of the BlockEntry at the given height
+  // Non-const overload delegates to const version
+  Blockchain::BlockEntry Blockchain::blocksAt(size_t i)
   {
-    return const_cast<BlockEntry &>(const_cast<const Blockchain *>(this)->blocksAt(i));
+    return const_cast<const Blockchain *>(this)->blocksAt(i);
   }
 
   // Returns a copy of the last BlockEntry in the chain
@@ -896,7 +896,7 @@ namespace cn
             memcpy(m_blockHashes.data(), metaBuf.data(), metaBuf.size());
           }
 
-          // Load hash > height map from meta blob
+          // Load hash→height map from meta blob
           if (m_mdbxStorage->getMeta("idx_hash2height", metaBuf))
           {
             const uint8_t *ptr = metaBuf.data();
@@ -1025,24 +1025,44 @@ namespace cn
               msigLoaded = !m_multisignatureOutputs.empty();
             }
 
-            fastIndexesLoaded = outputsLoaded && msigLoaded && !m_spent_keys.empty() && !m_transactionMap.empty();
+            // Load deposit index from meta
+            bool depositsLoaded = false;
+            if (m_mdbxStorage->getMeta("idx_deposits", metaBuf))
+            {
+              const uint8_t *ptr = metaBuf.data();
+              const uint8_t *end = ptr + metaBuf.size();
+              m_depositIndex = DepositIndex();
+              while (ptr + sizeof(uint64_t) <= end)
+              {
+                uint64_t val;
+                memcpy(&val, ptr, sizeof(val));
+                ptr += sizeof(val);
+                m_depositIndex.pushBlock(val, 0);
+              }
+              depositsLoaded = !metaBuf.empty();
+            }
 
-            // Rebuild deposit index by scanning all blocks
-            m_depositIndex = DepositIndex();
+            fastIndexesLoaded = outputsLoaded && msigLoaded && depositsLoaded && !m_spent_keys.empty() && !m_transactionMap.empty();
+
+            if (!fastIndexesLoaded)
+            {
+              m_depositIndex = DepositIndex();
+            }
+
+            // Scan blocks to rebuild any missing indexes and push deposit data
             for (uint32_t h = 0; h <= topHeight; ++h)
             {
-              if (h % 10000 == 0)
-                logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
-
               cn::BinaryArray ba;
               if (m_mdbxStorage->getBlockEntry(h, ba))
               {
                 BlockEntry entry;
                 if (cn::fromBinaryArray(entry, ba))
                 {
-                  // If fast indexes weren't loaded from meta, build them from the block entries
                   if (!fastIndexesLoaded)
                   {
+                    if (h % 10000 == 0)
+                      logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
+
                     crypto::Hash blockHash = get_block_hash(entry.bl);
 
                     for (uint32_t t = 0; t < entry.transactions.size(); ++t)
@@ -1077,11 +1097,14 @@ namespace cn
                     }
                   }
 
-                  // Accumulate deposit interest from all transactions in this block
-                  uint64_t interest = 0;
-                  for (const auto &tx : entry.transactions)
-                    interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
-                  pushToDepositIndex(entry, interest);
+                  // Always process deposit interest for every block
+                  if (!depositsLoaded)
+                  {
+                    uint64_t interest = 0;
+                    for (const auto &tx : entry.transactions)
+                      interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
+                    pushToDepositIndex(entry, interest);
+                  }
                 }
               }
             }
@@ -1090,7 +1113,12 @@ namespace cn
             for (const auto &h : m_blockHashes)
               m_blockIndex.push(h);
 
-            logger(INFO) << "Fast index loaded: " << m_blockHashes.size() << " blocks";
+            if (fastIndexesLoaded && depositsLoaded)
+              logger(INFO) << "Fast index loaded: " << m_blockHashes.size() << " blocks";
+            else if (fastIndexesLoaded)
+              logger(INFO) << "Fast index loaded (deposit index rebuilt): " << m_blockHashes.size() << " blocks";
+            else
+              logger(INFO) << "Fast index loaded (full rebuild): " << m_blockHashes.size() << " blocks";
           }
           else
           {
@@ -1837,18 +1865,10 @@ namespace cn
         return chain;
       };
 
-      // Check if startBlockId is in the main chain
-      size_t height = 0;
-      bool found = false;
-      for (size_t i = 0; i < m_blockHashes.size(); ++i)
-      {
-        if (m_blockHashes[i] == startBlockId)
-        {
-          height = i;
-          found = true;
-          break;
-        }
-      }
+      // Check if startBlockId is in the main chain (O(1) hash map lookup)
+      auto it = m_hashToHeight.find(startBlockId);
+      bool found = (it != m_hashToHeight.end());
+      size_t height = found ? it->second : 0;
 
       if (found)
         return buildFromHeight(height);
@@ -1867,19 +1887,10 @@ namespace cn
         currentId = blockchainAncestor;
       }
 
-      // blockchainAncestor should now be in the main chain
-      size_t ancestorHeight = 0;
-      bool ancestorFound = false;
-      for (size_t i = 0; i < m_blockHashes.size(); ++i)
-      {
-        if (m_blockHashes[i] == blockchainAncestor)
-        {
-          ancestorHeight = i;
-          ancestorFound = true;
-          break;
-        }
-      }
-      assert(ancestorFound);
+      // blockchainAncestor should now be in the main chain (O(1) hash map lookup)
+      auto ancIt = m_hashToHeight.find(blockchainAncestor);
+      assert(ancIt != m_hashToHeight.end());
+      size_t ancestorHeight = ancIt->second;
 
       // Build main chain sparse part from ancestor
       std::vector<crypto::Hash> mainPart = buildFromHeight(ancestorHeight);

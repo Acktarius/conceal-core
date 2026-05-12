@@ -16,7 +16,7 @@
 #include "CryptoNoteCore/Blockchain.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
-#include "CryptoNoteCore/Blockchain.h"
+#include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "Common/CommandLine.h"
 #include "Common/FileMappedVector.h"
 #include "Common/StringTools.h"
@@ -185,7 +185,6 @@ struct MdbxSource : BlockSource
 };
 
 // Local copy of Blockchain::MultisignatureOutputUsage (which is private in Blockchain.h)
-// Tracks whether a multisignature output has been spent
 struct MultisigOutputUsage
 {
   Blockchain::TransactionIndex transactionIndex;
@@ -202,22 +201,100 @@ struct MigrationIndexes
   std::unordered_map<crypto::Hash, uint32_t> hashToHeight;
   std::unordered_map<crypto::Hash, Blockchain::TransactionIndex> transactionMap;
   std::unordered_map<crypto::KeyImage, uint32_t> spentKeys;
-  // outputs: amount -> list of (TransactionIndex, outputIndex) pairs
   std::unordered_map<uint64_t, std::vector<std::pair<Blockchain::TransactionIndex, uint16_t>>> outputs;
-  // multisigOutputs: amount -> list of MultisignatureOutputUsage
   std::unordered_map<uint64_t, std::vector<MultisigOutputUsage>> multisigOutputs;
+  std::vector<uint64_t> depositIndex;
 
   void reserve(uint32_t totalBlocks)
   {
     blockHashes.reserve(totalBlocks);
     hashToHeight.reserve(totalBlocks);
-    transactionMap.reserve(totalBlocks * 8); // rough estimate, ~8 tx/block
+    transactionMap.reserve(totalBlocks * 8);
     spentKeys.reserve(totalBlocks * 8);
   }
 };
 
+// Validates a single transaction for structural integrity.
+// Returns true if the transaction appears valid, false if corrupted.
+bool validateTransaction(const Transaction &tx, uint32_t height)
+{
+  // Check that inputs are parseable
+  for (const auto &input : tx.inputs)
+  {
+    if (input.type() == typeid(KeyInput))
+    {
+      const auto &ki = boost::get<KeyInput>(input);
+      // keyImage should not be all zeros
+      static const crypto::KeyImage ZERO_KI = {};
+      if (memcmp(&ki.keyImage, &ZERO_KI, sizeof(crypto::KeyImage)) == 0)
+        return false;
+    }
+    else if (input.type() == typeid(MultisignatureInput))
+    {
+      const auto &ms = boost::get<MultisignatureInput>(input);
+      if (ms.amount == 0)
+        return false;
+    }
+    else if (input.type() == typeid(BaseInput))
+    {
+      const auto &base = boost::get<BaseInput>(input);
+      if (base.blockIndex != height)
+        return false;
+    }
+    else
+    {
+      // Unknown input type
+      return false;
+    }
+  }
+
+  // Check that outputs are parseable and have valid types
+  for (const auto &output : tx.outputs)
+  {
+    if (output.amount == 0)
+      return false;
+
+    if (output.target.type() == typeid(KeyOutput))
+    {
+      const auto &ko = boost::get<KeyOutput>(output.target);
+      static const crypto::PublicKey ZERO_PK = {};
+      if (memcmp(&ko.key, &ZERO_PK, sizeof(crypto::PublicKey)) == 0)
+        return false;
+    }
+    else if (output.target.type() == typeid(MultisignatureOutput))
+    {
+      const auto &mo = boost::get<MultisignatureOutput>(output.target);
+      if (mo.keys.empty() || mo.requiredSignatureCount == 0)
+        return false;
+    }
+    else
+    {
+      // Unknown output type
+      return false;
+    }
+  }
+
+  // Check that unlock time is reasonable (not a garbage value)
+  // Max unlock time is current timestamp + some reasonable delta
+  // A garbage value like 7948606249959508055 is clearly invalid
+  if (tx.unlockTime > static_cast<uint64_t>(time(nullptr)) + (100 * 365 * 24 * 60 * 60))
+  {
+    // Unlock time is more than 100 years in the future, likely garbage
+    return false;
+  }
+
+  // Check that version is valid
+  if (tx.version < 1 || tx.version > 2)
+    return false;
+
+  // Check that signature count matches input count
+  if (tx.signatures.size() != tx.inputs.size())
+    return false;
+
+  return true;
+}
+
 // Writes all fast‑load indexes to the MDBX meta database.
-// Mirrors the logic in Blockchain::storeCache().
 void writeFastIndexes(CryptoNote::MDBXBlockchainStorage &mdbxStorage,
                       const MigrationIndexes &idx)
 {
@@ -344,6 +421,20 @@ void writeFastIndexes(CryptoNote::MDBXBlockchainStorage &mdbxStorage,
       }
     }
     mdbxStorage.putMeta("idx_msig", std::move(buf));
+  }
+
+  // idx_deposits: array of uint64_t deposit amounts per height
+  {
+    std::vector<uint8_t> buf;
+    buf.reserve(sizeof(uint64_t) * idx.depositIndex.size());
+    for (size_t i = 0; i < idx.depositIndex.size(); ++i)
+    {
+      uint64_t val = idx.depositIndex[i];
+      buf.insert(buf.end(),
+                 reinterpret_cast<const uint8_t *>(&val),
+                 reinterpret_cast<const uint8_t *>(&val) + sizeof(val));
+    }
+    mdbxStorage.putMeta("idx_deposits", std::move(buf));
   }
 
   // idx_topheight: the current chain height
@@ -489,8 +580,9 @@ int main(int argc, char *argv[])
   MigrationIndexes idx;
   idx.reserve(totalBlocks);
 
-  // Track any inconsistencies found (for rescue mode)
+  // Track any inconsistencies found
   uint32_t brokenBlocks = 0;
+  uint32_t corruptedTxs = 0;
   uint32_t lastGoodHeight = 0;
 
   // Migrate every block, building all fast‑load indexes as we go
@@ -528,6 +620,35 @@ int main(int argc, char *argv[])
       }
     }
 
+    // Validate all transactions in this block
+    bool blockValid = true;
+    for (uint32_t t = 0; t < entry.transactions.size(); ++t)
+    {
+      if (!validateTransaction(entry.transactions[t].tx, h))
+      {
+        std::cerr << "Warning: block " << h << " has corrupted transaction at index " << t << std::endl;
+        corruptedTxs++;
+        blockValid = false;
+        break;
+      }
+    }
+
+    // Also validate the base transaction
+    if (blockValid && !validateTransaction(entry.bl.baseTransaction, h))
+    {
+      std::cerr << "Warning: block " << h << " has corrupted base transaction" << std::endl;
+      corruptedTxs++;
+      blockValid = false;
+    }
+
+    if (!blockValid)
+    {
+      brokenBlocks++;
+      std::cout << "Block " << h << " contains corrupted data. Truncating chain at height " << lastGoodHeight << std::endl;
+      totalBlocks = lastGoodHeight + 1;
+      break;
+    }
+
     // Build the lightweight header POD
     BlockHeaderPOD hdr;
     hdr.majorVersion = entry.bl.majorVersion;
@@ -540,7 +661,7 @@ int main(int argc, char *argv[])
     hdr.alreadyGeneratedCoins = entry.already_generated_coins;
     hdr.height = entry.height;
 
-    // Build fast‑load indexes (same logic as Blockchain::init() rebuild loop)
+    // Build fast‑load indexes
     for (uint32_t t = 0; t < entry.transactions.size(); ++t)
     {
       crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
@@ -565,7 +686,7 @@ int main(int argc, char *argv[])
         }
       }
 
-      // Track outputs (key outputs and multisig outputs)
+      // Track outputs
       for (uint32_t o = 0; o < entry.transactions[t].tx.outputs.size(); ++o)
       {
         const auto &out = entry.transactions[t].tx.outputs[o];
@@ -583,6 +704,37 @@ int main(int argc, char *argv[])
         }
       }
     }
+
+    // Track deposit amounts
+    int64_t deposit = 0;
+    uint64_t interest = 0;
+    for (const auto &tx : entry.transactions)
+    {
+      for (const auto &in : tx.tx.inputs)
+      {
+        if (in.type() == typeid(MultisignatureInput))
+        {
+          auto &multisign = boost::get<MultisignatureInput>(in);
+          if (multisign.term > 0)
+            deposit -= multisign.amount;
+        }
+      }
+      for (const auto &out : tx.tx.outputs)
+      {
+        if (out.target.type() == typeid(MultisignatureOutput))
+        {
+          auto &multisign = boost::get<MultisignatureOutput>(out.target);
+          if (multisign.term > 0)
+            deposit += out.amount;
+        }
+      }
+      interest += currency.calculateTotalTransactionInterest(tx.tx, h);
+    }
+
+    if (h == 0)
+      idx.depositIndex.push_back(static_cast<uint64_t>(deposit));
+    else
+      idx.depositIndex.push_back(idx.depositIndex.back() + deposit);
 
     // Serialize the full block entry
     BinaryArray ba = toBinaryArray(entry);
@@ -606,7 +758,9 @@ int main(int argc, char *argv[])
                 << " (" << percent << "%)"
                 << " - " << elapsed << "s elapsed";
       if (brokenBlocks > 0)
-        std::cout << " [" << brokenBlocks << " inconsistencies found]";
+        std::cout << " [" << brokenBlocks << " blocks skipped]";
+      if (corruptedTxs > 0)
+        std::cout << " [" << corruptedTxs << " corrupted txs]";
       std::cout << std::endl;
     }
   }
@@ -623,6 +777,7 @@ int main(int argc, char *argv[])
   auto totalMinutes = totalSeconds / 60;
   auto remainingSeconds = totalSeconds % 60;
 
+  std::cout << std::endl;
   std::cout << "Migration complete!" << std::endl;
   std::cout << "  Blocks migrated: " << idx.blockHashes.size() << std::endl;
   std::cout << "  Transactions indexed: " << idx.transactionMap.size() << std::endl;
@@ -633,14 +788,23 @@ int main(int argc, char *argv[])
   std::cout << "  Speed: " << (idx.blockHashes.size() / std::max(totalSeconds, 1L)) << " blocks/sec" << std::endl;
   std::cout << "  New database: " << mdbxPath << std::endl;
   if (brokenBlocks > 0)
-    std::cout << "  Inconsistencies found: " << brokenBlocks << " (data may be truncated)" << std::endl;
-
-  // Spot-check verification: verify 10 random blocks are readable and have correct hashes
-  std::cout << "Verifying migrated data..." << std::endl;
-  bool verificationOk = true;
-  for (uint32_t i = 0; i < 10 && i < totalBlocks; ++i)
   {
-    uint32_t h = (i == 0) ? 0 : (static_cast<uint32_t>(rand()) % (totalBlocks - 1) + 1);
+    std::cout << std::endl;
+    std::cout << "  WARNING: " << brokenBlocks << " blocks were skipped due to corruption." << std::endl;
+    std::cout << "  The chain was truncated at height " << lastGoodHeight << "." << std::endl;
+    std::cout << "  The daemon will sync the remaining blocks from the network." << std::endl;
+  }
+
+  // Spot-check verification: verify 20 random blocks are readable and have correct hashes
+  std::cout << std::endl
+            << "Verifying migrated data..." << std::endl;
+  bool verificationOk = true;
+  uint32_t blocksToCheck = std::min(static_cast<uint32_t>(20), static_cast<uint32_t>(idx.blockHashes.size()));
+  for (uint32_t i = 0; i < blocksToCheck && verificationOk; ++i)
+  {
+    uint32_t h = (i == 0) ? 0 : (static_cast<uint32_t>(rand()) % (idx.blockHashes.size() > 1 ? idx.blockHashes.size() - 1 : 1) + 1);
+    if (h >= idx.blockHashes.size())
+      h = idx.blockHashes.size() > 0 ? static_cast<uint32_t>(idx.blockHashes.size() - 1) : 0;
 
     BinaryArray migratedBa;
     if (!mdbxStorage.getBlockEntry(h, migratedBa))
@@ -683,7 +847,8 @@ int main(int argc, char *argv[])
   source->close();
   mdbxStorage.close();
 
-  std::cout << "Done. Start your daemon with:" << std::endl;
+  std::cout << std::endl
+            << "Done. Start your daemon with:" << std::endl;
   std::cout << "  ./conceald --use-mdbx --data-dir " << newDir << std::endl;
 
   return verificationOk ? 0 : 1;

@@ -258,9 +258,9 @@ namespace cn
     // Returns true if the main chain has no blocks
     bool blocksEmpty() const;
     // Provides read‑only access to a BlockEntry by index
-    const BlockEntry &blocksAt(size_t i) const;
+    BlockEntry blocksAt(size_t i) const;
     // Provides mutable access to a BlockEntry by index
-    BlockEntry &blocksAt(size_t i);
+    BlockEntry blocksAt(size_t i);
     // Returns a copy of the last BlockEntry in the chain
     BlockEntry blocksBack() const;
     // Clears the in‑memory block vector (used during shutdown or reset)

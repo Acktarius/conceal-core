@@ -1,6 +1,5 @@
 add_definitions(-DMINIUPNP_STATICLIB)
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/external/parallel_hashmap)
-include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/external/FTXUI/include)
 
 if(ENABLE_MDBX AND MDBX_INCLUDE_DIR)
   include_directories(${MDBX_INCLUDE_DIR})
@@ -39,8 +38,6 @@ file(GLOB_RECURSE BOLT_TUI_FILES BoltClientWallet/*)
 file(GLOB_RECURSE BOLTRPC_FILES BoltRPC/*)
 file(GLOB_RECURSE SIDECHAIN_FILES Sidechain/*)
 file(GLOB_RECURSE BOLTHTTP_FILES BoltHttp/*)
-
-file(GLOB_RECURSE CONCEAL_FILES Conceal/*)
 
 if(MSVC OR MINGW)
   file(GLOB_RECURSE System System/* Platform/Windows/System/*)
@@ -86,12 +83,12 @@ if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
   endif()
 endif()
 
-# Sidechain static library (for Conceal to link against)
+# Sidechain static library
 add_library(SidechainLib STATIC ${SIDECHAIN_FILES})
 target_link_libraries(SidechainLib PUBLIC NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 add_dependencies(SidechainLib version)
 
-# BoltRPC static library (for Conceal to link against)
+# BoltRPC static library
 add_library(BoltRpcLib STATIC ${BOLTRPC_FILES})
 target_link_libraries(BoltRpcLib PUBLIC Mnemonics NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 add_dependencies(BoltRpcLib version)
@@ -103,8 +100,6 @@ add_executable(Optimizer ${Optimizer})
 add_executable(BoltClientWallet ${BOLT_TUI_FILES})
 add_executable(BoltRPC ${BOLTRPC_FILES})
 add_executable(Sidechain ${SIDECHAIN_FILES})
-
-add_executable(Conceal ${CONCEAL_FILES})
 
 if (MSVC)
   target_link_libraries(System ws2_32)
@@ -153,21 +148,6 @@ target_link_libraries(Sidechain BoltSync BoltCore BoltHttp NodeRpcProxy Rpc Http
   ${CMAKE_THREAD_LIBS_INIT}
 )
 
-target_link_libraries(Conceal CryptoNoteCore Storage P2P Rpc System Http Logging Common crypto
-    NodeRpcProxy System
-    BoltSync BoltCore BoltHttp
-    SidechainLib BoltRpcLib
-    Serialization
-    BlockchainExplorer
-    ftxui::dom ftxui::screen ftxui::component
-    libminiupnpc-static
-    -Wl,--start-group
-        Common Logging crypto
-    -Wl,--end-group
-    ${Boost_LIBRARIES}
-    ${CMAKE_THREAD_LIBS_INIT}
-)
-
 # Tools (ColdSync + MigrationTool)
 add_subdirectory(Tools)
 
@@ -178,10 +158,8 @@ if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
   target_link_libraries(BoltClientWallet -lresolv)
   target_link_libraries(BoltRPC -lresolv)
   target_link_libraries(Sidechain -lresolv)
-  target_link_libraries(Conceal -lresolv)
 endif ()
 
-add_dependencies(Conceal version)
 add_dependencies(Rpc version)
 add_dependencies(Daemon version)
 add_dependencies(ConcealWallet version)
@@ -196,4 +174,3 @@ set_property(TARGET Daemon PROPERTY OUTPUT_NAME "conceald")
 set_property(TARGET Optimizer PROPERTY OUTPUT_NAME "optimizer")
 set_property(TARGET BoltRPC PROPERTY OUTPUT_NAME "conceal-rpc")
 set_property(TARGET Sidechain PROPERTY OUTPUT_NAME "conceal-side")
-set_property(TARGET Conceal PROPERTY OUTPUT_NAME "conceal")
