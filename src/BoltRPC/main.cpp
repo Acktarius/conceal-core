@@ -238,7 +238,7 @@ int main(int argc, char *argv[])
       lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
       logger(logging::INFO) << "Scan complete — " << outputInfos.size() << " outputs found";
 
-      stateManager.save(outputInfos, nodeHeight);
+      stateManager.save(outputInfos, nodeHeight, cfg.viewKeyHex, cfg.spendKeyHex);
       logger(logging::INFO) << "State saved to " << cfg.stateFile;
     }
     else
@@ -293,7 +293,7 @@ int main(int argc, char *argv[])
   }
 
   rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
-  rpcServer.setSyncedHeight(initialHeight);
+  rpcServer.setSyncedHeight(lastScannedHeight.load());
 
   // Graceful shutdown
   std::atomic<bool> stopRequested{false};
