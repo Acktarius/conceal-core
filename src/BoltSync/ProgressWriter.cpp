@@ -19,19 +19,27 @@ namespace BoltSync
 
   void ProgressWriter::start()
   {
+    m_stop = false;
+
     m_displayThread = std::thread([this]()
                                   {
       auto startTime = std::chrono::steady_clock::now();
-      while (true)
+      while (!m_stop)
       {
         std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (m_stop)
+          break;
+
         uint64_t processed = m_blocksProcessed.load(std::memory_order_relaxed);
-        if (processed == 0 || m_topHeight == 0) continue;
+        if (processed == 0 || m_topHeight == 0)
+          continue;
+
         float percent = (float)processed / (float)m_topHeight * 100.0f;
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - startTime).count();
         float speed = elapsed > 0 ? (float)(processed - m_lastScannedHeight) / (float)elapsed : 0;
         uint64_t eta = speed > 0 ? (uint64_t)((m_topHeight - processed) / speed) : 0;
+
         std::cout << "\r[Progress] " << processed << "/" << m_topHeight
                   << " (" << std::fixed << std::setprecision(1) << percent << "%)"
                   << " | Speed: " << (int)speed << " blk/s"
@@ -43,7 +51,7 @@ namespace BoltSync
     {
       m_fileThread = std::thread([this]()
                                  {
-        while (true)
+        while (!m_stop)
         {
           std::ofstream pf(m_progressFile, std::ios::trunc);
           if (pf.is_open())
@@ -58,15 +66,10 @@ namespace BoltSync
 
   void ProgressWriter::stop()
   {
+    m_stop = true;
     if (m_displayThread.joinable())
-    {
-      pthread_cancel(m_displayThread.native_handle());
       m_displayThread.join();
-    }
     if (m_fileThread.joinable())
-    {
-      pthread_cancel(m_fileThread.native_handle());
       m_fileThread.join();
-    }
   }
 }

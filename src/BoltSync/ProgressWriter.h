@@ -28,5 +28,6 @@ namespace BoltSync
     uint32_t m_lastScannedHeight;
     std::thread m_displayThread;
     std::thread m_fileThread;
+    std::atomic<bool> m_stop{false};
   };
 }
