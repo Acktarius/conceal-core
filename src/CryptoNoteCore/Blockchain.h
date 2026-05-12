@@ -33,6 +33,7 @@
 
 #include <Logging/LoggerRef.h>
 
+// Guarded MDBX — cant mix SwappedVector
 #ifdef HAVE_MDBX
 #include "Storage/MDBXBlockchainStorage.h"
 #endif

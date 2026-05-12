@@ -565,6 +565,9 @@ namespace cn
   bool NodeServer::run() {
     logger(INFO) <<  "Starting node server";
 
+    m_autoScaleTimer = platform_system::Timer(m_dispatcher);
+    m_workingContextGroup.spawn(std::bind(&NodeServer::autoScaleLoop, this));
+
     m_workingContextGroup.spawn(std::bind(&NodeServer::acceptLoop, this));
     m_workingContextGroup.spawn(std::bind(&NodeServer::onIdle, this));
     m_workingContextGroup.spawn(std::bind(&NodeServer::timedSyncLoop, this));
@@ -578,6 +581,66 @@ namespace cn
 
     logger(INFO) <<  "node server loop stopped successfully";
     return true;
+  }
+
+  void NodeServer::autoScaleLoop()
+  {
+    try
+    {
+      while (true)
+      {
+        m_autoScaleTimer.sleep(std::chrono::seconds(P2P_AUTO_SCALE_INTERVAL_SECONDS));
+        autoScaleConnections();
+      }
+    }
+    catch (const platform_system::InterruptedException &)
+    {
+      logger(DEBUGGING) << "NodeServer::autoScaleLoop() interrupted";
+    }
+  }
+
+  void NodeServer::autoScaleConnections()
+  {
+    size_t currentTarget = m_config.m_net_config.connections_count;
+    size_t currentOutgoing = get_outgoing_connections_count();
+
+    // Calculate average write duration across outgoing connections
+    uint64_t totalWriteDuration = 0;
+    size_t outgoingCount = 0;
+    auto now = P2pConnectionContext::Clock::now();
+
+    for (const auto &kv : m_connections)
+    {
+      const auto &ctx = kv.second;
+      if (!ctx.m_is_income)
+      {
+        totalWriteDuration += ctx.writeDuration(now);
+        ++outgoingCount;
+      }
+    }
+
+    // If we have no outgoing connections yet, don't adjust
+    if (outgoingCount == 0)
+      return;
+
+    uint64_t avgWriteDuration = totalWriteDuration / outgoingCount;
+
+    // Scale up: writes are fast and we're below max
+    if (avgWriteDuration < 100 && currentTarget < m_maxOutgoingConnections && currentOutgoing >= currentTarget)
+    {
+      m_config.m_net_config.connections_count = std::min(currentTarget + 1, m_maxOutgoingConnections);
+      logger(INFO) << "Auto-scale: increasing target connections from "
+                   << currentTarget << " to " << m_config.m_net_config.connections_count
+                   << " (avg write: " << avgWriteDuration << "ms)";
+    }
+    // Scale down: writes are slow and we're above min
+    else if (avgWriteDuration > 500 && currentTarget > m_minOutgoingConnections)
+    {
+      m_config.m_net_config.connections_count = std::max(currentTarget - 1, m_minOutgoingConnections);
+      logger(INFO) << "Auto-scale: decreasing target connections from "
+                   << currentTarget << " to " << m_config.m_net_config.connections_count
+                   << " (avg write: " << avgWriteDuration << "ms)";
+    }
   }
 
   //-----------------------------------------------------------------------------------

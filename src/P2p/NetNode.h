@@ -204,6 +204,9 @@ namespace cn
     void timedSyncLoop();
     void timeoutLoop();
 
+    void autoScaleLoop();
+    void autoScaleConnections();
+
     template<typename T>
     void safeInterrupt(T& obj) const;
 
@@ -229,6 +232,10 @@ namespace cn
     bool m_allow_local_ip = false;
     bool m_hide_my_port = false;
     std::string m_p2p_state_filename;
+
+    size_t m_minOutgoingConnections = P2P_DEFAULT_MIN_CONNECTIONS;
+    size_t m_maxOutgoingConnections = P2P_DEFAULT_MAX_CONNECTIONS;
+    platform_system::Timer m_autoScaleTimer;
 
     platform_system::Dispatcher& m_dispatcher;
     platform_system::ContextGroup m_workingContextGroup;

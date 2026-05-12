@@ -117,4 +117,24 @@ void P2pNodeConfig::setPeerListGetTryCount(size_t count) {
   peerListGetTryCount = count;
 }
 
+size_t P2pNodeConfig::getMinOutgoingConnections() const
+{
+  return m_minOutgoingConnections;
+}
+
+size_t P2pNodeConfig::getMaxOutgoingConnections() const
+{
+  return m_maxOutgoingConnections;
+}
+
+void P2pNodeConfig::setMinOutgoingConnections(size_t count)
+{
+  m_minOutgoingConnections = count;
+}
+
+void P2pNodeConfig::setMaxOutgoingConnections(size_t count)
+{
+  m_maxOutgoingConnections = std::max(count, m_minOutgoingConnections);
+}
+
 }

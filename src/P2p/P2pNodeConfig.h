@@ -38,6 +38,11 @@ public:
   void setPeerListConnectRange(size_t range);
   void setPeerListGetTryCount(size_t count);
 
+  size_t getMinOutgoingConnections() const;
+  size_t getMaxOutgoingConnections() const;
+  void setMinOutgoingConnections(size_t count);
+  void setMaxOutgoingConnections(size_t count);
+
 private:
   std::chrono::nanoseconds timedSyncInterval;
   std::chrono::nanoseconds handshakeTimeout;
@@ -48,6 +53,9 @@ private:
   size_t whiteListConnectionsPercent;
   size_t peerListConnectRange;
   size_t peerListGetTryCount;
+
+  size_t m_minOutgoingConnections = cn::P2P_DEFAULT_MIN_CONNECTIONS;
+  size_t m_maxOutgoingConnections = cn::P2P_DEFAULT_MAX_CONNECTIONS;
 };
 
 }
