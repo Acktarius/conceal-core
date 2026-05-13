@@ -12,9 +12,9 @@
 namespace BoltSync
 {
   Scanner::Scanner(const crypto::SecretKey &viewKey,
-                   const crypto::PublicKey &viewPublicKey,
+                   const crypto::PublicKey &spendPublicKey,
                    const crypto::SecretKey *spendKey)
-      : m_viewKey(viewKey), m_viewPublicKey(viewPublicKey), m_spendKey(spendKey) {}
+      : m_viewKey(viewKey), m_spendPublicKey(spendPublicKey), m_spendKey(spendKey) {}
 
   Scanner::~Scanner() {}
 
@@ -68,6 +68,8 @@ namespace BoltSync
     uint32_t scanTopHeight = (config.endBlock > 0 && config.endBlock < topHeight) ? config.endBlock : topHeight;
     uint32_t scanStartHeight = std::max(config.startBlock, lastScannedHeight + 1);
 
+    state.scannedTopHeight = scanTopHeight;
+
     if (scanStartHeight > scanTopHeight)
       return false;
 
@@ -83,7 +85,7 @@ namespace BoltSync
 
       threads.emplace_back([&, start, end]()
                            {
-        ScanContext ctx{ storage, m_viewKey, m_viewPublicKey, m_spendKey,
+        ScanContext ctx{ storage, m_viewKey, m_spendPublicKey, m_spendKey,
                          state.blocksProcessed, state.lastCheckpointHeight,
                          state.resultsMutex, state.results, saveCheckpoint };
         for (uint32_t h = start; h <= end; ++h)
@@ -101,6 +103,10 @@ namespace BoltSync
 
     state.progressDone = true;
     progress.stop();
+
+    // Second pass: mark outputs as spent by scanning KeyInput keyImages.
+    // This resolves outputs that were received and later spent (e.g. to fund a deposit).
+    markSpentOutputs(storage, scanTopHeight, state.results);
 
     // Clear checkpoint on success
     storage.putMeta("wallet_init_progress", std::vector<uint8_t>());

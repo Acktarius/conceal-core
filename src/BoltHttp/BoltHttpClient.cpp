@@ -4,10 +4,13 @@
 
 #include "BoltHttpClient.h"
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <cerrno>
 #include <sstream>
 
 namespace BoltHttp
@@ -32,17 +35,54 @@ namespace BoltHttp
     if (m_socket < 0)
       return false;
 
+    // Set non-blocking for connect so we can enforce a timeout.
+    int flags = fcntl(m_socket, F_GETFL, 0);
+    fcntl(m_socket, F_SETFL, flags | O_NONBLOCK);
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(m_port);
     inet_pton(AF_INET, m_host.c_str(), &addr.sin_addr);
 
-    if (::connect(m_socket, (sockaddr *)&addr, sizeof(addr)) < 0)
+    int rc = ::connect(m_socket, (sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS)
     {
       close(m_socket);
       m_socket = -1;
       return false;
     }
+
+    if (rc != 0)
+    {
+      // Wait up to 3 seconds for the connection to complete.
+      fd_set wfds;
+      FD_ZERO(&wfds);
+      FD_SET(m_socket, &wfds);
+      struct timeval tv{3, 0};
+      int sel = select(m_socket + 1, nullptr, &wfds, nullptr, &tv);
+      if (sel <= 0)
+      {
+        close(m_socket);
+        m_socket = -1;
+        return false;
+      }
+      // Check that the connection actually succeeded.
+      int err = 0;
+      socklen_t errLen = sizeof(err);
+      getsockopt(m_socket, SOL_SOCKET, SO_ERROR, &err, &errLen);
+      if (err != 0)
+      {
+        close(m_socket);
+        m_socket = -1;
+        return false;
+      }
+    }
+
+    // Restore blocking mode; apply 3-second recv/send timeouts.
+    fcntl(m_socket, F_SETFL, flags & ~O_NONBLOCK);
+    struct timeval tv{3, 0};
+    setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(m_socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     return true;
   }

@@ -42,6 +42,9 @@ namespace BoltRPC
     // Connect to a sidechain validator for proxied RPC calls
     void setSidechainConnection(const std::string &host, uint16_t port);
 
+    // Store daemon address so getSyncStatus can query it directly
+    void setDaemonConnection(const std::string &host, uint16_t port);
+
     // Called by SyncMonitor when new outputs are discovered
     void onNewOutputs(const std::vector<BoltCore::OutputInfo> &outputs, uint32_t newHeight);
 
@@ -68,7 +71,7 @@ namespace BoltRPC
     using OutputCallback = std::function<void(const std::vector<BoltCore::OutputInfo> &, uint32_t)>;
     void startSync(const std::string &dataDir,
                    const crypto::SecretKey &viewKey,
-                   const crypto::PublicKey &viewPub,
+                   const crypto::PublicKey &spendPub,
                    const crypto::SecretKey *spendKey);
     void setDataDir(const std::string &dataDir) { m_dataDir = dataDir; }
 
@@ -139,6 +142,8 @@ namespace BoltRPC
     std::string m_sidechainHost;
     uint16_t m_sidechainPort = 8080;
     bool m_sidechainConnected = false;
+    std::string m_daemonHost;
+    uint16_t m_daemonPort = 16000;
     platform_system::Dispatcher &m_dispatcher;
     std::unique_ptr<BoltHttp::Server> m_server;
 
@@ -167,7 +172,7 @@ namespace BoltRPC
     std::unique_ptr<SyncMonitor> m_syncMonitor;
     std::string m_dataDir;
     crypto::SecretKey m_syncViewKey;
-    crypto::PublicKey m_syncViewPub;
+    crypto::PublicKey m_syncSpendPub;
     bool m_hasSpendKeyForSync = false;
     crypto::SecretKey m_syncSpendKey;
   };

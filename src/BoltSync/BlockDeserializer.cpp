@@ -1,6 +1,7 @@
 #include "BlockDeserializer.h"
 #include "CryptoHelpers.h"
 
+#include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Serialization/BinaryInputStreamSerializer.h"
@@ -88,87 +89,156 @@ namespace BoltSync
 
       static const crypto::PublicKey NULL_KEY = {};
 
-      // Process base transaction (coinbase)
+      auto scanTx = [&](cn::Transaction &tx, uint32_t blockHeight)
       {
-        cn::Transaction &tx = block.baseTransaction;
         crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
-        if (!(txPubKey == NULL_KEY))
+        if (txPubKey == NULL_KEY)
+          return;
+
+        crypto::KeyDerivation derivation;
+        if (!crypto::generate_key_derivation(txPubKey, ctx.viewKey, derivation))
+          return;
+
+        crypto::Hash txHash;
+        if (!getTxHash(tx, txHash))
+          return;
+
+        // Sequential key counter across all output keys in the tx (KeyOutput counts 1,
+        // MultisignatureOutput counts N = number of keys it contains).
+        size_t keyIndex = 0;
+
+        for (size_t outIdx = 0; outIdx < tx.outputs.size(); ++outIdx)
         {
-          for (size_t outIdx = 0; outIdx < tx.outputs.size(); ++outIdx)
+          const auto &out = tx.outputs[outIdx];
+
+          if (out.target.type() == typeid(cn::KeyOutput))
           {
-            const auto &out = tx.outputs[outIdx];
-            if (out.target.type() != typeid(cn::KeyOutput))
-              continue;
             const auto &keyOut = boost::get<cn::KeyOutput>(out.target);
-            if (isOutputOurs(txPubKey, outIdx, keyOut.key, ctx.viewKey, ctx.viewPublicKey))
+            crypto::PublicKey derivedKey;
+            if (crypto::derive_public_key(derivation, keyIndex, ctx.spendPublicKey, derivedKey) &&
+                derivedKey == keyOut.key)
             {
-              crypto::Hash txHash;
-              if (!getTxHash(tx, txHash))
-                continue;
               FoundOutput fo;
-              fo.blockHeight = h;
+              fo.blockHeight = blockHeight;
               fo.txHash = txHash;
               fo.outputIndex = static_cast<uint32_t>(outIdx);
               fo.amount = out.amount;
               fo.outputKey = keyOut.key;
               fo.txPublicKey = txPubKey;
-              fo.txExtra = tx.extra; // ← Copy transaction extra for bridge destination parsing
+              fo.txExtra = tx.extra;
+              fo.isDeposit = false;
+              fo.term = 0;
               if (ctx.spendKey)
               {
-                crypto::KeyDerivation derivation;
-                crypto::generate_key_derivation(txPubKey, ctx.viewKey, derivation);
-                crypto::SecretKey outSec = deriveOutputSecretKey(derivation, outIdx, *ctx.spendKey);
+                crypto::SecretKey outSec = deriveOutputSecretKey(derivation, keyIndex, *ctx.spendKey);
                 crypto::generate_key_image(keyOut.key, outSec, fo.keyImage);
               }
               std::lock_guard<std::mutex> lock(ctx.resultsMutex);
               ctx.results.push_back(std::move(fo));
             }
+            ++keyIndex;
+          }
+          else if (out.target.type() == typeid(cn::MultisignatureOutput))
+          {
+            // Deposits use MultisignatureOutput (term > 0 means it is a deposit).
+            // Ownership: underive_public_key(derivation, outIdx, key) must recover our spendPublicKey.
+            // The reference (TransfersConsumer) uses outIdx (not the running keyIndex) for multisig.
+            const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
+            for (size_t ki = 0; ki < msigOut.keys.size(); ++ki)
+            {
+              crypto::PublicKey recoveredSpend;
+              if (crypto::underive_public_key(derivation, outIdx, msigOut.keys[ki], recoveredSpend) &&
+                  recoveredSpend == ctx.spendPublicKey)
+              {
+                FoundOutput fo;
+                fo.blockHeight = blockHeight;
+                fo.txHash = txHash;
+                fo.outputIndex = static_cast<uint32_t>(outIdx);
+                fo.amount = out.amount;
+                fo.outputKey = msigOut.keys[ki];
+                fo.txPublicKey = txPubKey;
+                fo.txExtra = tx.extra;
+                fo.isDeposit = (msigOut.term > 0);
+                fo.term = msigOut.term;
+                std::lock_guard<std::mutex> lock(ctx.resultsMutex);
+                ctx.results.push_back(std::move(fo));
+                break;
+              }
+            }
+            keyIndex += msigOut.keys.size();
           }
         }
-      }
+      };
+
+      // Process base transaction (coinbase)
+      scanTx(block.baseTransaction, h);
 
       // Process regular transactions
-      for (size_t txIdx = 0; txIdx < transactions.size(); ++txIdx)
-      {
-        cn::Transaction &tx = transactions[txIdx];
-        crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
-        if (txPubKey == NULL_KEY)
-          continue;
-        for (size_t outIdx = 0; outIdx < tx.outputs.size(); ++outIdx)
-        {
-          const auto &out = tx.outputs[outIdx];
-          if (out.target.type() != typeid(cn::KeyOutput))
-            continue;
-          const auto &keyOut = boost::get<cn::KeyOutput>(out.target);
-          if (isOutputOurs(txPubKey, outIdx, keyOut.key, ctx.viewKey, ctx.viewPublicKey))
-          {
-            crypto::Hash txHash;
-            if (!getTxHash(tx, txHash))
-              continue;
-            FoundOutput fo;
-            fo.blockHeight = h;
-            fo.txHash = txHash;
-            fo.outputIndex = static_cast<uint32_t>(outIdx);
-            fo.amount = out.amount;
-            fo.outputKey = keyOut.key;
-            fo.txPublicKey = txPubKey;
-            fo.txExtra = tx.extra; // ← Copy transaction extra for bridge destination parsing
-            if (ctx.spendKey)
-            {
-              crypto::KeyDerivation derivation;
-              crypto::generate_key_derivation(txPubKey, ctx.viewKey, derivation);
-              crypto::SecretKey outSec = deriveOutputSecretKey(derivation, outIdx, *ctx.spendKey);
-              crypto::generate_key_image(keyOut.key, outSec, fo.keyImage);
-            }
-            std::lock_guard<std::mutex> lock(ctx.resultsMutex);
-            ctx.results.push_back(std::move(fo));
-          }
-        }
-      }
+      for (auto &tx : transactions)
+        scanTx(tx, h);
     }
     catch (const std::exception &)
     {
     }
     ctx.blocksProcessed.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void markSpentOutputs(CryptoNote::IBlockchainStorage &storage,
+                        uint32_t topHeight,
+                        std::vector<FoundOutput> &results)
+  {
+    if (results.empty())
+      return;
+
+    // Build keyImage → result index map for all non-deposit outputs we found.
+    // Deposits (MultisignatureOutput) are spent via MultisignatureInput which
+    // references by global output index — a separate concern handled later.
+    std::unordered_map<crypto::KeyImage, size_t> keyImageIndex;
+    keyImageIndex.reserve(results.size());
+    for (size_t i = 0; i < results.size(); ++i)
+    {
+      const auto &fo = results[i];
+      if (!fo.isDeposit)
+      {
+        static const crypto::KeyImage NULL_KI = {};
+        if (!(fo.keyImage == NULL_KI))
+          keyImageIndex[fo.keyImage] = i;
+      }
+    }
+
+    if (keyImageIndex.empty())
+      return;
+
+    // Sequential pass: for every KeyInput in every transaction, check if
+    // its keyImage matches one of our outputs. Mark matched outputs as spent.
+    for (uint32_t h = 0; h <= topHeight; ++h)
+    {
+      cn::BinaryArray serializedEntry;
+      if (!storage.getBlockEntry(h, serializedEntry))
+        continue;
+
+      cn::Block block;
+      std::vector<cn::Transaction> transactions;
+      if (!deserializeBlockEntry(serializedEntry, block, transactions))
+        continue;
+
+      auto checkInputs = [&](const cn::Transaction &tx)
+      {
+        for (const auto &input : tx.inputs)
+        {
+          if (input.type() == typeid(cn::KeyInput))
+          {
+            const auto &ki = boost::get<cn::KeyInput>(input).keyImage;
+            auto it = keyImageIndex.find(ki);
+            if (it != keyImageIndex.end())
+              results[it->second].spent = true;
+          }
+        }
+      };
+
+      checkInputs(block.baseTransaction);
+      for (const auto &tx : transactions)
+        checkInputs(tx);
+    }
   }
 }

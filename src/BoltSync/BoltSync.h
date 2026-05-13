@@ -26,6 +26,8 @@ namespace BoltSync
     crypto::PublicKey txPublicKey;
     crypto::KeyImage keyImage;
     bool spent = false;
+    bool isDeposit = false;
+    uint32_t term = 0;
     std::vector<uint8_t> txExtra;
   };
 
@@ -45,13 +47,14 @@ namespace BoltSync
     std::atomic<bool> progressDone{false};
     std::mutex resultsMutex;
     std::vector<FoundOutput> results;
+    uint32_t scannedTopHeight = 0; // highest block actually scanned (set by Scanner::scan)
   };
 
   class Scanner
   {
   public:
     Scanner(const crypto::SecretKey &viewKey,
-            const crypto::PublicKey &viewPublicKey,
+            const crypto::PublicKey &spendPublicKey,
             const crypto::SecretKey *spendKey);
     ~Scanner();
 
@@ -59,7 +62,7 @@ namespace BoltSync
 
   private:
     const crypto::SecretKey &m_viewKey;
-    const crypto::PublicKey &m_viewPublicKey;
+    const crypto::PublicKey &m_spendPublicKey;
     const crypto::SecretKey *m_spendKey;
   };
 }

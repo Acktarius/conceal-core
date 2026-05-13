@@ -3170,7 +3170,7 @@ namespace cn
         {
           if (!check_tx_input(in_to_key, tx_prefix_hash, tx.signatures[inputIndex], pmax_used_block_height))
           {
-            logger(INFO, BRIGHT_WHITE) << "Failed to check input in transaction " << transactionHash;
+            logger(DEBUGGING) << "Failed to check input in transaction " << transactionHash;
             return false;
           }
         }
@@ -3234,7 +3234,7 @@ namespace cn
         }
         if (out.target.type() != typeid(KeyOutput))
         {
-          logger(INFO, BRIGHT_WHITE) << "Output have wrong type id, which=" << out.target.which();
+          logger(DEBUGGING) << "Output have wrong type id, which=" << out.target.which();
           return false;
         }
         m_results_collector.push_back(&boost::get<KeyOutput>(out.target).key);
@@ -3246,7 +3246,7 @@ namespace cn
     outputs_visitor vi(output_keys, *this, logger.getLogger());
     if (!scanOutputKeysForIndexes(txin, vi, pmax_related_block_height))
     {
-      logger(INFO, BRIGHT_WHITE) << "Failed to get output keys for tx with amount = " << m_currency.formatAmount(txin.amount) << " and count indexes " << txin.outputIndexes.size();
+      logger(DEBUGGING) << "Failed to get output keys for tx with amount = " << m_currency.formatAmount(txin.amount) << " and count indexes " << txin.outputIndexes.size();
       return false;
     }
     if (txin.outputIndexes.size() != output_keys.size())
@@ -3621,7 +3621,7 @@ namespace cn
       if (!checkTransactionInputs(transactions[i]))
       {
         isTransactionValid = false;
-        logger(INFO, BRIGHT_WHITE) << "wrong inputs";
+        logger(DEBUGGING) << "wrong inputs";
       }
       if (!check_tx_outputs(transactions[i], block.height))
       {
@@ -4004,7 +4004,13 @@ namespace cn
     const Transaction &outputTransaction = blocksAt(outputIndex.transactionIndex.block).transactions[outputIndex.transactionIndex.transaction].tx;
     if (!is_tx_spendtime_unlocked(outputTransaction.unlockTime))
       return false;
-    assert(outputTransaction.outputs[outputIndex.outputIndex].target.type() == typeid(MultisignatureOutput));
+    
+    if (outputTransaction.outputs[outputIndex.outputIndex].target.type() != typeid(MultisignatureOutput))
+    {
+      logger(ERROR, BRIGHT_RED) << "validateInput: output at index " << outputIndex.outputIndex
+                                << " in tx " << transactionHash << " is not a MultisignatureOutput";
+      return false;
+    }
     const MultisignatureOutput &output = ::boost::get<MultisignatureOutput>(outputTransaction.outputs[outputIndex.outputIndex].target);
     if (input.signatureCount != output.requiredSignatureCount || input.term != output.term)
       return false;

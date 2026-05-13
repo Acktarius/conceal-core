@@ -137,6 +137,7 @@ int main(int argc, char *argv[])
 
   logging::LoggerManager logManager;
   logging::ConsoleLogger consoleLogger;
+  logManager.addLogger(consoleLogger);
   logging::LoggerRef logger(logManager, "BoltRPC");
 
   logger(logging::INFO) << "BoltRPC starting (" << CCX_RELEASE_VERSION << ")";
@@ -353,7 +354,7 @@ int main(int argc, char *argv[])
     {
       logger(logging::INFO) << "Starting BoltSync scan on " << cfg.dataDir;
 
-      BoltSync::Scanner scanner(viewKey, viewPub, hasSpendKey ? &spendKey : nullptr);
+      BoltSync::Scanner scanner(viewKey, spendPub, hasSpendKey ? &spendKey : nullptr);
       BoltSync::ScanConfig scanCfg;
       scanCfg.dataDir = cfg.dataDir;
       scanCfg.numThreads = cfg.scanThreads;
@@ -377,20 +378,20 @@ int main(int argc, char *argv[])
         info.txPublicKey = fo.txPublicKey;
         info.keyImage = fo.keyImage;
         info.spent = fo.spent;
-        info.isDeposit = false;
-        info.term = 0;
+        info.isDeposit = fo.isDeposit;
+        info.term = fo.term;
         info.subAddress = address;
         outputInfos.push_back(info);
       }
 
-      uint32_t nodeHeight = node.getLastLocalBlockHeight();
-      lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
-      logger(logging::INFO) << "Scan complete — " << outputInfos.size() << " outputs found";
+      uint32_t scannedHeight = state.scannedTopHeight;
+      lastScannedHeight.store(scannedHeight, std::memory_order_relaxed);
+      logger(logging::INFO) << "Scan complete — " << outputInfos.size() << " outputs found at height " << scannedHeight;
 
       // Save state — encrypted if password provided, otherwise save without key blob
       if (hasPassword)
       {
-        stateManager.save(outputInfos, nodeHeight, cfg.viewKeyHex, cfg.spendKeyHex, cfg.password);
+        stateManager.save(outputInfos, scannedHeight, cfg.viewKeyHex, cfg.spendKeyHex, cfg.password);
         logger(logging::INFO) << "Encrypted state saved to " << cfg.stateFile;
       }
       else
@@ -398,7 +399,7 @@ int main(int argc, char *argv[])
         // Save outputs only — no key blob (keys must be provided again on next start or via RPC)
         logger(logging::WARNING) << "No password provided — state saved without keys";
         logger(logging::WARNING) << "Keys will NOT be persisted. Use 'importWallet' or 'save' RPC to persist your wallet";
-        stateManager.save(outputInfos, nodeHeight, "", "");
+        stateManager.save(outputInfos, scannedHeight, "", "");
         logger(logging::INFO) << "State (outputs only) saved to " << cfg.stateFile;
       }
     }
@@ -418,7 +419,7 @@ int main(int argc, char *argv[])
   BoltCore::Wallet wallet(viewKey, spendKey, viewPub, spendPub, node, currency);
   if (hasViewKey)
   {
-    wallet.loadOutputs(outputInfos);
+    wallet.loadOutputs(outputInfos, lastScannedHeight.load());
 
     auto balance = wallet.getBalance();
     logger(logging::INFO) << "Balance: " << balance.actual
@@ -435,6 +436,9 @@ int main(int argc, char *argv[])
 
   // Wire up StateManager so save() and auto-save can persist wallet state
   rpcServer.setStateManager(&stateManager, &outputInfos, &lastScannedHeight);
+
+  // Store daemon host/port so getSyncStatus can query /getheight directly
+  rpcServer.setDaemonConnection(cfg.daemonHost, cfg.daemonPort);
 
   // Pass the data directory to the RPC server so importWallet can start sync
   if (!cfg.dataDir.empty())
@@ -468,15 +472,15 @@ int main(int argc, char *argv[])
     logger(logging::INFO) << "No sidechain configured. Use --sidechain-host to enable sidechain features.";
   }
 
+  rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
+  rpcServer.setSyncedHeight(lastScannedHeight.load());
+
   // If keys were provided at startup and data dir is available, begin incremental sync now
   if (hasViewKey && !cfg.dataDir.empty())
   {
-    rpcServer.startSync(cfg.dataDir, viewKey, viewPub,
+    rpcServer.startSync(cfg.dataDir, viewKey, spendPub,
                         hasSpendKey ? &spendKey : nullptr);
   }
-
-  rpcServer.start(cfg.bindIp, cfg.bindPort, cfg.rpcThreads);
-  rpcServer.setSyncedHeight(lastScannedHeight.load());
 
   // Graceful shutdown
   std::atomic<bool> stopRequested{false};

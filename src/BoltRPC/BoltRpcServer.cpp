@@ -158,6 +158,12 @@ namespace BoltRPC
     m_logger(logging::INFO) << "Sidechain connection set to " << host << ":" << port;
   }
 
+  void BoltRpcServer::setDaemonConnection(const std::string &host, uint16_t port)
+  {
+    m_daemonHost = host;
+    m_daemonPort = port;
+  }
+
   void BoltRpcServer::setStateManager(StateManager *stateManager,
                                       std::vector<BoltCore::OutputInfo> *outputs,
                                       std::atomic<uint32_t> *syncedHeight)
@@ -233,7 +239,10 @@ namespace BoltRPC
                                    uint32_t newHeight)
   {
     std::lock_guard<std::mutex> lock(m_walletMutex);
-    m_wallet.loadOutputs(outputs);
+    // Add new outputs incrementally — do NOT call loadOutputs() which would clear existing outputs.
+    for (const auto &o : outputs)
+      m_wallet.addOutput(o);
+    m_wallet.setCurrentHeight(newHeight);
     m_syncedHeight.store(newHeight, std::memory_order_relaxed);
     m_logger(logging::INFO) << "Synced to height " << newHeight
                             << " (" << outputs.size() << " new outputs)";
@@ -465,7 +474,7 @@ namespace BoltRPC
     if (!m_dataDir.empty() && !m_locked)
     {
       startSync(m_dataDir, m_savedViewKey,
-                m_wallet.getViewPublicKey(),
+                m_wallet.getSpendPublicKey(),
                 m_wallet.getType() == BoltCore::WalletType::ViewOnly
                     ? nullptr
                     : &m_savedSpendKey);
@@ -535,7 +544,7 @@ namespace BoltRPC
     if (!m_dataDir.empty() && !m_locked)
     {
       startSync(m_dataDir, m_savedViewKey,
-                m_wallet.getViewPublicKey(),
+                m_wallet.getSpendPublicKey(),
                 m_wallet.getType() == BoltCore::WalletType::ViewOnly
                     ? nullptr
                     : &m_savedSpendKey);
@@ -617,7 +626,7 @@ namespace BoltRPC
     // Reload outputs into wallet
     if (m_outputs)
     {
-      m_wallet.loadOutputs(*m_outputs);
+      m_wallet.loadOutputs(*m_outputs, m_node.getLastLocalBlockHeight());
     }
 
     m_savedViewKey = viewKey;
@@ -634,7 +643,7 @@ namespace BoltRPC
     if (!m_dataDir.empty() && !m_syncMonitor)
     {
       startSync(m_dataDir, m_savedViewKey,
-                m_wallet.getViewPublicKey(),
+                m_wallet.getSpendPublicKey(),
                 m_wallet.getType() == BoltCore::WalletType::ViewOnly
                     ? nullptr
                     : &m_savedSpendKey);
@@ -893,21 +902,42 @@ namespace BoltRPC
   std::string BoltRpcServer::methodGetSyncStatus(const common::JsonValue &params)
   {
     uint32_t walletHeight = m_syncedHeight.load();
-    uint32_t nodeHeight = 0;
 
-    try
+    // Try NodeRpcProxy cache first; fall back to a direct /getheight call to the daemon.
+    uint32_t nodeHeight = m_node.getLastLocalBlockHeight();
+
+    if (nodeHeight == 0 && !m_daemonHost.empty())
     {
-      nodeHeight = m_node.getLastLocalBlockHeight();
+      try
+      {
+        BoltHttp::HttpClient client(m_daemonHost, m_daemonPort);
+        auto resp = client.get("/getheight");
+        if (resp.success && !resp.body.empty())
+        {
+          // Response: {"height":N,"status":"OK"}
+          auto hpos = resp.body.find("\"height\":");
+          if (hpos != std::string::npos)
+          {
+            hpos += 9; // skip past "height":
+            while (hpos < resp.body.size() && !std::isdigit(resp.body[hpos])) ++hpos;
+            uint32_t h = 0;
+            while (hpos < resp.body.size() && std::isdigit(resp.body[hpos]))
+              h = h * 10 + (resp.body[hpos++] - '0');
+            if (h > 0)
+              nodeHeight = h;
+          }
+        }
+      }
+      catch (...) {}
     }
-    catch (...)
-    {
-      // Daemon not reachable
-    }
+
+    // Considered synced if wallet is within 1 block of the daemon (matches reference daemon logic).
+    bool synced = (nodeHeight > 0) && (walletHeight + 1 >= nodeHeight);
 
     std::ostringstream ss;
     ss << R"({"walletHeight":)" << walletHeight
        << R"(,"nodeHeight":)" << nodeHeight
-       << R"(,"synced":)" << (walletHeight >= nodeHeight && nodeHeight > 0 ? "true" : "false");
+       << R"(,"synced":)" << (synced ? "true" : "false");
 
     if (m_sidechainConnected)
     {
@@ -1415,7 +1445,7 @@ namespace BoltRPC
 
   void BoltRpcServer::startSync(const std::string &dataDir,
                                 const crypto::SecretKey &viewKey,
-                                const crypto::PublicKey &viewPub,
+                                const crypto::PublicKey &spendPub,
                                 const crypto::SecretKey *spendKey)
   {
     if (m_syncMonitor)
@@ -1423,7 +1453,7 @@ namespace BoltRPC
 
     m_dataDir = dataDir;
     m_syncViewKey = viewKey;
-    m_syncViewPub = viewPub;
+    m_syncSpendPub = spendPub;
     if (spendKey)
     {
       m_hasSpendKeyForSync = true;
@@ -1433,7 +1463,7 @@ namespace BoltRPC
     uint32_t startHeight = m_syncedHeight.load(std::memory_order_relaxed);
 
     m_syncMonitor.reset(new SyncMonitor(
-        m_node, viewKey, viewPub, spendKey, dataDir, startHeight,
+        m_node, viewKey, spendPub, spendKey, dataDir, startHeight,
         [this](const std::vector<BoltCore::OutputInfo> &newOuts, uint32_t newHeight)
         {
           onNewOutputs(newOuts, newHeight);

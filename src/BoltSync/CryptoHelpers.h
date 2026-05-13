@@ -11,7 +11,7 @@ namespace BoltSync
                     size_t outputIndex,
                     const crypto::PublicKey &outputKey,
                     const crypto::SecretKey &viewSecretKey,
-                    const crypto::PublicKey &viewPublicKey);
+                    const crypto::PublicKey &spendPublicKey);
 
   crypto::SecretKey deriveOutputSecretKey(const crypto::KeyDerivation &derivation,
                                           size_t outputIndex,

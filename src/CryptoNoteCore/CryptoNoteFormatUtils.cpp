@@ -8,6 +8,7 @@
 #include "CryptoNoteFormatUtils.h"
 
 #include <set>
+#include <limits>
 #include <Logging/LoggerRef.h>
 #include <Common/BinaryArray.hpp>
 #include <Common/int-util.h>
@@ -532,8 +533,11 @@ bool get_block_longhash(cn_context &context, const Block& b, Hash& res) {
 
 std::vector<uint32_t> relative_output_offsets_to_absolute(const std::vector<uint32_t>& off) {
   std::vector<uint32_t> res = off;
-  for (size_t i = 1; i < res.size(); i++)
+  for (size_t i = 1; i < res.size(); i++) {
+    if (res[i] > std::numeric_limits<uint32_t>::max() - res[i - 1])
+      return {};  // overflow: corrupt offset sequence, caller treats empty as invalid
     res[i] += res[i - 1];
+  }
   return res;
 }
 

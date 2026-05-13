@@ -673,7 +673,7 @@ namespace cn
       // Let the visitor inspect this output (e.g. to verify a ring signature)
       if (!vis.handle_output(tx.tx, tx.tx.outputs[amount_outs_vec[i].second], amount_outs_vec[i].second))
       {
-        logger(logging::INFO) << "Failed to handle_output for output no = " << count << ", with absolute offset " << i;
+        logger(logging::DEBUGGING) << "Failed to handle_output for output no = " << count << ", with absolute offset " << i;
         return false;
       }
 

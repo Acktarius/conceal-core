@@ -72,9 +72,19 @@ namespace BoltCore
 
   Wallet::~Wallet() = default;
 
-  void Wallet::loadOutputs(const std::vector<OutputInfo> &outputs)
+  void Wallet::loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight)
   {
-    m_impl->balanceTracker.loadOutputs(outputs);
+    m_impl->balanceTracker.loadOutputs(outputs, currentHeight);
+  }
+
+  void Wallet::addOutput(const OutputInfo &output)
+  {
+    m_impl->balanceTracker.addOutput(output);
+  }
+
+  void Wallet::setCurrentHeight(uint32_t height)
+  {
+    m_impl->balanceTracker.setCurrentHeight(height);
   }
 
   Balance Wallet::getBalance() const

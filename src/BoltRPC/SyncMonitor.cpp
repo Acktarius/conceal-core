@@ -10,12 +10,12 @@ namespace BoltRPC
 
   SyncMonitor::SyncMonitor(cn::INode &node,
                            const crypto::SecretKey &viewKey,
-                           const crypto::PublicKey &viewPub,
+                           const crypto::PublicKey &spendPub,
                            const crypto::SecretKey *spendKey,
                            const std::string &dataDir,
                            uint32_t lastScannedHeight,
                            OutputCallback onNewOutputs)
-      : m_node(node), m_viewKey(viewKey), m_viewPub(viewPub), m_spendKey(spendKey), m_dataDir(dataDir), m_lastScannedHeight(lastScannedHeight), m_onNewOutputs(std::move(onNewOutputs))
+      : m_node(node), m_viewKey(viewKey), m_spendPub(spendPub), m_spendKey(spendKey), m_dataDir(dataDir), m_lastScannedHeight(lastScannedHeight), m_onNewOutputs(std::move(onNewOutputs))
   {
   }
 
@@ -53,7 +53,7 @@ namespace BoltRPC
         continue;
 
       // New blocks available — run BoltSync on the new range only
-      BoltSync::Scanner scanner(m_viewKey, m_viewPub, m_spendKey);
+      BoltSync::Scanner scanner(m_viewKey, m_spendPub, m_spendKey);
 
       BoltSync::ScanConfig cfg;
       cfg.dataDir = m_dataDir;
@@ -87,8 +87,8 @@ namespace BoltRPC
           info.txPublicKey = fo.txPublicKey;
           info.keyImage = fo.keyImage;
           info.spent = fo.spent;
-          info.isDeposit = false;
-          info.term = 0;
+          info.isDeposit = fo.isDeposit;
+          info.term = fo.term;
           newOutputs.push_back(std::move(info));
         }
 
