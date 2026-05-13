@@ -1,4 +1,4 @@
-// BoltRpcServer.cpp — BoltRPC implementation with sidechain integration
+// BoltRpcServer.cpp — BoltRPC implementation with encrypted wallet security
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 // Distributed under the MIT/X11 software license
 
@@ -13,17 +13,39 @@
 #include "BoltSync/CryptoHelpers.h"
 #include "StateManager.h"
 #include "Mnemonics/Mnemonics.h"
+#include "crypto/crypto.h"
 #include "version.h"
 
 #include <sstream>
 #include <future>
 #include <mutex>
+#include <thread>
+#include <chrono>
+#include <atomic>
 
 namespace BoltRPC
 {
-  // Helpers
   namespace
   {
+    // Portable secure memory zeroing — no external dependencies
+    void secureZero(void *ptr, size_t len)
+    {
+      volatile unsigned char *p = static_cast<volatile unsigned char *>(ptr);
+      while (len--)
+      {
+        *p++ = 0;
+      }
+    }
+
+    void secureZero(std::string &str)
+    {
+      if (!str.empty())
+      {
+        secureZero(&str[0], str.size());
+        str.clear();
+      }
+    }
+
     std::string base64Encode(const std::string &input)
     {
       static const char *chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -72,8 +94,22 @@ namespace BoltRPC
                                cn::INode &node,
                                const cn::Currency &currency,
                                const std::string &address)
-      : m_logger(logger, "BoltRPC"), m_wallet(wallet), m_node(node), m_currency(currency), m_address(address), m_dispatcher(dispatcher)
+      : m_logger(logger, "BoltRPC"), m_wallet(wallet), m_node(node),
+        m_currency(currency), m_address(address), m_dispatcher(dispatcher)
   {
+  }
+
+  BoltRpcServer::~BoltRpcServer()
+  {
+    // Secure cleanup of sensitive material
+    secureZero(m_derivedKey);
+    secureZero(m_password);
+
+    crypto::SecretKey emptyKey{};
+    m_savedViewKey = emptyKey;
+    m_savedSpendKey = emptyKey;
+    m_syncViewKey = emptyKey;
+    m_syncSpendKey = emptyKey;
   }
 
   void BoltRpcServer::start(const std::string &bindIp, uint16_t bindPort, size_t threadCount)
@@ -83,12 +119,35 @@ namespace BoltRPC
                         { handleRequest(req, resp); });
     m_server->start(bindIp, bindPort);
     m_logger(logging::INFO) << "BoltRPC listening on " << bindIp << ":" << bindPort;
+
+    // Start auto-save timer if we have state persistence configured
+    if (m_stateManager && m_outputs && !m_derivedKey.empty())
+    {
+      startAutoSave();
+    }
   }
 
   void BoltRpcServer::stop()
   {
+    // Stop auto-save timer
+    m_autoSaveRunning.store(false, std::memory_order_relaxed);
+    if (m_autoSaveThread.joinable())
+    {
+      m_autoSaveThread.join();
+    }
+
+    // Final save if we have keys and password
+    if (m_stateManager && !m_locked && !m_derivedKey.empty())
+    {
+      saveWalletState();
+    }
+
     if (m_server)
       m_server->stop();
+
+    // Secure cleanup
+    secureZero(m_derivedKey);
+    secureZero(m_password);
   }
 
   void BoltRpcServer::setSidechainConnection(const std::string &host, uint16_t port)
@@ -111,6 +170,63 @@ namespace BoltRPC
   void BoltRpcServer::setSseBroadcaster(BoltHttp::SseBroadcaster *broadcaster)
   {
     m_sseBroadcaster = broadcaster;
+  }
+
+  void BoltRpcServer::setPassword(const std::string &password)
+  {
+    m_password = password;
+
+    // Derive the encryption key immediately
+    crypto::Hash pwd_hash;
+    crypto::cn_fast_hash(password.data(), password.size(), pwd_hash);
+
+    m_derivedKey.assign(reinterpret_cast<const char *>(&pwd_hash), sizeof(pwd_hash));
+
+    // Start auto-save if state manager is configured
+    if (m_stateManager && m_outputs && m_autoSaveRunning.load(std::memory_order_relaxed) == false)
+    {
+      startAutoSave();
+    }
+
+    m_logger(logging::INFO) << "Password set — wallet encryption enabled";
+  }
+
+  void BoltRpcServer::startAutoSave()
+  {
+    if (m_autoSaveRunning.exchange(true, std::memory_order_relaxed))
+      return; // Already running
+
+    m_autoSaveThread = std::thread([this]()
+                                   {
+      m_logger(logging::INFO) << "Auto-save enabled (every 5 minutes)";
+      
+      while (m_autoSaveRunning.load(std::memory_order_relaxed))
+      {
+        // Sleep in 1-second increments so we can shut down quickly
+        for (int i = 0; i < 300; ++i)
+        {
+          if (!m_autoSaveRunning.load(std::memory_order_relaxed))
+            break;
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+
+        if (m_autoSaveRunning.load(std::memory_order_relaxed) && !m_locked)
+        {
+          try
+          {
+            if (saveWalletState())
+            {
+              m_logger(logging::DEBUGGING) << "Auto-save completed";
+            }
+          }
+          catch (const std::exception &e)
+          {
+            m_logger(logging::ERROR) << "Auto-save failed: " << e.what();
+          }
+        }
+      }
+      
+      m_logger(logging::INFO) << "Auto-save stopped"; });
   }
 
   void BoltRpcServer::onNewOutputs(const std::vector<BoltCore::OutputInfo> &outputs,
@@ -206,6 +322,8 @@ namespace BoltRPC
         result = methodUnlock(params);
       else if (method == "lock")
         result = methodLock(params);
+      else if (method == "changePassword")
+        result = methodChangePassword(params);
       else if (method == "getViewKey")
         result = methodGetViewKey(params);
       else if (method == "getSpendKey")
@@ -286,19 +404,20 @@ namespace BoltRPC
   }
 
   // System
-  // Return the binary version string for GUI compatibility checks
   std::string BoltRpcServer::methodGetVersion(const common::JsonValue &)
   {
     return R"({"version":")" + std::string(CCX_RELEASE_VERSION) + R"("})";
   }
 
   // Wallet lifecycle
-  // Import an existing wallet by view key and optional spend key, no restart needed
+  // Import an existing wallet with view key and optional spend key, with password
   std::string BoltRpcServer::methodImportWallet(const common::JsonValue &params)
   {
     std::string viewKeyHex = params("viewKey").getString();
     std::string spendKeyHex = params.contains("spendKey") ? params("spendKey").getString() : "";
+    std::string password = params.contains("password") ? params("password").getString() : "";
 
+    // Validate keys
     crypto::SecretKey viewKey, spendKey;
     if (!BoltSync::hexToSecretKey(viewKeyHex, viewKey))
       throw std::runtime_error("Invalid view key hex");
@@ -322,15 +441,24 @@ namespace BoltRPC
     m_savedSpendKey = spendKey;
     m_locked = false;
 
-    m_logger(logging::INFO) << "Wallet imported: " << m_address;
+    // Set password if provided — this enables encrypted persistence
+    if (!password.empty())
+    {
+      setPassword(password);
+      m_logger(logging::INFO) << "Wallet imported with encryption: " << m_address;
+    }
+    else
+    {
+      // Clear any existing password/derived key
+      secureZero(m_password);
+      secureZero(m_derivedKey);
+      m_logger(logging::WARNING) << "Wallet imported WITHOUT password — keys will not be persisted securely";
+    }
 
+    // Persist wallet state with encryption if password is set
     if (m_stateManager && m_outputs)
     {
-      uint32_t h = m_externalSyncedHeight
-                       ? m_externalSyncedHeight->load(std::memory_order_relaxed)
-                       : m_syncedHeight.load(std::memory_order_relaxed);
-      // Save keys alongside outputs for unlock support
-      m_stateManager->save(*m_outputs, h, viewKeyHex, spendKeyHex);
+      saveWalletState();
     }
 
     // Start sync monitor if data directory is configured
@@ -343,12 +471,18 @@ namespace BoltRPC
                     : &m_savedSpendKey);
     }
 
-    return R"({"status":"ok","address":")" + m_address + R"("})";
+    // Clear sensitive data from memory after use
+    secureZero(viewKeyHex);
+    secureZero(spendKeyHex);
+    std::string result = R"({"status":"ok","address":")" + m_address + R"("})";
+    return result;
   }
 
-  // Generate a new random wallet, return keys for backup
-  std::string BoltRpcServer::methodGenerateWallet(const common::JsonValue &)
+  // Generate a new random wallet with keys encrypted by password
+  std::string BoltRpcServer::methodGenerateWallet(const common::JsonValue &params)
   {
+    std::string password = params.contains("password") ? params("password").getString() : "";
+
     crypto::SecretKey viewKey, spendKey;
     crypto::PublicKey viewPub, spendPub;
 
@@ -366,6 +500,20 @@ namespace BoltRPC
     std::string viewKeyHex = common::podToHex(viewKey);
     std::string spendKeyHex = common::podToHex(spendKey);
 
+    // Set password for encryption
+    if (!password.empty())
+    {
+      setPassword(password);
+      m_logger(logging::INFO) << "New wallet generated with encryption: " << m_address;
+    }
+    else
+    {
+      // Clear any existing password
+      secureZero(m_password);
+      secureZero(m_derivedKey);
+      m_logger(logging::WARNING) << "New wallet generated WITHOUT password — keys will not be persisted";
+    }
+
     // Generate mnemonic seed phrase from the spend key (25 words)
     std::string mnemonic;
     try
@@ -377,6 +525,22 @@ namespace BoltRPC
       mnemonic = "";
     }
 
+    // Persist the wallet state
+    if (m_stateManager && m_outputs)
+    {
+      saveWalletState();
+    }
+
+    // Start sync monitor if data directory is configured
+    if (!m_dataDir.empty() && !m_locked)
+    {
+      startSync(m_dataDir, m_savedViewKey,
+                m_wallet.getViewPublicKey(),
+                m_wallet.getType() == BoltCore::WalletType::ViewOnly
+                    ? nullptr
+                    : &m_savedSpendKey);
+    }
+
     std::ostringstream ss;
     ss << R"({"status":"ok")"
        << R"(,"address":")" << m_address << R"(")"
@@ -385,17 +549,202 @@ namespace BoltRPC
        << R"(,"mnemonic":")" << mnemonic << R"(")"
        << "}";
 
-    if (m_stateManager && m_outputs)
-    {
-      uint32_t h = m_externalSyncedHeight
-                       ? m_externalSyncedHeight->load(std::memory_order_relaxed)
-                       : m_syncedHeight.load(std::memory_order_relaxed);
-      m_stateManager->save(*m_outputs, h, viewKeyHex, spendKeyHex);
-    }
+    // Clear hex strings from memory
+    secureZero(viewKeyHex);
+    secureZero(spendKeyHex);
 
     return ss.str();
   }
 
+  // Unlock wallet with password — decrypts and loads keys from state file
+  std::string BoltRpcServer::methodUnlock(const common::JsonValue &params)
+  {
+    if (!m_locked && !m_derivedKey.empty())
+    {
+      return R"({"status":"ok","message":"Already unlocked"})";
+    }
+
+    if (!m_stateManager)
+      throw std::runtime_error("State manager not configured. Cannot unlock.");
+
+    if (!m_stateManager->exists())
+      throw std::runtime_error("No wallet state file found. Use importWallet or generateWallet first.");
+
+    std::string password = params("password").getString();
+
+    // Check if state file is encrypted
+    bool encrypted = m_stateManager->isEncrypted();
+
+    if (encrypted && password.empty())
+      throw std::runtime_error("Wallet is encrypted — password required for unlock");
+
+    // Load keys from state file with decryption
+    std::string viewKeyHex, spendKeyHex;
+    if (!m_stateManager->loadKeys(viewKeyHex, spendKeyHex, password))
+    {
+      throw std::runtime_error("Failed to unlock wallet. Wrong password or corrupt state file.");
+    }
+
+    if (viewKeyHex.empty())
+      throw std::runtime_error("No keys found in state file. Use importWallet to set keys first.");
+
+    // Parse the keys
+    crypto::SecretKey viewKey, spendKey;
+    if (!BoltSync::hexToSecretKey(viewKeyHex, viewKey))
+    {
+      secureZero(viewKeyHex);
+      secureZero(spendKeyHex);
+      throw std::runtime_error("Invalid view key in state file");
+    }
+
+    if (!spendKeyHex.empty() && !BoltSync::hexToSecretKey(spendKeyHex, spendKey))
+    {
+      secureZero(viewKeyHex);
+      secureZero(spendKeyHex);
+      throw std::runtime_error("Invalid spend key in state file");
+    }
+
+    crypto::PublicKey viewPub, spendPub;
+    crypto::secret_key_to_public_key(viewKey, viewPub);
+    if (!spendKeyHex.empty())
+      crypto::secret_key_to_public_key(spendKey, spendPub);
+
+    // Reconstruct wallet
+    m_wallet.~Wallet();
+    new (&m_wallet) BoltCore::Wallet(viewKey, spendKey, viewPub, spendPub, m_node, m_currency);
+    m_address = m_currency.accountAddressAsString({spendPub, viewPub});
+
+    // Reload outputs into wallet
+    if (m_outputs)
+    {
+      m_wallet.loadOutputs(*m_outputs);
+    }
+
+    m_savedViewKey = viewKey;
+    m_savedSpendKey = spendKey;
+    m_locked = false;
+
+    // Set the password and derived key for future saves
+    if (!password.empty())
+    {
+      setPassword(password);
+    }
+
+    // Start sync monitor if applicable
+    if (!m_dataDir.empty() && !m_syncMonitor)
+    {
+      startSync(m_dataDir, m_savedViewKey,
+                m_wallet.getViewPublicKey(),
+                m_wallet.getType() == BoltCore::WalletType::ViewOnly
+                    ? nullptr
+                    : &m_savedSpendKey);
+    }
+
+    // Clear sensitive hex strings
+    secureZero(viewKeyHex);
+    secureZero(spendKeyHex);
+
+    m_logger(logging::INFO) << "Wallet unlocked: " << m_address;
+
+    std::ostringstream ss;
+    ss << R"({"status":"ok","address":")" << m_address
+       << R"(","encrypted":)" << (encrypted ? "true" : "false") << "}";
+    return ss.str();
+  }
+
+  // Lock the wallet: encrypt and save state, then zero out keys in memory
+  std::string BoltRpcServer::methodLock(const common::JsonValue &)
+  {
+    if (m_locked)
+      return R"({"status":"ok","message":"Already locked"})";
+
+    BoltCore::WalletType type = m_wallet.getType();
+    if (type == BoltCore::WalletType::ViewOnly)
+    {
+      // View-only wallet: just mark as locked
+      m_locked = true;
+
+      // Clear any sensitive material
+      secureZero(m_derivedKey);
+      secureZero(m_password);
+
+      return R"({"status":"ok","message":"View-only wallet locked"})";
+    }
+
+    // Full wallet: save state with encryption before locking
+    if (!saveWalletState())
+    {
+      m_logger(logging::WARNING) << "Failed to save wallet state before locking";
+    }
+
+    // Zero out keys in memory
+    crypto::PublicKey viewPub = m_wallet.getViewPublicKey();
+
+    // Securely clear the saved keys
+    crypto::SecretKey emptyKey{};
+    m_savedViewKey = emptyKey;
+    m_savedSpendKey = emptyKey;
+
+    // Reconstruct wallet as view-only
+    m_wallet.~Wallet();
+    new (&m_wallet) BoltCore::Wallet(crypto::SecretKey{}, crypto::SecretKey{},
+                                     viewPub, crypto::PublicKey{}, m_node, m_currency);
+    m_locked = true;
+
+    // Clear derived key and password from memory
+    secureZero(m_derivedKey);
+    secureZero(m_password);
+
+    m_logger(logging::INFO) << "Wallet locked — keys cleared from memory";
+
+    return R"({"status":"ok","message":"Wallet locked. Use unlock with password to restore keys."})";
+  }
+
+  // Change the wallet encryption password
+  std::string BoltRpcServer::methodChangePassword(const common::JsonValue &params)
+  {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first.");
+
+    std::string oldPassword = params.contains("oldPassword") ? params("oldPassword").getString() : "";
+    std::string newPassword = params("newPassword").getString();
+
+    if (newPassword.empty())
+      throw std::runtime_error("New password cannot be empty");
+
+    // If there's an existing encryption, verify the old password
+    if (!m_derivedKey.empty())
+    {
+      if (oldPassword.empty())
+        throw std::runtime_error("Old password required to change encryption");
+
+      // Verify old password by deriving key and comparing
+      crypto::Hash oldHash;
+      crypto::cn_fast_hash(oldPassword.data(), oldPassword.size(), oldHash);
+      std::string oldDerived(reinterpret_cast<const char *>(&oldHash), sizeof(oldHash));
+
+      if (oldDerived != m_derivedKey)
+      {
+        secureZero(oldDerived);
+        throw std::runtime_error("Old password is incorrect");
+      }
+      secureZero(oldDerived);
+    }
+
+    // Set the new password
+    setPassword(newPassword);
+
+    // Immediately save with new encryption
+    if (!saveWalletState())
+    {
+      throw std::runtime_error("Failed to save wallet with new password");
+    }
+
+    m_logger(logging::INFO) << "Wallet password changed";
+    return R"({"status":"ok","message":"Password changed successfully"})";
+  }
+
+  // Return the current wallet sync height
   std::string BoltRpcServer::methodGetWalletHeight(const common::JsonValue &)
   {
     uint32_t walletHeight = m_syncedHeight.load(std::memory_order_relaxed);
@@ -406,77 +755,38 @@ namespace BoltRPC
     }
     std::ostringstream ss;
     ss << R"({"walletHeight":)" << walletHeight
-       << R"(,"outputCount":)" << outputCount << "}";
+       << R"(,"outputCount":)" << outputCount
+       << R"(,"locked":)" << (m_locked ? "true" : "false")
+       << R"(,"encrypted":)" << (!m_derivedKey.empty() ? "true" : "false")
+       << "}";
     return ss.str();
   }
 
-  // Unlock: reload keys from the state file without the user re-entering hex
-  std::string BoltRpcServer::methodUnlock(const common::JsonValue &)
-  {
-    if (!m_stateManager)
-      throw std::runtime_error("State manager not configured");
-
-    std::string viewKeyHex, spendKeyHex;
-    if (!m_stateManager->loadKeys(viewKeyHex, spendKeyHex))
-      throw std::runtime_error("No saved keys found. Use importWallet to set keys first.");
-
-    if (viewKeyHex.empty())
-      throw std::runtime_error("No saved keys found. Use importWallet to set keys first.");
-
-    // Reuse importWallet logic by building a params object
-    common::JsonValue params(common::JsonValue::OBJECT);
-    params.insert("viewKey", viewKeyHex);
-    if (!spendKeyHex.empty())
-      params.insert("spendKey", spendKeyHex);
-
-    return methodImportWallet(params);
-  }
-
-  // Lock the wallet: zero out keys in memory, RPC stays alive for unlock
-  std::string BoltRpcServer::methodLock(const common::JsonValue &)
-  {
-    if (m_locked)
-      return R"({"status":"ok","message":"Already locked"})";
-
-    BoltCore::WalletType type = m_wallet.getType();
-    if (type == BoltCore::WalletType::ViewOnly)
-    {
-      m_locked = true;
-      return R"({"status":"ok","message":"View-only wallet locked"})";
-    }
-
-    // Full wallet: zero out keys and reconstruct as view-only
-    crypto::PublicKey viewPub = m_wallet.getViewPublicKey();
-
-    m_wallet.~Wallet();
-    new (&m_wallet) BoltCore::Wallet(crypto::SecretKey{}, crypto::SecretKey{},
-                                     viewPub, crypto::PublicKey{}, m_node, m_currency);
-    m_locked = true;
-
-    // Save state with empty keys to respect locked state
-    saveWalletState();
-
-    return R"({"status":"ok","message":"Wallet locked. Use unlock to restore keys."})";
-  }
-
-  // Return the current view key for backup purposes
+  // Return the current view key (only when unlocked)
   std::string BoltRpcServer::methodGetViewKey(const common::JsonValue &)
   {
     if (m_locked)
-      return R"({"viewKey":""})";
+      return R"({"viewKey":"","locked":true})";
 
-    return R"({"viewKey":")" + common::podToHex(m_savedViewKey) + R"("})";
+    std::string viewKeyHex = common::podToHex(m_savedViewKey);
+    std::string result = R"({"viewKey":")" + viewKeyHex + R"("})";
+    secureZero(viewKeyHex);
+    return result;
   }
 
-  // Return the current spend key if available (full wallet only)
+  // Return the current spend key (only when unlocked and full wallet)
   std::string BoltRpcServer::methodGetSpendKey(const common::JsonValue &)
   {
     if (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
-      return R"({"spendKey":""})";
+      return R"({"spendKey":"","locked":)" + std::string(m_locked ? "true" : "false") + R"(})";
 
-    return R"({"spendKey":")" + common::podToHex(m_savedSpendKey) + R"("})";
+    std::string spendKeyHex = common::podToHex(m_savedSpendKey);
+    std::string result = R"({"spendKey":")" + spendKeyHex + R"("})";
+    secureZero(spendKeyHex);
+    return result;
   }
 
+  // Export wallet as base64-encoded JSON blob (only when unlocked)
   std::string BoltRpcServer::methodExportWallet(const common::JsonValue &)
   {
     if (m_locked)
@@ -489,15 +799,22 @@ namespace BoltRPC
 
     uint32_t walletHeight = m_syncedHeight.load(std::memory_order_relaxed);
 
-    // Build a JSON blob and base64 encode it for easy copy-paste
+    // Build a JSON blob with wallet data
     std::ostringstream blob;
-    blob << R"({"version":1,"viewKey":")" << viewKeyHex << R"(")"
+    blob << R"({"version":2)"
+         << R"(,"address":")" << m_address << R"(")"
+         << R"(,"viewKey":")" << viewKeyHex << R"(")"
          << R"(,"spendKey":")" << spendKeyHex << R"(")"
          << R"(,"walletHeight":)" << walletHeight
-         << R"(,"address":")" << m_address << R"("})";
+         << R"(,"encrypted":)" << (!m_derivedKey.empty() ? "true" : "false")
+         << "}";
 
     std::string jsonBlob = blob.str();
     std::string encoded = base64Encode(jsonBlob);
+
+    // Clear sensitive data
+    secureZero(viewKeyHex);
+    secureZero(spendKeyHex);
 
     std::ostringstream ss;
     ss << R"({"wallet":")" << encoded << R"("})";
@@ -542,7 +859,6 @@ namespace BoltRPC
     uint32_t networkHeight = 0;
     size_t peerCount = 0;
 
-    // Try to get daemon status, return zeros if daemon is unreachable
     try
     {
       nodeHeight = m_node.getLastLocalBlockHeight();
@@ -560,7 +876,9 @@ namespace BoltRPC
     ss << R"({"blockCount":)" << nodeHeight
        << R"(,"knownBlockCount":)" << networkHeight
        << R"(,"peerCount":)" << peerCount
-       << R"(,"walletHeight":)" << syncedHeight;
+       << R"(,"walletHeight":)" << syncedHeight
+       << R"(,"locked":)" << (m_locked ? "true" : "false")
+       << R"(,"encrypted":)" << (!m_derivedKey.empty() ? "true" : "false");
 
     if (m_sidechainConnected)
     {
@@ -603,6 +921,9 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodTransfer(const common::JsonValue &params)
   {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first to send transactions.");
+
     std::lock_guard<std::mutex> lock(m_walletMutex);
 
     if (m_wallet.getType() == BoltCore::WalletType::ViewOnly)
@@ -688,6 +1009,9 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodCreateDeposit(const common::JsonValue &params)
   {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first.");
+
     std::lock_guard<std::mutex> lock(m_walletMutex);
 
     uint64_t amount = static_cast<uint64_t>(params("amount").getInteger());
@@ -706,6 +1030,9 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodWithdrawDeposit(const common::JsonValue &params)
   {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first.");
+
     std::lock_guard<std::mutex> lock(m_walletMutex);
 
     uint64_t depositId = static_cast<uint64_t>(params("depositId").getInteger());
@@ -761,6 +1088,9 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodSendFusionTransaction(const common::JsonValue &params)
   {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first.");
+
     std::lock_guard<std::mutex> lock(m_walletMutex);
 
     uint64_t threshold = params.contains("threshold")
@@ -781,8 +1111,12 @@ namespace BoltRPC
     return ss.str();
   }
 
-  std::string BoltRpcServer::methodReset(const common::JsonValue &)
+  std::string BoltRpcServer::methodReset(const common::JsonValue &params)
   {
+    bool preserveEncryption = params.contains("preserveEncryption")
+                                  ? params("preserveEncryption").getBool()
+                                  : true;
+
     if (m_outputs)
       m_outputs->clear();
 
@@ -798,43 +1132,80 @@ namespace BoltRPC
 
     if (m_stateManager)
     {
-      std::vector<BoltCore::OutputInfo> empty;
-      // Preserve keys across reset so unlock still works
-      std::string vkHex = m_locked ? "" : common::podToHex(m_savedViewKey);
-      std::string skHex = (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
-                              ? ""
-                              : common::podToHex(m_savedSpendKey);
-      m_stateManager->save(empty, 0, vkHex, skHex);
+      // Save empty outputs but preserve keys if requested
+      if (preserveEncryption && !m_locked)
+      {
+        std::string vkHex = common::podToHex(m_savedViewKey);
+        std::string skHex = (m_wallet.getType() == BoltCore::WalletType::ViewOnly)
+                                ? ""
+                                : common::podToHex(m_savedSpendKey);
+
+        std::vector<BoltCore::OutputInfo> empty;
+        m_stateManager->save(empty, 0, vkHex, skHex, m_password);
+
+        secureZero(vkHex);
+        secureZero(skHex);
+      }
+      else
+      {
+        std::vector<BoltCore::OutputInfo> empty;
+        m_stateManager->save(empty, 0, "", "", "");
+      }
     }
 
     m_logger(logging::INFO) << "Wallet reset — will rescan from genesis";
     return R"({"status":"ok","message":"Wallet reset. Rescan will begin on next sync cycle."})";
   }
 
-  std::string BoltRpcServer::methodSave(const common::JsonValue &)
+  std::string BoltRpcServer::methodSave(const common::JsonValue &params)
   {
-    if (saveWalletState())
-      return R"({"status":"ok"})";
-    return R"({"status":"error","message":"Failed to write state file"})";
-  }
+    // Allow optional password parameter for saving without setting it permanently
+    std::string password = params.contains("password") ? params("password").getString() : m_password;
 
-  bool BoltRpcServer::saveWalletState()
-  {
     if (m_stateManager && m_outputs)
     {
       uint32_t height = m_externalSyncedHeight
                             ? m_externalSyncedHeight->load(std::memory_order_relaxed)
                             : m_syncedHeight.load(std::memory_order_relaxed);
 
-      // Persist keys alongside outputs so unlock works across restarts
       std::string vkHex = m_locked ? "" : common::podToHex(m_savedViewKey);
       std::string skHex = (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
                               ? ""
                               : common::podToHex(m_savedSpendKey);
 
-      return m_stateManager->save(*m_outputs, height, vkHex, skHex);
+      bool success = m_stateManager->save(*m_outputs, height, vkHex, skHex, password);
+
+      secureZero(vkHex);
+      secureZero(skHex);
+
+      if (success)
+        return R"({"status":"ok","encrypted":)" + std::string(password.empty() ? "false" : "true") + R"(})";
     }
-    return false;
+
+    return R"({"status":"error","message":"Failed to write state file"})";
+  }
+
+  bool BoltRpcServer::saveWalletState()
+  {
+    if (!m_stateManager || !m_outputs)
+      return false;
+
+    uint32_t height = m_externalSyncedHeight
+                          ? m_externalSyncedHeight->load(std::memory_order_relaxed)
+                          : m_syncedHeight.load(std::memory_order_relaxed);
+
+    // Determine keys to save — empty strings if locked
+    std::string vkHex = m_locked ? "" : common::podToHex(m_savedViewKey);
+    std::string skHex = (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
+                            ? ""
+                            : common::podToHex(m_savedSpendKey);
+
+    bool success = m_stateManager->save(*m_outputs, height, vkHex, skHex, m_password);
+
+    secureZero(vkHex);
+    secureZero(skHex);
+
+    return success;
   }
 
   std::string BoltRpcServer::methodGetNetworkHeight(const common::JsonValue &)
@@ -977,6 +1348,9 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodBridgeLock(const common::JsonValue &params)
   {
+    if (m_locked)
+      throw std::runtime_error("Wallet is locked. Unlock first.");
+
     std::lock_guard<std::mutex> lock(m_walletMutex);
 
     uint64_t amount = static_cast<uint64_t>(params("amount").getInteger());
@@ -1024,6 +1398,19 @@ namespace BoltRPC
       data << R"({"txHash":")" << result.txHash << R"("})";
       m_sseBroadcaster->broadcast("transaction", data.str());
     }
+
+    // Auto-save after successful transaction
+    if (m_stateManager && !m_locked)
+    {
+      try
+      {
+        saveWalletState();
+      }
+      catch (...)
+      {
+        m_logger(logging::WARNING) << "Failed to auto-save after transaction";
+      }
+    }
   }
 
   void BoltRpcServer::startSync(const std::string &dataDir,
@@ -1057,14 +1444,7 @@ namespace BoltRPC
           }
           if (m_stateManager && m_outputs)
           {
-            uint32_t height = m_externalSyncedHeight
-                                  ? m_externalSyncedHeight->load(std::memory_order_relaxed)
-                                  : m_syncedHeight.load(std::memory_order_relaxed);
-            m_stateManager->save(*m_outputs, height,
-                                 m_locked ? "" : common::podToHex(m_savedViewKey),
-                                 (m_locked || m_wallet.getType() == BoltCore::WalletType::ViewOnly)
-                                     ? ""
-                                     : common::podToHex(m_savedSpendKey));
+            saveWalletState();
           }
         }));
 

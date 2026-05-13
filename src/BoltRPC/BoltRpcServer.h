@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <thread>
 #include <functional>
 
 #include "BoltHttp/BoltHttpServer.h"
@@ -33,6 +34,8 @@ namespace BoltRPC
                   const cn::Currency &currency,
                   const std::string &address);
 
+    ~BoltRpcServer();
+
     void start(const std::string &bindIp, uint16_t bindPort, size_t threadCount = 1);
     void stop();
 
@@ -49,7 +52,10 @@ namespace BoltRPC
                          std::vector<BoltCore::OutputInfo> *outputs,
                          std::atomic<uint32_t> *syncedHeight);
 
-    // Public save method for auto-save timer — persists outputs AND keys
+    // Set the encryption password for the current session
+    void setPassword(const std::string &password);
+
+    // Public save method for auto-save timer — persists outputs AND keys (encrypted if password set)
     bool saveWalletState();
 
     // Access the underlying HTTP server for SSE/WebSocket setup
@@ -71,6 +77,7 @@ namespace BoltRPC
     std::string handleJsonRpc(const std::string &body);
     std::string sidechainRpcCall(const std::string &method, const std::string &params);
     void submitTransaction(const BoltCore::TransferResult &result);
+    void startAutoSave();
 
     // System
     std::string methodGetVersion(const common::JsonValue &params);
@@ -80,6 +87,7 @@ namespace BoltRPC
     std::string methodGenerateWallet(const common::JsonValue &params);
     std::string methodUnlock(const common::JsonValue &params);
     std::string methodLock(const common::JsonValue &params);
+    std::string methodChangePassword(const common::JsonValue &params);
     std::string methodGetViewKey(const common::JsonValue &params);
     std::string methodGetSpendKey(const common::JsonValue &params);
     std::string methodExportWallet(const common::JsonValue &params);
@@ -138,6 +146,14 @@ namespace BoltRPC
     StateManager *m_stateManager = nullptr;
     std::vector<BoltCore::OutputInfo> *m_outputs = nullptr;
     std::atomic<uint32_t> *m_externalSyncedHeight = nullptr;
+
+    // Encryption — derived key stays in memory for auto-save; raw password for re-derivation on save
+    std::string m_password;   // User passphrase (zeroed on lock/shutdown)
+    std::string m_derivedKey; // 32-byte ChaCha8 key derived from password (zeroed on lock/shutdown)
+
+    // Auto-save timer
+    std::thread m_autoSaveThread;
+    std::atomic<bool> m_autoSaveRunning{false};
 
     // Locked state (keys zeroed out but RPC stays alive)
     bool m_locked = false;

@@ -1,7 +1,11 @@
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+// Distributed under the MIT/X11 software license
+
 #include "StateManager.h"
 #include <fstream>
 #include <iostream>
 #include "Common/StringTools.h"
+#include "crypto/crypto.h"
 
 namespace BoltRPC
 {
@@ -15,21 +19,64 @@ namespace BoltRPC
     return f.good();
   }
 
+  bool StateManager::isEncrypted() const
+  {
+    std::ifstream f(m_filePath, std::ios::binary);
+    if (!f)
+      return false;
+
+    uint32_t magic;
+    f.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+    return magic == ENCRYPTED_MAGIC;
+  }
+
+  std::string StateManager::deriveKey(const std::string &password) const
+  {
+    // Derive a 32-byte key from the password using the slow hash
+    crypto::chacha8_key key;
+    memset(&key, 0, sizeof(key));
+
+    crypto::Hash pwd_hash;
+    crypto::cn_fast_hash(password.data(), password.size(), pwd_hash);
+    memcpy(&key, &pwd_hash, sizeof(key));
+
+    return std::string(reinterpret_cast<const char *>(&key), sizeof(key));
+  }
+
+  std::string StateManager::cryptData(const std::string &data, const std::string &key) const
+  {
+    // Use ChaCha8 with a fixed IV of zeros. The key is derived from the password.
+    // The IV doesn't need to be random because the key is unique per password.
+    crypto::chacha8_iv iv;
+    memset(&iv, 0, sizeof(iv));
+
+    std::string result(data.size(), '\0');
+    crypto::chacha8(data.data(), data.size(),
+                    reinterpret_cast<const crypto::chacha8_key &>(*key.data()),
+                    iv, &result[0]);
+
+    return result;
+  }
+
   bool StateManager::save(const std::vector<BoltCore::OutputInfo> &outputs,
                           uint32_t lastScannedHeight,
                           const std::string &viewKeyHex,
-                          const std::string &spendKeyHex)
+                          const std::string &spendKeyHex,
+                          const std::string &password)
   {
     std::ofstream f(m_filePath, std::ios::binary | std::ios::trunc);
     if (!f)
       return false;
 
+    bool encrypt = !password.empty();
+
     // Header: magic, version, scanned height
-    f.write(reinterpret_cast<const char *>(&MAGIC), sizeof(MAGIC));
+    uint32_t magic = encrypt ? ENCRYPTED_MAGIC : MAGIC;
+    f.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
     f.write(reinterpret_cast<const char *>(&VERSION), sizeof(VERSION));
     f.write(reinterpret_cast<const char *>(&lastScannedHeight), sizeof(lastScannedHeight));
 
-    // Output count + output data
+    // Output count + output data (always unencrypted)
     uint32_t count = static_cast<uint32_t>(outputs.size());
     f.write(reinterpret_cast<const char *>(&count), sizeof(count));
 
@@ -52,16 +99,29 @@ namespace BoltRPC
       f.write(out.subAddress.data(), addrLen);
     }
 
-    // Key blob (v2+): view key length + view key hex + spend key length + spend key hex
+    // Build key blob
+    std::string keyBlob;
     uint32_t vkLen = static_cast<uint32_t>(viewKeyHex.size());
-    f.write(reinterpret_cast<const char *>(&vkLen), sizeof(vkLen));
+    keyBlob.append(reinterpret_cast<const char *>(&vkLen), sizeof(vkLen));
     if (vkLen > 0)
-      f.write(viewKeyHex.data(), vkLen);
+      keyBlob.append(viewKeyHex);
 
     uint32_t skLen = static_cast<uint32_t>(spendKeyHex.size());
-    f.write(reinterpret_cast<const char *>(&skLen), sizeof(skLen));
+    keyBlob.append(reinterpret_cast<const char *>(&skLen), sizeof(skLen));
     if (skLen > 0)
-      f.write(spendKeyHex.data(), skLen);
+      keyBlob.append(spendKeyHex);
+
+    // Encrypt the key blob if password is provided
+    if (encrypt)
+    {
+      std::string derivedKey = deriveKey(password);
+      keyBlob = cryptData(keyBlob, derivedKey);
+    }
+
+    // Write key blob length and data
+    uint32_t blobLen = static_cast<uint32_t>(keyBlob.size());
+    f.write(reinterpret_cast<const char *>(&blobLen), sizeof(blobLen));
+    f.write(keyBlob.data(), blobLen);
 
     return f.good();
   }
@@ -77,8 +137,8 @@ namespace BoltRPC
     f.read(reinterpret_cast<char *>(&magic), sizeof(magic));
     f.read(reinterpret_cast<char *>(&version), sizeof(version));
 
-    // Accept both v1 and v2 format (v2 just has extra key data at the end)
-    if (magic != MAGIC || version < 1 || version > VERSION)
+    // Accept v1, v2, and v3 formats
+    if ((magic != MAGIC && magic != ENCRYPTED_MAGIC) || version < 1 || version > VERSION)
     {
       std::cerr << "StateManager: invalid or unsupported state file" << std::endl;
       return false;
@@ -116,10 +176,13 @@ namespace BoltRPC
       outputs.push_back(std::move(out));
     }
 
+    // The key blob is at the end. We don't parse it here.
+    // loadKeys() handles that separately.
     return true;
   }
 
-  bool StateManager::loadKeys(std::string &viewKeyHex, std::string &spendKeyHex)
+  bool StateManager::loadKeys(std::string &viewKeyHex, std::string &spendKeyHex,
+                              const std::string &password)
   {
     std::ifstream f(m_filePath, std::ios::binary);
     if (!f)
@@ -129,8 +192,10 @@ namespace BoltRPC
     f.read(reinterpret_cast<char *>(&magic), sizeof(magic));
     f.read(reinterpret_cast<char *>(&version), sizeof(version));
 
-    if (magic != MAGIC || version != VERSION)
+    if ((magic != MAGIC && magic != ENCRYPTED_MAGIC) || version < 1 || version > VERSION)
       return false;
+
+    bool encrypted = (magic == ENCRYPTED_MAGIC);
 
     // Skip past the header and all output data to reach the key blob
     uint32_t lastScannedHeight;
@@ -139,12 +204,10 @@ namespace BoltRPC
     uint32_t count;
     f.read(reinterpret_cast<char *>(&count), sizeof(count));
 
-    // Calculate size of one output entry to seek past
+    // Seek past all output entries
     for (uint32_t i = 0; i < count; ++i)
     {
-      // Skip fixed fields
       f.seekg(4 + 32 + 4 + 4 + 8 + 32 + 32 + 32 + 1 + 1 + 4, std::ios::cur);
-      // Skip variable-length subAddress
       uint32_t addrLen;
       f.read(reinterpret_cast<char *>(&addrLen), sizeof(addrLen));
       f.seekg(addrLen, std::ios::cur);
@@ -152,21 +215,58 @@ namespace BoltRPC
         return false;
     }
 
+    // Read key blob length
+    uint32_t blobLen;
+    f.read(reinterpret_cast<char *>(&blobLen), sizeof(blobLen));
+    if (blobLen == 0)
+      return false;
+
     // Read key blob
-    uint32_t vkLen;
-    f.read(reinterpret_cast<char *>(&vkLen), sizeof(vkLen));
-    if (vkLen > 0)
+    std::string keyBlob(blobLen, '\0');
+    f.read(&keyBlob[0], blobLen);
+
+    // Decrypt if needed
+    if (encrypted)
     {
-      viewKeyHex.resize(vkLen);
-      f.read(&viewKeyHex[0], vkLen);
+      if (password.empty())
+      {
+        std::cerr << "StateManager: encrypted state file requires a password" << std::endl;
+        return false;
+      }
+      std::string derivedKey = deriveKey(password);
+      keyBlob = cryptData(keyBlob, derivedKey);
     }
 
+    // Parse key blob
+    const char *ptr = keyBlob.data();
+    const char *end = ptr + keyBlob.size();
+
+    if (ptr + sizeof(uint32_t) > end)
+      return false;
+    uint32_t vkLen;
+    memcpy(&vkLen, ptr, sizeof(vkLen));
+    ptr += sizeof(vkLen);
+
+    if (vkLen > 0)
+    {
+      if (ptr + vkLen > end)
+        return false;
+      viewKeyHex.assign(ptr, vkLen);
+      ptr += vkLen;
+    }
+
+    if (ptr + sizeof(uint32_t) > end)
+      return !viewKeyHex.empty();
     uint32_t skLen;
-    f.read(reinterpret_cast<char *>(&skLen), sizeof(skLen));
+    memcpy(&skLen, ptr, sizeof(skLen));
+    ptr += sizeof(skLen);
+
     if (skLen > 0)
     {
-      spendKeyHex.resize(skLen);
-      f.read(&spendKeyHex[0], skLen);
+      if (ptr + skLen > end)
+        return !viewKeyHex.empty();
+      spendKeyHex.assign(ptr, skLen);
+      ptr += skLen;
     }
 
     return !viewKeyHex.empty();
