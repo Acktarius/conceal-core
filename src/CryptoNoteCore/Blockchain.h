@@ -567,8 +567,10 @@ namespace cn
     // Internal implementation of findBlockchainSupplement
     uint32_t findBlockchainSupplementInternal(const std::vector<crypto::Hash> &qblock_ids) const;
 
-    // Looks up a TransactionEntry by its TransactionIndex (resolves from m_blocks)
-    const TransactionEntry &transactionByIndex(TransactionIndex index);
+    // Looks up a TransactionEntry by its TransactionIndex (resolves from m_blocks or MDBX)
+    // Returns by value so that the MDBX path (which deserialises into a temporary BlockEntry)
+    // does not produce a dangling reference.
+    TransactionEntry transactionByIndex(TransactionIndex index);
 
     // Builds a BlockHeaderPOD from a fully deserialised BlockEntry
     // Used as a fallback when the header DB lacks data, and as the primary path for the non‑MDBX backend

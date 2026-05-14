@@ -8,6 +8,10 @@
 namespace BoltRPC
 {
 
+// Out-of-class definitions required by C++11 for static constexpr members that are ODR-used
+constexpr uint32_t SyncMonitor::POLL_INTERVAL_MS;
+constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
+
   SyncMonitor::SyncMonitor(cn::INode &node,
                            const crypto::SecretKey &viewKey,
                            const crypto::PublicKey &spendPub,

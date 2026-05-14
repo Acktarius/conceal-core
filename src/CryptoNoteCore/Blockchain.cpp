@@ -964,7 +964,7 @@ namespace cn
             bool msigLoaded = false;
 
             // Load outputs index from meta blob
-            if (m_mdbxStorage->getMeta("idx_outputs", metaBuf))
+            if (m_mdbxStorage->getMeta("idx_outputs_v3", metaBuf))
             {
               const uint8_t *ptr = metaBuf.data();
               const uint8_t *end = ptr + metaBuf.size();
@@ -1025,19 +1025,23 @@ namespace cn
               msigLoaded = !m_multisignatureOutputs.empty();
             }
 
-            // Load deposit index from meta
+            // Load deposit index from meta (v2: per-block deltas as int64_t amount + uint64_t interest)
             bool depositsLoaded = false;
-            if (m_mdbxStorage->getMeta("idx_deposits", metaBuf))
+            if (m_mdbxStorage->getMeta("idx_deposits_v2", metaBuf))
             {
+              constexpr size_t entrySize = sizeof(int64_t) + sizeof(uint64_t);
               const uint8_t *ptr = metaBuf.data();
               const uint8_t *end = ptr + metaBuf.size();
               m_depositIndex = DepositIndex();
-              while (ptr + sizeof(uint64_t) <= end)
+              while (ptr + entrySize <= end)
               {
-                uint64_t val;
-                memcpy(&val, ptr, sizeof(val));
-                ptr += sizeof(val);
-                m_depositIndex.pushBlock(val, 0);
+                int64_t deltaAmount;
+                uint64_t deltaInterest;
+                memcpy(&deltaAmount, ptr, sizeof(deltaAmount));
+                ptr += sizeof(deltaAmount);
+                memcpy(&deltaInterest, ptr, sizeof(deltaInterest));
+                ptr += sizeof(deltaInterest);
+                m_depositIndex.pushBlock(deltaAmount, deltaInterest);
               }
               depositsLoaded = !metaBuf.empty();
             }
@@ -1050,6 +1054,7 @@ namespace cn
             }
 
             // Scan blocks to rebuild any missing indexes and push deposit data
+            crypto::Hash prevBlockHash = NULL_HASH;
             for (uint32_t h = 0; h <= topHeight; ++h)
             {
               cn::BinaryArray ba;
@@ -1064,6 +1069,17 @@ namespace cn
                       logger(INFO, BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
 
                     crypto::Hash blockHash = get_block_hash(entry.bl);
+
+                    // Verify chain linkage (mirrors legacy rebuildCache() check)
+                    if (h > 0 && entry.bl.previousBlockHash != prevBlockHash)
+                    {
+                      logger(ERROR, BRIGHT_RED) << "Chain linkage broken at height " << h
+                        << ": previousBlockHash=" << entry.bl.previousBlockHash
+                        << " expected=" << prevBlockHash
+                        << " — MDBX block data is corrupt at this height.";
+                      return false;
+                    }
+                    prevBlockHash = blockHash;
 
                     for (uint32_t t = 0; t < entry.transactions.size(); ++t)
                     {
@@ -1135,6 +1151,7 @@ namespace cn
             m_depositIndex = DepositIndex();
 
             topHeight = m_mdbxStorage->topBlockHeight();
+            crypto::Hash prevHash = NULL_HASH;
             for (uint32_t h = 0; h <= topHeight; ++h)
             {
               cn::BinaryArray ba;
@@ -1147,6 +1164,18 @@ namespace cn
                 if (cn::fromBinaryArray(entry, ba))
                 {
                   crypto::Hash blockHash = get_block_hash(entry.bl);
+
+                  // Verify chain linkage (mirrors legacy rebuildCache() check)
+                  if (h > 0 && entry.bl.previousBlockHash != prevHash)
+                  {
+                    logger(ERROR, BRIGHT_RED) << "Chain linkage broken at height " << h
+                      << ": previousBlockHash=" << entry.bl.previousBlockHash
+                      << " expected=" << prevHash
+                      << " — MDBX block data is corrupt at this height.";
+                    return false;
+                  }
+                  prevHash = blockHash;
+
                   m_blockHashes.push_back(blockHash);
                   m_hashToHeight[blockHash] = h;
                   m_blockIndex.push(blockHash);
@@ -1661,7 +1690,7 @@ namespace cn
             buf.insert(buf.end(), (uint8_t *)&outIdx, (uint8_t *)&outIdx + sizeof(outIdx));
           }
         }
-        m_mdbxStorage->putMeta("idx_outputs", buf);
+        m_mdbxStorage->putMeta("idx_outputs_v3", buf);
 
         // Store multisig outputs index as a packed structure in meta
         buf.clear();
@@ -1685,15 +1714,26 @@ namespace cn
         }
         m_mdbxStorage->putMeta("idx_msig", buf);
 
-        // Store deposit index as an array of uint64_t values in meta
+        // Store deposit index as per-block deltas: (int64_t deltaAmount, uint64_t deltaInterest).
+        // Key is "idx_deposits_v2" — old "idx_deposits" stored wrong cumulative values and is ignored.
         buf.clear();
-        buf.reserve(sizeof(uint64_t) * m_depositIndex.size());
-        for (size_t i = 0; i < m_depositIndex.size(); ++i)
+        buf.reserve((sizeof(int64_t) + sizeof(uint64_t)) * m_depositIndex.size());
         {
-          uint64_t val = m_depositIndex.depositAmountAtHeight(static_cast<uint32_t>(i));
-          buf.insert(buf.end(), (uint8_t *)&val, (uint8_t *)&val + sizeof(val));
+          int64_t prevAmount = 0;
+          uint64_t prevInterest = 0;
+          for (size_t i = 0; i < m_depositIndex.size(); ++i)
+          {
+            int64_t curAmount = m_depositIndex.depositAmountAtHeight(static_cast<uint32_t>(i));
+            uint64_t curInterest = m_depositIndex.depositInterestAtHeight(static_cast<uint32_t>(i));
+            int64_t deltaAmount = curAmount - prevAmount;
+            uint64_t deltaInterest = curInterest - prevInterest;
+            buf.insert(buf.end(), (uint8_t *)&deltaAmount, (uint8_t *)&deltaAmount + sizeof(deltaAmount));
+            buf.insert(buf.end(), (uint8_t *)&deltaInterest, (uint8_t *)&deltaInterest + sizeof(deltaInterest));
+            prevAmount = curAmount;
+            prevInterest = curInterest;
+          }
         }
-        m_mdbxStorage->putMeta("idx_deposits", buf);
+        m_mdbxStorage->putMeta("idx_deposits_v2", buf);
         m_mdbxStorage->flush();
       }
       logger(INFO, BRIGHT_GREEN) << "MDBX index saved successfully.";
@@ -3102,7 +3142,8 @@ namespace cn
     if (it == m_multisignatureOutputs.end() || it->second.size() <= gindex)
       return false;
     auto msigUsage = it->second[gindex];
-    auto &targetOut = transactionByIndex(msigUsage.transactionIndex).tx.outputs[msigUsage.outputIndex].target;
+    const auto txEntry = transactionByIndex(msigUsage.transactionIndex);
+    const auto &targetOut = txEntry.tx.outputs[msigUsage.outputIndex].target;
     if (targetOut.type() != typeid(MultisignatureOutput))
       return false;
     out = boost::get<MultisignatureOutput>(targetOut);
@@ -3219,12 +3260,14 @@ namespace cn
   bool Blockchain::check_tx_input(const KeyInput &txin, const crypto::Hash &tx_prefix_hash, const std::vector<crypto::Signature> &sig, uint32_t *pmax_related_block_height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+    // Keys are stored by value because transactionByIndex() returns a temporary (MDBX path).
+    // Storing pointers into that temporary would dangle after each loop iteration in scanOutputKeysForIndexes.
     struct outputs_visitor
     {
-      std::vector<const crypto::PublicKey *> &m_results_collector;
+      std::vector<crypto::PublicKey> &m_results_collector;
       Blockchain &m_bch;
       LoggerRef logger;
-      outputs_visitor(std::vector<const crypto::PublicKey *> &results_collector, Blockchain &bch, ILogger &logger) : m_results_collector(results_collector), m_bch(bch), logger(logger, "outputs_visitor") {}
+      outputs_visitor(std::vector<crypto::PublicKey> &results_collector, Blockchain &bch, ILogger &logger) : m_results_collector(results_collector), m_bch(bch), logger(logger, "outputs_visitor") {}
       bool handle_output(const Transaction &tx, const TransactionOutput &out, size_t transactionOutputIndex)
       {
         if (!m_bch.is_tx_spendtime_unlocked(tx.unlockTime))
@@ -3237,12 +3280,12 @@ namespace cn
           logger(DEBUGGING) << "Output have wrong type id, which=" << out.target.which();
           return false;
         }
-        m_results_collector.push_back(&boost::get<KeyOutput>(out.target).key);
+        m_results_collector.push_back(boost::get<KeyOutput>(out.target).key);
         return true;
       }
     };
 
-    std::vector<const crypto::PublicKey *> output_keys;
+    std::vector<crypto::PublicKey> output_keys;
     outputs_visitor vi(output_keys, *this, logger.getLogger());
     if (!scanOutputKeysForIndexes(txin, vi, pmax_related_block_height))
     {
@@ -3267,11 +3310,23 @@ namespace cn
     if (isInCheckpointZone(getCurrentBlockchainHeight()))
       return true;
 
+    // Build pointer array from owned values — safe regardless of MDBX or legacy backend
+    std::vector<const crypto::PublicKey *> output_key_ptrs;
+    output_key_ptrs.reserve(output_keys.size());
+    for (const auto &k : output_keys)
+      output_key_ptrs.push_back(&k);
+
     static const crypto::KeyImage I = {{0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
     static const crypto::KeyImage L = {{0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10}};
     if (!(scalarmultKey(txin.keyImage, L) == I))
+    {
+      logger(INFO, BRIGHT_WHITE) << "Key image subgroup check failed, keyImage=" << common::podToHex(txin.keyImage);
       return false;
-    return crypto::check_ring_signature(tx_prefix_hash, txin.keyImage, output_keys, sig.data());
+    }
+    bool ringOk = crypto::check_ring_signature(tx_prefix_hash, txin.keyImage, output_key_ptrs, sig.data());
+    if (!ringOk)
+      logger(INFO, BRIGHT_WHITE) << "Ring signature check failed for input amount=" << m_currency.formatAmount(txin.amount) << " mixin=" << (output_key_ptrs.size() - 1);
+    return ringOk;
   }
 
   // Returns the current network‑adjusted time
@@ -3441,7 +3496,7 @@ namespace cn
   }
 
   // Resolves a TransactionIndex to the actual TransactionEntry
-  const Blockchain::TransactionEntry &Blockchain::transactionByIndex(TransactionIndex index)
+  Blockchain::TransactionEntry Blockchain::transactionByIndex(TransactionIndex index)
   {
 #ifdef HAVE_MDBX
     if (m_useMdbx && m_mdbxStorage)
@@ -3941,33 +3996,89 @@ namespace cn
     for (size_t outputIndex = 0; outputIndex < transaction.outputs.size(); ++outputIndex)
     {
       const TransactionOutput &output = transaction.outputs[transaction.outputs.size() - 1 - outputIndex];
+      const uint16_t outIdx = static_cast<uint16_t>(transaction.outputs.size() - 1 - outputIndex);
       if (output.target.type() == typeid(KeyOutput))
       {
-        auto amountOutputs = m_outputs.find(output.amount);
-        if (amountOutputs == m_outputs.end() || amountOutputs->second.empty())
+        auto amountIt = m_outputs.find(output.amount);
+        if (amountIt == m_outputs.end() || amountIt->second.empty())
           continue;
-        if (amountOutputs->second.back().first.block != transactionIndex.block || amountOutputs->second.back().first.transaction != transactionIndex.transaction)
-          continue;
-        if (amountOutputs->second.back().second != transaction.outputs.size() - 1 - outputIndex)
-          continue;
-        amountOutputs->second.pop_back();
-        if (amountOutputs->second.empty())
-          m_outputs.erase(amountOutputs);
+        auto &vec = amountIt->second;
+        const bool atBack = (vec.back().first.block == transactionIndex.block &&
+                             vec.back().first.transaction == transactionIndex.transaction &&
+                             vec.back().second == outIdx);
+        if (atBack)
+        {
+          vec.pop_back();
+        }
+        else
+        {
+          // LIFO invariant violated — index was corrupted (e.g. by a prior reorg bug).
+          // Search backward for the correct entry and remove it so the corruption does not persist.
+          logger(WARNING, BRIGHT_YELLOW) << "popTransaction: output not at back of m_outputs["
+            << output.amount << "] — searching (block=" << transactionIndex.block
+            << " tx=" << transactionIndex.transaction << " out=" << outIdx << ")";
+          bool found = false;
+          for (auto it = vec.end(); it != vec.begin(); )
+          {
+            --it;
+            if (it->first.block == transactionIndex.block &&
+                it->first.transaction == transactionIndex.transaction &&
+                it->second == outIdx)
+            {
+              vec.erase(it);
+              found = true;
+              break;
+            }
+          }
+          if (!found)
+            logger(ERROR, BRIGHT_RED) << "popTransaction: entry not found in m_outputs["
+              << output.amount << "] for block=" << transactionIndex.block
+              << " tx=" << transactionIndex.transaction << " out=" << outIdx;
+        }
+        if (amountIt->second.empty())
+          m_outputs.erase(amountIt);
       }
       else if (output.target.type() == typeid(MultisignatureOutput))
       {
-        auto amountOutputs = m_multisignatureOutputs.find(output.amount);
-        if (amountOutputs == m_multisignatureOutputs.end() || amountOutputs->second.empty())
+        auto amountIt = m_multisignatureOutputs.find(output.amount);
+        if (amountIt == m_multisignatureOutputs.end() || amountIt->second.empty())
           continue;
-        if (amountOutputs->second.back().isUsed)
+        auto &vec = amountIt->second;
+        if (vec.back().isUsed)
           continue;
-        if (amountOutputs->second.back().transactionIndex.block != transactionIndex.block || amountOutputs->second.back().transactionIndex.transaction != transactionIndex.transaction)
-          continue;
-        if (amountOutputs->second.back().outputIndex != transaction.outputs.size() - 1 - outputIndex)
-          continue;
-        amountOutputs->second.pop_back();
-        if (amountOutputs->second.empty())
-          m_multisignatureOutputs.erase(amountOutputs);
+        const bool atBack = (vec.back().transactionIndex.block == transactionIndex.block &&
+                             vec.back().transactionIndex.transaction == transactionIndex.transaction &&
+                             vec.back().outputIndex == outIdx);
+        if (atBack)
+        {
+          vec.pop_back();
+        }
+        else
+        {
+          logger(WARNING, BRIGHT_YELLOW) << "popTransaction: multisig output not at back of m_multisignatureOutputs["
+            << output.amount << "] — searching (block=" << transactionIndex.block
+            << " tx=" << transactionIndex.transaction << " out=" << outIdx << ")";
+          bool found = false;
+          for (auto it = vec.end(); it != vec.begin(); )
+          {
+            --it;
+            if (!it->isUsed &&
+                it->transactionIndex.block == transactionIndex.block &&
+                it->transactionIndex.transaction == transactionIndex.transaction &&
+                it->outputIndex == outIdx)
+            {
+              vec.erase(it);
+              found = true;
+              break;
+            }
+          }
+          if (!found)
+            logger(ERROR, BRIGHT_RED) << "popTransaction: entry not found in m_multisignatureOutputs["
+              << output.amount << "] for block=" << transactionIndex.block
+              << " tx=" << transactionIndex.transaction << " out=" << outIdx;
+        }
+        if (amountIt->second.empty())
+          m_multisignatureOutputs.erase(amountIt);
       }
     }
     for (auto &input : transaction.inputs)
