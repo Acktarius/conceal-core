@@ -346,3 +346,63 @@ TEST_F(Currency_isFusionTransactionTest, failsIfTransactionHasInputLessThanDustT
   auto tx = builder.buildTx();
   ASSERT_FALSE(m_currency.isFusionTransaction(tx));
 }
+
+class InterestV3V4ComparisonTest : public ::testing::Test {
+public:
+  // Use small fake heights — no chain sync required.
+  // HEIGHT_V3 routes through calculateInterestV3 (> V3_gate, <= V4_gate).
+  // HEIGHT_V4 routes through calculateInterestV4 (> V4_gate).
+  static constexpr uint32_t HEIGHT_V3 = 201;
+  static constexpr uint32_t HEIGHT_V4 = 301;
+
+  InterestV3V4ComparisonTest() :
+    builder(m_logger),
+    currency(builder
+               .depositHeightV3(200)
+               .depositHeightV4_1(300)
+               .depositMinTermV3(21900)
+               .currency()) {}
+
+  uint32_t monthTerm(uint32_t n) const { return n * currency.depositMinTermV3(); }
+  uint64_t ccx(uint64_t n)       const { return n * currency.coin(); }
+
+  logging::ConsoleLogger m_logger;
+  CurrencyBuilder        builder;
+  Currency               currency;
+};
+
+TEST_F(InterestV3V4ComparisonTest, V3andV4Comparison)
+{
+  // Three principal tiers x 12 monthly terms.
+  const std::vector<uint64_t> amounts = {
+    ccx(5000),   // tier 1: < 10 000 CCX -> 2.9% base
+    ccx(15000),  // tier 2: 10 000-19 999 CCX -> 3.9% base
+    ccx(25000),  // tier 3: >= 20 000 CCX -> 4.9% base
+  };
+
+  bool hard_fork_needed = false;
+
+  for (uint64_t amount : amounts) {
+    for (uint32_t months = 1; months <= 12; ++months) {
+      uint32_t term  = monthTerm(months);
+      uint64_t v3    = currency.calculateInterest(amount, term, HEIGHT_V3);
+      uint64_t v4    = currency.calculateInterest(amount, term, HEIGHT_V4);
+      int64_t  delta = static_cast<int64_t>(v4) - static_cast<int64_t>(v3);
+
+      if (delta != 0) {
+        hard_fork_needed = true;
+        std::cout << "  amount=" << amount / currency.coin() << " CCX"
+                  << "  months=" << months
+                  << "  V3=" << v3 << "  V4=" << v4
+                  << "  delta=" << delta << "\n";
+      }
+    }
+  }
+
+  if (hard_fork_needed) {
+    FAIL() << "HARDFORK NEEDED: V3 and V4 diverge -> hard fork at DEPOSIT_HEIGHT_V4_1 is required.";
+  } else {
+    std::cout << "CONCLUSION: V3 and V4 are identical -> hard fork is not strictly required.\n";
+    SUCCEED();
+  }
+}
