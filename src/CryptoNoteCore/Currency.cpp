@@ -247,7 +247,7 @@ namespace cn
 
   uint64_t Currency::calculateInterest(uint64_t amount, uint32_t term, uint32_t lockHeight) const
   {
-    /* deposits 3.0 and investments 1.0, mathematically identical to v3.0, only differs by compute method and order */
+   /* deposits 3.0 and investments 1.0, mathematically identical to v3.0, only differs by compute method and order */
     if (term % m_depositMinTermV3 == 0 && lockHeight > m_depositHeightV4_1)
     {
       return calculateInterestV4(amount, term);
