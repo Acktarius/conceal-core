@@ -9,7 +9,7 @@
 
 #include <boost/utility/value_init.hpp>
 
-#include "CryptoNoteSerialization.h"
+#include "CryptoNoteCore/CryptoNoteSerialization.h"
 #include "Serialization/SerializationOverloads.h"
 
 namespace cn {

@@ -7,7 +7,7 @@
 
 #pragma once
 #include <map>
-#include "CryptoNoteBasicImpl.h"
+#include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CheckpointList.h"
 #include <Logging/LoggerRef.h>
 

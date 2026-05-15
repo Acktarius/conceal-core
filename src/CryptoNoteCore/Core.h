@@ -14,7 +14,7 @@
 #include "CryptoNoteProtocol/CryptoNoteProtocolHandlerCommon.h"
 #include "Currency.h"
 #include "TransactionPool.h"
-#include "Blockchain.h"
+#include "Blockchain/Blockchain.h"
 #include "CryptoNoteCore/IMinerHandler.h"
 #include "CryptoNoteCore/MinerConfig.h"
 #include "ICore.h"
@@ -23,7 +23,7 @@
 
 #include "System/Dispatcher.h"
 #include "CryptoNoteCore/MessageQueue.h"
-#include "CryptoNoteCore/BlockchainMessages.h"
+#include "Blockchain/BlockchainMessages.h"
 
 #include <Logging/LoggerMessage.h>
 

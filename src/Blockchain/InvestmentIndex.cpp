@@ -5,7 +5,7 @@
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <CryptoNoteCore/DepositIndex.h>
+#include "InvestmentIndex.h"
 
 #include <algorithm>
 #include <cassert>
@@ -13,27 +13,27 @@
 #include <iterator>
 #include <limits>
 
-#include "CryptoNoteSerialization.h"
+#include "CryptoNoteCore/CryptoNoteSerialization.h"
 #include "Serialization/SerializationOverloads.h"
 
 namespace cn {
 
-DepositIndex::DepositIndex() : blockCount(0) {
+InvestmentIndex::InvestmentIndex() : blockCount(0) {
 }
 
-DepositIndex::DepositIndex(DepositHeight expectedHeight) : blockCount(0) {
+InvestmentIndex::InvestmentIndex(DepositHeight expectedHeight) : blockCount(0) {
   index.reserve(expectedHeight + 1);
 }
 
-void DepositIndex::reserve(DepositHeight expectedHeight) {
+void InvestmentIndex::reserve(DepositHeight expectedHeight) {
   index.reserve(expectedHeight + 1);
 }
 
-auto DepositIndex::fullDepositAmount() const -> DepositAmount {
+auto InvestmentIndex::fullDepositAmount() const -> DepositAmount {
   return index.empty() ? 0 : index.back().amount;
 }
 
-auto DepositIndex::fullInterestAmount() const -> DepositInterest {
+auto InvestmentIndex::fullInterestAmount() const -> DepositInterest {
   return index.empty() ? 0 : index.back().interest;
 }
 
@@ -57,7 +57,7 @@ static inline bool sumWillOverflow(uint64_t x, uint64_t y) {
   return false;
 }
 
-void DepositIndex::pushBlock(DepositAmount amount, DepositInterest interest) {
+void InvestmentIndex::pushBlock(DepositAmount amount, DepositInterest interest) {
   DepositAmount lastAmount;
   DepositInterest lastInterest;
   if (index.empty()) {
@@ -78,7 +78,7 @@ void DepositIndex::pushBlock(DepositAmount amount, DepositInterest interest) {
   ++blockCount;
 }
 
-void DepositIndex::popBlock() {
+void InvestmentIndex::popBlock() {
   assert(blockCount > 0);
   --blockCount;
   if (!index.empty() && index.back().height == blockCount) {
@@ -86,17 +86,17 @@ void DepositIndex::popBlock() {
   }
 }
   
-auto DepositIndex::size() const -> DepositHeight {
+auto InvestmentIndex::size() const -> DepositHeight {
   return blockCount;
 }
 
-auto DepositIndex::upperBound(DepositHeight height) const -> IndexType::const_iterator {
+auto InvestmentIndex::upperBound(DepositHeight height) const -> IndexType::const_iterator {
   return std::upper_bound(
       index.cbegin(), index.cend(), height,
-      [] (DepositHeight height, const DepositIndexEntry& left) { return height < left.height; });
+      [] (DepositHeight height, const InvestmentIndexEntry& left) { return height < left.height; });
 }
 
-size_t DepositIndex::popBlocks(DepositHeight from) {
+size_t InvestmentIndex::popBlocks(DepositHeight from) {
   if (from >= blockCount) {
     return 0;
   }
@@ -116,7 +116,7 @@ size_t DepositIndex::popBlocks(DepositHeight from) {
   return diff;
 }
 
-auto DepositIndex::depositAmountAtHeight(DepositHeight height) const -> DepositAmount {
+auto InvestmentIndex::investmentAmountAtHeight(DepositHeight height) const -> DepositAmount {
   if (blockCount == 0) {
     return 0;
   } else {
@@ -125,7 +125,7 @@ auto DepositIndex::depositAmountAtHeight(DepositHeight height) const -> DepositA
   }
 }
 
-auto DepositIndex::depositInterestAtHeight(DepositHeight height) const -> DepositInterest {
+auto InvestmentIndex::depositInterestAtHeight(DepositHeight height) const -> DepositInterest {
   if (blockCount == 0) {
     return 0;
   } else {
@@ -134,16 +134,16 @@ auto DepositIndex::depositInterestAtHeight(DepositHeight height) const -> Deposi
   }
 }
 
-void DepositIndex::serialize(ISerializer& s) {
+void InvestmentIndex::serialize(ISerializer& s) {
   s(blockCount, "blockCount");
   if (s.type() == ISerializer::INPUT) {
-    readSequence<DepositIndexEntry>(std::back_inserter(index), "index", s);
+    readSequence<InvestmentIndexEntry>(std::back_inserter(index), "index", s);
   } else {
-    writeSequence<DepositIndexEntry>(index.begin(), index.end(), "index", s);
+    writeSequence<InvestmentIndexEntry>(index.begin(), index.end(), "index", s);
   }
 }
 
-void DepositIndex::DepositIndexEntry::serialize(ISerializer& s) {
+void InvestmentIndex::InvestmentIndexEntry::serialize(ISerializer& s) {
   s(height, "height");
   s(amount, "amount");
   s(interest, "interest");

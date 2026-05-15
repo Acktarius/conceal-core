@@ -29,10 +29,10 @@
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/ITimeProvider.h"
-#include "CryptoNoteCore/ITransactionValidator.h"
+#include "Blockchain/ITransactionValidator.h"
 #include "CryptoNoteCore/ITxPoolObserver.h"
 #include "CryptoNoteCore/VerificationContext.h"
-#include "CryptoNoteCore/BlockchainIndices.h"
+#include "Blockchain/BlockchainIndices.h"
 
 #include <Logging/LoggerRef.h>
 

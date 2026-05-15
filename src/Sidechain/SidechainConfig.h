@@ -30,7 +30,6 @@ namespace SidechainConfig
   const uint64_t MINIMUM_FEE = 1;
   const uint64_t DEFAULT_FEE = 10;
   const uint64_t TESTNET_FEE = 1;
-  const std::string FEE_TOKEN = "SCCX";
 
   // Faucet
   const uint64_t FAUCET_AMOUNT = 2; // enough for 2 transfers at 1 SCCX each
@@ -39,7 +38,7 @@ namespace SidechainConfig
   const uint64_t BLOCK_REWARD = 1;
 
   // Rate limiting: minimum blocks between token creations per address
-  const uint64_t TOKEN_CREATE_COOLDOWN_BLOCKS = 10;
+  const uint64_t TOKEN_CREATE_COOLDOWN_BLOCKS = 10; // TODO time based
 
   // Minimum time between blocks to prevent spam (milliseconds)
   const uint64_t MIN_BLOCK_INTERVAL_MS = 500;
@@ -62,8 +61,8 @@ namespace SidechainConfig
 
   // Fork heights (for future upgrades)
   const uint32_t FORK_HEIGHT_V1_BASIC = 0;
-  const uint32_t FORK_HEIGHT_V2_STAKING = 100000;
-  const uint32_t FORK_HEIGHT_V3_NFTS = 250000;
+  const uint32_t FORK_HEIGHT_V2_STAKING = 10000000000;
+  const uint32_t FORK_HEIGHT_V3_NFTS = 25000000000;
 
   // BFT Consensus
   const uint32_t BFT_BLOCK_THRESHOLD = 1;       // minimum signatures to commit (1=testing, 3=2-of-3)

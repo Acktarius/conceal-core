@@ -2,7 +2,7 @@
 #include "BlockDeserializer.h"
 #include "CryptoHelpers.h"
 #include "ProgressWriter.h"
-#include "PathHelpers.h"
+#include "Common/PathHelpers.h"
 
 #include "Storage/MDBXBlockchainStorage.h"
 #include "Common/Util.h"

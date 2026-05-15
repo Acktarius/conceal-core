@@ -25,7 +25,7 @@
 #include "CryptoNoteConfig.h"
 #include "Transfers/TransfersContainer.h"
 #include "IWallet.h"
-#include "Blockchain.h"
+#include "Blockchain/Blockchain.h"
 #include "TransactionExtra.h"
 
 using namespace logging;

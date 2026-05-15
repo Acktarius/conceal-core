@@ -15,6 +15,7 @@
 #include "../crypto/hash.h"
 #include "../Logging/LoggerRef.h"
 #include "CryptoNoteBasic.h"
+
 #include "Difficulty.h"
 
 namespace cn

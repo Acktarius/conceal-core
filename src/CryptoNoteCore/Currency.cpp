@@ -20,7 +20,7 @@
 #include "CryptoNoteFormatUtils.h"
 #include "CryptoNoteTools.h"
 #include "TransactionExtra.h"
-#include "UpgradeDetector.h"
+#include "Blockchain/UpgradeDetector.h"
 
 #undef ERROR
 

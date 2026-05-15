@@ -18,8 +18,6 @@ using namespace CryptoNote;
 using namespace common;
 using namespace cn;
 
-// ---------- Safe MDBX_val constructors (class static members)
-
 // Builds an MDBX_val from any raw pointer+length — used for both RO and RW transactions
 // MDBX_val.iov_base is non‑const in the API, but the library treats it as const for RO txns
 MDBX_val MDBXBlockchainStorage::to_val(const void *data, size_t len)
@@ -48,8 +46,6 @@ MDBX_val MDBXBlockchainStorage::to_val(const cn::BlockHeaderPOD &hdr)
   return to_val(&hdr, sizeof(hdr));
 }
 
-// ---------- Zero‑padded key helpers (lexicographic order == numeric order → MDBX_APPEND) ----------
-
 // Returns "be_00000042" for height 42 — padding width supports up to 99,999,999 blocks
 std::string MDBXBlockchainStorage::blockEntryKey(uint32_t height)
 {
@@ -70,25 +66,21 @@ std::string MDBXBlockchainStorage::blockHeaderKey(uint32_t height)
 std::string MDBXBlockchainStorage::checkpointKey(uint32_t height)
 {
   std::ostringstream oss;
-  oss << "checkpoint_" << std::setw(7) << std::setfill('0') << height;
+  oss << "checkpoint_" << std::setw(kHeightKeyWidth) << std::setfill('0') << height;
   return oss.str();
 }
 
-// ---------- Constructor / destructor ----------
-
 MDBXBlockchainStorage::MDBXBlockchainStorage(const std::string &dataDir, bool bulkSyncMode, uint64_t sizeLimitBytes)
-    : m_dataDir(dataDir), m_sizeLimitBytes(sizeLimitBytes)
+    : m_dataDir(dataDir), m_sizeLimitBytes(sizeLimitBytes), m_bulkSyncMode(bulkSyncMode)
 {
-  m_bulkSyncMode = bulkSyncMode;
-  openEnvironment(dataDir); // Creates env, opens all databases, and commits the initialisation transaction
+  openEnvironment(dataDir);
+  m_cachedTopHeight = topBlockHeight(); // Seed the cache so MDBX_APPEND works immediately after restart
 }
 
 MDBXBlockchainStorage::~MDBXBlockchainStorage()
 {
   close(); // Aborts any pending write txn and closes the environment
 }
-
-// ---------- Environment setup ----------
 
 void MDBXBlockchainStorage::openEnvironment(const std::string &path)
 {
@@ -100,8 +92,8 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   // RAII guard: closes environment if we throw before releasing it
   auto envGuard = std::unique_ptr<MDBX_env, decltype(&mdbx_env_close)>(m_env, mdbx_env_close);
 
-  // Allow up to 8 named databases (we currently use 6)
-  mdbx_env_set_maxdbs(m_env, 8);
+  // Allow up to 12 named databases
+  mdbx_env_set_maxdbs(m_env, 12);
 
   // Configure mmap geometry: larger lower bound (256 MB) avoids frequent resizes on growing databases
   // MDBX_SAFE_NOSYNC is intentionally NOT used — it causes excessive database bloat (10 GB → 100+ GB)
@@ -146,19 +138,6 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
   txnGuard.release(); // Transaction committed successfully — don't abort
   envGuard.release(); // Environment is in a valid state — don't close
 }
-
-void MDBXBlockchainStorage::openDatabases(MDBX_txn *txn)
-{
-  // Open (or create) each named database — dbi handles are stored for later use
-  mdbx_dbi_open(txn, "heights", MDBX_CREATE, &m_dbiHeights);            // height (uint32_t) → block hash
-  mdbx_dbi_open(txn, "block_heights", MDBX_CREATE, &m_dbiBlockHeights); // block hash → height
-  mdbx_dbi_open(txn, "meta", MDBX_CREATE, &m_dbiMeta);                  // string key → arbitrary blob
-  mdbx_dbi_open(txn, "block_entries", MDBX_CREATE, &m_dbiBlockEntries); // "be_<height>" → serialised block
-  mdbx_dbi_open(txn, "block_headers", MDBX_CREATE, &m_dbiBlockHeaders); // "hdr_<height>" → BlockHeaderPOD
-  mdbx_dbi_open(txn, "checkpoints", MDBX_CREATE, &m_dbiCheckpoints);    // "checkpoint_<height>" → hash
-}
-
-// ---------- Block existence and retrieval ----------
 
 bool MDBXBlockchainStorage::blockExists(const crypto::Hash &hash) const
 {
@@ -248,8 +227,6 @@ crypto::Hash MDBXBlockchainStorage::getBlockHash(uint32_t height) const
   return crypto::Hash(); // Not found → return null hash
 }
 
-// ---------- Header retrieval (single and batch) ----------
-
 bool MDBXBlockchainStorage::getBlockHeader(uint32_t height, cn::BlockHeaderPOD &hdr) const
 {
   // Single read txn: fetch header by padded height key
@@ -314,31 +291,15 @@ void MDBXBlockchainStorage::getBlockHeadersRange(uint32_t startHeight, uint32_t 
   mdbx_txn_abort(txn);
 }
 
-// ---------- Spent key images (placeholder — in‑memory tracking lives in Blockchain) ----------
-
-bool MDBXBlockchainStorage::isSpentKeyImage(const crypto::KeyImage &keyImage) const
-{
-  return false; // Currently handled in‑memory; will move to native DB in a future patch
-}
-
-void MDBXBlockchainStorage::markKeyImageSpent(const crypto::KeyImage &keyImage)
-{
-  // Handled in‑memory via Blockchain::m_spent_keys and persisted to meta blobs by storeCache
-  // TODO: migrate to a dedicated "spent_keys" MDBX database for instant startup
-}
-
-// ---------- Atomic complete block write ----------
-
 void MDBXBlockchainStorage::pushCompleteBlock(uint32_t height,
                                               const crypto::Hash &hash,
                                               const cn::BinaryArray &serializedEntry,
                                               const cn::BlockHeaderPOD &hdr)
 {
-  // All block data is written in ONE explicit transaction — no partial writes, no orphans
   std::lock_guard<std::mutex> lock(m_txMutex);
   ensureWriteTxn();
 
-  // 1. Bi‑directional height ↔ hash mapping
+  // 1. Bi-directional height ↔ hash mapping
   MDBX_val hkey = to_val(&height, sizeof(height));
   MDBX_val hashVal = to_val(hash);
   int rc = mdbx_put(m_writeTxn, m_dbiHeights, &hkey, &hashVal, MDBX_UPSERT);
@@ -373,10 +334,10 @@ void MDBXBlockchainStorage::pushCompleteBlock(uint32_t height,
   std::string hdrKey = blockHeaderKey(height);
   MDBX_val hdrk = to_val(hdrKey);
   MDBX_val hdrv = to_val(hdr);
-  putFlags = MDBX_UPSERT;
+  MDBX_put_flags_t hdrFlags = MDBX_UPSERT;
   if (height == m_cachedTopHeight + 1)
-    putFlags = static_cast<MDBX_put_flags_t>(putFlags | MDBX_APPEND);
-  rc = mdbx_put(m_writeTxn, m_dbiBlockHeaders, &hdrk, &hdrv, putFlags);
+    hdrFlags = static_cast<MDBX_put_flags_t>(hdrFlags | MDBX_APPEND);
+  rc = mdbx_put(m_writeTxn, m_dbiBlockHeaders, &hdrk, &hdrv, hdrFlags);
   if (rc != MDBX_SUCCESS)
   {
     abortWriteTxn();
@@ -394,8 +355,6 @@ void MDBXBlockchainStorage::pushCompleteBlock(uint32_t height,
   if (m_opsSinceLastCommit >= batchSize)
     commitWriteTransaction(false);
 }
-
-// ---------- Legacy single‑operation writes ----------
 
 void MDBXBlockchainStorage::addBlock(const cn::Block &block, const crypto::Hash &hash, uint32_t height)
 {
@@ -447,8 +406,6 @@ void MDBXBlockchainStorage::removeBlock(const crypto::Hash &hash)
   ++m_opsSinceLastCommit;
 }
 
-// ---------- Atomic block removal ----------
-
 void MDBXBlockchainStorage::removeCompleteBlock(uint32_t height, const crypto::Hash &hash)
 {
   // Removes header, block entry, and both height mappings in one transaction
@@ -491,25 +448,6 @@ void MDBXBlockchainStorage::removeBlockHeader(uint32_t height)
   mdbx_del(m_writeTxn, m_dbiBlockHeaders, &mkey, nullptr);
 }
 
-void MDBXBlockchainStorage::cleanupBlockData(uint32_t height)
-{
-  // Removes both block entry and header — used after a failed block processing
-  std::lock_guard<std::mutex> lock(m_txMutex);
-  ensureWriteTxn();
-
-  std::string beKey = blockEntryKey(height);
-  MDBX_val mk = to_val(beKey);
-  mdbx_del(m_writeTxn, m_dbiBlockEntries, &mk, nullptr);
-
-  std::string hdrKey = blockHeaderKey(height);
-  MDBX_val hk = to_val(hdrKey);
-  mdbx_del(m_writeTxn, m_dbiBlockHeaders, &hk, nullptr);
-
-  commitWriteTransaction(true); // Force durable commit — must not leave orphaned data
-}
-
-// ---------- Global state ----------
-
 uint32_t MDBXBlockchainStorage::topBlockHeight() const
 {
   // Reads the persisted top height from the meta database — always accurate
@@ -551,8 +489,6 @@ void MDBXBlockchainStorage::setTopBlockHeightInternal(uint32_t height)
     throw std::runtime_error("setTopBlockHeightInternal failed: " + std::string(mdbx_strerror(rc)));
   }
 }
-
-// ---------- Write transaction management ----------
 
 void MDBXBlockchainStorage::ensureWriteTxn()
 {
@@ -624,11 +560,8 @@ void MDBXBlockchainStorage::abortWriteTxn()
   }
 }
 
-// ---------- Block entry serialisation (legacy — prefer pushCompleteBlock) ----------
-
 void MDBXBlockchainStorage::pushBlockEntry(uint32_t height, const cn::BinaryArray &serializedEntry)
 {
-  // Stores a serialised block entry — uses padded key now
   std::lock_guard<std::mutex> lock(m_txMutex);
   ensureWriteTxn();
 
@@ -637,7 +570,7 @@ void MDBXBlockchainStorage::pushBlockEntry(uint32_t height, const cn::BinaryArra
   MDBX_val mval = to_val(serializedEntry.data(), serializedEntry.size());
   MDBX_put_flags_t putFlags = MDBX_UPSERT;
   if (height == m_cachedTopHeight + 1)
-    putFlags = static_cast<MDBX_put_flags_t>(putFlags | MDBX_APPEND); // Sequential write optimisation
+    putFlags = static_cast<MDBX_put_flags_t>(putFlags | MDBX_APPEND);
   int rc = mdbx_put(m_writeTxn, m_dbiBlockEntries, &mkey, &mval, putFlags);
   if (rc != MDBX_SUCCESS)
   {
@@ -684,8 +617,6 @@ void MDBXBlockchainStorage::popBlockEntry(uint32_t height)
   ++m_opsSinceLastCommit;
 }
 
-// ---------- Initialisation flag ----------
-
 void MDBXBlockchainStorage::setInitialized()
 {
   // Marks the database as fully initialised (writes a sentinel key to meta)
@@ -716,8 +647,6 @@ bool MDBXBlockchainStorage::isInitialized() const
   mdbx_txn_abort(txn);
   return rc == MDBX_SUCCESS;
 }
-
-// ---------- Generic metadata store ----------
 
 void MDBXBlockchainStorage::putMeta(const std::string &key, const std::vector<uint8_t> &value)
 {
@@ -753,11 +682,8 @@ bool MDBXBlockchainStorage::getMeta(const std::string &key, std::vector<uint8_t>
   return false;
 }
 
-// ---------- Push block header (legacy) ----------
-
 void MDBXBlockchainStorage::pushBlockHeader(uint32_t height, const cn::BlockHeaderPOD &hdr)
 {
-  // Stores a block header using padded key — prefer pushCompleteBlock() for new blocks
   std::lock_guard<std::mutex> lock(m_txMutex);
   ensureWriteTxn();
   std::string key = blockHeaderKey(height);
@@ -775,11 +701,8 @@ void MDBXBlockchainStorage::pushBlockHeader(uint32_t height, const cn::BlockHead
   ++m_opsSinceLastCommit;
 }
 
-// ---------- Checkpoint storage ----------
-
 void MDBXBlockchainStorage::storeCheckpoint(uint32_t height, const crypto::Hash &hash)
 {
-  // Stores a checkpoint with zero‑padded key for correct lexical ordering
   std::lock_guard<std::mutex> lock(m_txMutex);
   ensureWriteTxn();
 
@@ -788,7 +711,6 @@ void MDBXBlockchainStorage::storeCheckpoint(uint32_t height, const crypto::Hash 
   MDBX_val mval = to_val(hash);
 
   MDBX_put_flags_t putFlags = MDBX_UPSERT;
-  // MDBX_APPEND can be used during initial sync when heights are monotonically increasing
   if (height == m_cachedTopHeight + 1)
     putFlags = static_cast<MDBX_put_flags_t>(putFlags | MDBX_APPEND);
 
@@ -854,8 +776,6 @@ std::vector<std::pair<uint32_t, crypto::Hash>> MDBXBlockchainStorage::getCheckpo
   mdbx_txn_abort(txn);
   return result;
 }
-
-// ---------- One‑time migration to padded keys ----------
 
 void MDBXBlockchainStorage::migrateToPaddedKeys()
 {
@@ -1000,11 +920,599 @@ void MDBXBlockchainStorage::migrateToPaddedKeys()
   std::cout << "  Key migration committed." << std::endl;
 }
 
-// ---------- Diagnostics ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// Key Format Helpers (new)
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string MDBXBlockchainStorage::timestampKey(uint64_t timestamp, uint32_t height)
+{
+  // Format: "ts_0000000000000012345678_00000042"
+  // Lexicographic order ensures timestamps sort correctly, with height as tiebreaker
+  std::ostringstream oss;
+  oss << "ts_"
+      << std::setw(kTimestampKeyWidth) << std::setfill('0') << timestamp
+      << "_"
+      << std::setw(kHeightKeyWidth) << std::setfill('0') << height;
+  return oss.str();
+}
+
+std::string MDBXBlockchainStorage::difficultyKey(uint32_t height)
+{
+  // Format: "diff_00000042"
+  std::ostringstream oss;
+  oss << "diff_" << std::setw(kDifficultyKeyWidth) << std::setfill('0') << height;
+  return oss.str();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transaction Storage
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::pushTransaction(const crypto::Hash &txHash, const cn::BinaryArray &serializedTx)
+{
+  // Stores a single transaction by its hash
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  MDBX_val key = to_val(txHash);
+  MDBX_val value = to_val(serializedTx.data(), serializedTx.size());
+
+  int rc = mdbx_put(m_writeTxn, m_dbiTransactions, &key, &value, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("pushTransaction failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  ++m_opsSinceLastCommit;
+  size_t batchSize = m_bulkSyncMode ? kCommitBatchSizeBulk : kCommitBatchSize;
+  if (m_opsSinceLastCommit >= batchSize)
+    commitWriteTransaction(false);
+}
+
+bool MDBXBlockchainStorage::getTransaction(const crypto::Hash &txHash, cn::Transaction &tx) const
+{
+  // Reads and deserializes a transaction by hash
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  MDBX_val key = to_val(txHash);
+  MDBX_val value;
+  int rc = mdbx_get(txn, m_dbiTransactions, &key, &value);
+
+  if (rc == MDBX_SUCCESS)
+  {
+    cn::BinaryArray ba(
+        static_cast<const uint8_t *>(value.iov_base),
+        static_cast<const uint8_t *>(value.iov_base) + value.iov_len);
+    mdbx_txn_abort(txn);
+
+    cn::Transaction tempTx;
+    bool ok = cn::fromBinaryArray(tempTx, ba);
+    if (ok)
+      tx = std::move(tempTx);
+    return ok;
+  }
+
+  mdbx_txn_abort(txn);
+  return false;
+}
+
+bool MDBXBlockchainStorage::transactionExists(const crypto::Hash &txHash) const
+{
+  // Quick existence check — single read txn, no deserialization
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  MDBX_val key = to_val(txHash);
+  MDBX_val value;
+  int rc = mdbx_get(txn, m_dbiTransactions, &key, &value);
+
+  mdbx_txn_abort(txn);
+  return rc == MDBX_SUCCESS;
+}
+
+void MDBXBlockchainStorage::removeTransaction(const crypto::Hash &txHash)
+{
+  // Removes a transaction (used during reorgs when a block is popped)
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  MDBX_val key = to_val(txHash);
+  mdbx_del(m_writeTxn, m_dbiTransactions, &key, nullptr);
+
+  ++m_opsSinceLastCommit;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transaction Pool Persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::storePoolState(
+    const std::vector<cn::BinaryArray> &serializedTxs,
+    const std::vector<crypto::KeyImage> &spentKeyImages)
+{
+  // Atomically replaces the entire pool state.
+  // Uses meta keys "pool_tx_count" / "pool_tx_N" / "pool_ki_count" / "pool_ki_N"
+  // All writes happen in one transaction — no partial state.
+
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  // 1. Clear old pool data by scanning and deleting keys with the pool prefix.
+  // We use a small cursor scan for the meta database.
+  MDBX_cursor *cursor;
+  int rc = mdbx_cursor_open(m_writeTxn, m_dbiMeta, &cursor);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("storePoolState: cursor open failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  // Collect keys to delete (can't modify while iterating with some cursor ops)
+  std::vector<std::string> keysToDelete;
+  MDBX_val ckey, cval;
+  while (mdbx_cursor_get(cursor, &ckey, &cval, MDBX_NEXT) == MDBX_SUCCESS)
+  {
+    std::string keyStr(static_cast<const char *>(ckey.iov_base), ckey.iov_len);
+    if (keyStr.rfind("pool_", 0) == 0)
+      keysToDelete.push_back(keyStr);
+  }
+  mdbx_cursor_close(cursor);
+
+  for (const auto &keyStr : keysToDelete)
+  {
+    MDBX_val mk = to_val(keyStr);
+    mdbx_del(m_writeTxn, m_dbiMeta, &mk, nullptr);
+  }
+
+  // 2. Write transaction count
+  uint32_t txCount = static_cast<uint32_t>(serializedTxs.size());
+  MDBX_val countKey = to_val(std::string("pool_tx_count"));
+  MDBX_val countVal = to_val(&txCount, sizeof(txCount));
+  mdbx_put(m_writeTxn, m_dbiMeta, &countKey, &countVal, MDBX_UPSERT);
+
+  // 3. Write each transaction
+  for (size_t i = 0; i < serializedTxs.size(); ++i)
+  {
+    std::string keyStr = "pool_tx_" + std::to_string(i);
+    MDBX_val mk = to_val(keyStr);
+    MDBX_val mv = to_val(serializedTxs[i].data(), serializedTxs[i].size());
+    mdbx_put(m_writeTxn, m_dbiMeta, &mk, &mv, MDBX_UPSERT);
+  }
+
+  // 4. Write spent key image count
+  uint32_t kiCount = static_cast<uint32_t>(spentKeyImages.size());
+  MDBX_val kiCountKey = to_val(std::string("pool_ki_count"));
+  MDBX_val kiCountVal = to_val(&kiCount, sizeof(kiCount));
+  mdbx_put(m_writeTxn, m_dbiMeta, &kiCountKey, &kiCountVal, MDBX_UPSERT);
+
+  // 5. Write each spent key image
+  for (size_t i = 0; i < spentKeyImages.size(); ++i)
+  {
+    std::string keyStr = "pool_ki_" + std::to_string(i);
+    MDBX_val mk = to_val(keyStr);
+    MDBX_val mv = to_val(spentKeyImages[i].data, sizeof(spentKeyImages[i].data));
+    mdbx_put(m_writeTxn, m_dbiMeta, &mk, &mv, MDBX_UPSERT);
+  }
+
+  commitWriteTransaction(true); // Force durable commit — pool state must survive crashes
+}
+
+std::vector<cn::BinaryArray> MDBXBlockchainStorage::loadPoolTransactions() const
+{
+  // Reads all persisted pool transactions
+  std::vector<cn::BinaryArray> result;
+
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  // Read count
+  MDBX_val countKey = to_val(std::string("pool_tx_count"));
+  MDBX_val countVal;
+  if (mdbx_get(txn, m_dbiMeta, &countKey, &countVal) != MDBX_SUCCESS ||
+      countVal.iov_len < sizeof(uint32_t))
+  {
+    mdbx_txn_abort(txn);
+    return result; // No saved pool state
+  }
+
+  uint32_t txCount = *static_cast<const uint32_t *>(countVal.iov_base);
+  result.reserve(txCount);
+
+  for (uint32_t i = 0; i < txCount; ++i)
+  {
+    std::string keyStr = "pool_tx_" + std::to_string(i);
+    MDBX_val mk = to_val(keyStr);
+    MDBX_val mv;
+    if (mdbx_get(txn, m_dbiMeta, &mk, &mv) == MDBX_SUCCESS)
+    {
+      cn::BinaryArray ba(
+          static_cast<const uint8_t *>(mv.iov_base),
+          static_cast<const uint8_t *>(mv.iov_base) + mv.iov_len);
+      result.push_back(std::move(ba));
+    }
+  }
+
+  mdbx_txn_abort(txn);
+  return result;
+}
+
+std::vector<crypto::KeyImage> MDBXBlockchainStorage::loadPoolSpentKeyImages() const
+{
+  // Reads all persisted pool spent key images
+  std::vector<crypto::KeyImage> result;
+
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  MDBX_val countKey = to_val(std::string("pool_ki_count"));
+  MDBX_val countVal;
+  if (mdbx_get(txn, m_dbiMeta, &countKey, &countVal) != MDBX_SUCCESS ||
+      countVal.iov_len < sizeof(uint32_t))
+  {
+    mdbx_txn_abort(txn);
+    return result;
+  }
+
+  uint32_t kiCount = *static_cast<const uint32_t *>(countVal.iov_base);
+  result.reserve(kiCount);
+
+  for (uint32_t i = 0; i < kiCount; ++i)
+  {
+    std::string keyStr = "pool_ki_" + std::to_string(i);
+    MDBX_val mk = to_val(keyStr);
+    MDBX_val mv;
+    if (mdbx_get(txn, m_dbiMeta, &mk, &mv) == MDBX_SUCCESS &&
+        mv.iov_len == sizeof(crypto::KeyImage))
+    {
+      crypto::KeyImage ki;
+      std::memcpy(ki.data, mv.iov_base, sizeof(ki.data));
+      result.push_back(ki);
+    }
+  }
+
+  mdbx_txn_abort(txn);
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spent Key Images (MDBX-native — no more stubs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool MDBXBlockchainStorage::isSpentKeyImage(const crypto::KeyImage &keyImage) const
+{
+  // Single read txn: check presence in the spent_key_images database
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  MDBX_val key = to_val(keyImage.data, sizeof(keyImage.data));
+  MDBX_val value;
+  int rc = mdbx_get(txn, m_dbiSpentKeyImages, &key, &value);
+
+  mdbx_txn_abort(txn);
+  return rc == MDBX_SUCCESS; // Key exists → spent
+}
+
+void MDBXBlockchainStorage::markKeyImageSpent(const crypto::KeyImage &keyImage)
+{
+  // Inserts a key image into the spent database. Value is empty — presence is the flag.
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  MDBX_val key = to_val(keyImage.data, sizeof(keyImage.data));
+  MDBX_val value = to_val(nullptr, 0); // Empty value
+
+  int rc = mdbx_put(m_writeTxn, m_dbiSpentKeyImages, &key, &value, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("markKeyImageSpent failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  ++m_opsSinceLastCommit;
+  size_t batchSize = m_bulkSyncMode ? kCommitBatchSizeBulk : kCommitBatchSize;
+  if (m_opsSinceLastCommit >= batchSize)
+    commitWriteTransaction(false);
+}
+
+void MDBXBlockchainStorage::markKeyImagesSpent(const std::vector<crypto::KeyImage> &keyImages)
+{
+  // Batch insert — all key images are written in the same transaction
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  MDBX_val emptyVal = to_val(nullptr, 0);
+
+  for (const auto &ki : keyImages)
+  {
+    MDBX_val key = to_val(ki.data, sizeof(ki.data));
+    int rc = mdbx_put(m_writeTxn, m_dbiSpentKeyImages, &key, &emptyVal, MDBX_UPSERT);
+    if (rc != MDBX_SUCCESS)
+    {
+      abortWriteTxn();
+      throw std::runtime_error("markKeyImagesSpent failed: " + std::string(mdbx_strerror(rc)));
+    }
+  }
+
+  m_opsSinceLastCommit += keyImages.size();
+  size_t batchSize = m_bulkSyncMode ? kCommitBatchSizeBulk : kCommitBatchSize;
+  if (m_opsSinceLastCommit >= batchSize)
+    commitWriteTransaction(false);
+}
+
+bool MDBXBlockchainStorage::areAllKeyImagesUnspent(const std::vector<crypto::KeyImage> &keyImages) const
+{
+  // Check all key images in a single read transaction
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  for (const auto &ki : keyImages)
+  {
+    MDBX_val key = to_val(ki.data, sizeof(ki.data));
+    MDBX_val value;
+    if (mdbx_get(txn, m_dbiSpentKeyImages, &key, &value) == MDBX_SUCCESS)
+    {
+      mdbx_txn_abort(txn);
+      return false; // Found a spent key image
+    }
+  }
+
+  mdbx_txn_abort(txn);
+  return true; // All unspent
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Timestamp Index
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::addTimestampIndex(uint64_t timestamp, uint32_t height)
+{
+  // Stores a timestamp → height mapping with padded key for ordered scans
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string keyStr = timestampKey(timestamp, height);
+  MDBX_val key = to_val(keyStr);
+  MDBX_val value = to_val(&height, sizeof(height));
+
+  int rc = mdbx_put(m_writeTxn, m_dbiTimestampIndex, &key, &value, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("addTimestampIndex failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  ++m_opsSinceLastCommit;
+  size_t batchSize = m_bulkSyncMode ? kCommitBatchSizeBulk : kCommitBatchSize;
+  if (m_opsSinceLastCommit >= batchSize)
+    commitWriteTransaction(false);
+}
+
+uint32_t MDBXBlockchainStorage::getBlockHeightByTimestamp(uint64_t timestamp) const
+{
+  // Finds the block height closest to (but not exceeding) the given timestamp.
+  // Uses cursor positioning to find the nearest entry.
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  MDBX_cursor *cursor;
+  int rc = mdbx_cursor_open(txn, m_dbiTimestampIndex, &cursor);
+  if (rc != MDBX_SUCCESS)
+  {
+    mdbx_txn_abort(txn);
+    return 0;
+  }
+
+  // Seek to the first key >= our target prefix
+  std::string seekKey = timestampKey(timestamp, 0);
+  MDBX_val key = to_val(seekKey);
+  MDBX_val value;
+  rc = mdbx_cursor_get(cursor, &key, &value, MDBX_SET_RANGE);
+
+  uint32_t result = 0;
+  if (rc == MDBX_SUCCESS && value.iov_len >= sizeof(uint32_t))
+  {
+    // Found an exact or higher timestamp.
+    // If the found key's timestamp is <= our target, use it.
+    // Otherwise, step back one entry to get the nearest lower block.
+    std::string foundKey(static_cast<const char *>(key.iov_base), key.iov_len);
+    uint64_t foundTs = std::stoull(foundKey.substr(3, kTimestampKeyWidth));
+
+    if (foundTs <= timestamp)
+    {
+      result = *static_cast<const uint32_t *>(value.iov_base);
+    }
+    else
+    {
+      // Step back to previous entry
+      rc = mdbx_cursor_get(cursor, &key, &value, MDBX_PREV);
+      if (rc == MDBX_SUCCESS && value.iov_len >= sizeof(uint32_t))
+      {
+        std::string prevKey(static_cast<const char *>(key.iov_base), key.iov_len);
+        if (prevKey.rfind("ts_", 0) == 0)
+          result = *static_cast<const uint32_t *>(value.iov_base);
+      }
+    }
+  }
+  else
+  {
+    // No entry >= target — go to the last entry in the database
+    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_LAST);
+    if (rc == MDBX_SUCCESS && value.iov_len >= sizeof(uint32_t))
+    {
+      result = *static_cast<const uint32_t *>(value.iov_base);
+    }
+  }
+
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
+  return result;
+}
+
+void MDBXBlockchainStorage::removeTimestampIndex(uint64_t timestamp, uint32_t height)
+{
+  // Removes a specific timestamp → height entry (used during reorg cleanup)
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string keyStr = timestampKey(timestamp, height);
+  MDBX_val key = to_val(keyStr);
+  mdbx_del(m_writeTxn, m_dbiTimestampIndex, &key, nullptr);
+
+  ++m_opsSinceLastCommit;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cumulative Difficulty
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::setCumulativeDifficulty(uint32_t height, uint64_t cumulativeDifficulty)
+{
+  // Stores cumulative difficulty for a given height
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string keyStr = difficultyKey(height);
+  MDBX_val key = to_val(keyStr);
+  MDBX_val value = to_val(&cumulativeDifficulty, sizeof(cumulativeDifficulty));
+
+  int rc = mdbx_put(m_writeTxn, m_dbiDifficulty, &key, &value, MDBX_UPSERT);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("setCumulativeDifficulty failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  ++m_opsSinceLastCommit;
+  size_t batchSize = m_bulkSyncMode ? kCommitBatchSizeBulk : kCommitBatchSize;
+  if (m_opsSinceLastCommit >= batchSize)
+    commitWriteTransaction(false);
+}
+
+uint64_t MDBXBlockchainStorage::getCumulativeDifficulty(uint32_t height) const
+{
+  // Reads cumulative difficulty for a given height
+  MDBX_txn *txn;
+  mdbx_txn_begin(m_env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+  std::string keyStr = difficultyKey(height);
+  MDBX_val key = to_val(keyStr);
+  MDBX_val value;
+  int rc = mdbx_get(txn, m_dbiDifficulty, &key, &value);
+
+  uint64_t result = 0;
+  if (rc == MDBX_SUCCESS && value.iov_len >= sizeof(uint64_t))
+    result = *static_cast<const uint64_t *>(value.iov_base);
+
+  mdbx_txn_abort(txn);
+  return result;
+}
+
+void MDBXBlockchainStorage::removeCumulativeDifficulty(uint32_t height)
+{
+  // Removes cumulative difficulty entry (used during reorg cleanup)
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  std::string keyStr = difficultyKey(height);
+  MDBX_val key = to_val(keyStr);
+  mdbx_del(m_writeTxn, m_dbiDifficulty, &key, nullptr);
+
+  ++m_opsSinceLastCommit;
+}
+
+uint64_t MDBXBlockchainStorage::getCurrentCumulativeDifficulty() const
+{
+  // Returns the cumulative difficulty at the current chain tip
+  uint32_t height = topBlockHeight();
+  if (height == 0)
+    return 0;
+  return getCumulativeDifficulty(height);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remove Meta Key (new utility)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::removeMeta(const std::string &key)
+{
+  // Deletes a key from the meta database
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  MDBX_val mk = to_val(key);
+  mdbx_del(m_writeTxn, m_dbiMeta, &mk, nullptr);
+
+  ++m_opsSinceLastCommit;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remove Checkpoints Above Height (reorg support)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::removeCheckpointsAbove(uint32_t height)
+{
+  // Removes all checkpoints with height > the given height (reorg cleanup)
+  std::lock_guard<std::mutex> lock(m_txMutex);
+  ensureWriteTxn();
+
+  MDBX_cursor *cursor;
+  int rc = mdbx_cursor_open(m_writeTxn, m_dbiCheckpoints, &cursor);
+  if (rc != MDBX_SUCCESS)
+  {
+    abortWriteTxn();
+    throw std::runtime_error("removeCheckpointsAbove: cursor open failed: " + std::string(mdbx_strerror(rc)));
+  }
+
+  // Seek to the first checkpoint key > our target
+  std::string seekKey = checkpointKey(height + 1);
+  MDBX_val key = to_val(seekKey);
+  MDBX_val value;
+  rc = mdbx_cursor_get(cursor, &key, &value, MDBX_SET_RANGE);
+
+  // Delete all subsequent entries
+  while (rc == MDBX_SUCCESS)
+  {
+    std::string keyStr(static_cast<const char *>(key.iov_base), key.iov_len);
+    if (keyStr.rfind("checkpoint_", 0) != 0)
+      break; // Reached end of checkpoint keys
+
+    mdbx_cursor_del(cursor, MDBX_put_flags_t::MDBX_CURRENT); // ← Fixed: use MDBX_CURRENT flag
+    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+    ++m_opsSinceLastCommit;
+  }
+
+  mdbx_cursor_close(cursor);
+  commitWriteTransaction(true); // Force durable commit for reorgs
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Updated openDatabases (replaces existing method)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MDBXBlockchainStorage::openDatabases(MDBX_txn *txn)
+{
+  // Open (or create) each named database — dbi handles are stored for later use
+  mdbx_dbi_open(txn, "heights", MDBX_CREATE, &m_dbiHeights);
+  mdbx_dbi_open(txn, "block_heights", MDBX_CREATE, &m_dbiBlockHeights);
+  mdbx_dbi_open(txn, "meta", MDBX_CREATE, &m_dbiMeta);
+  mdbx_dbi_open(txn, "block_entries", MDBX_CREATE, &m_dbiBlockEntries);
+  mdbx_dbi_open(txn, "block_headers", MDBX_CREATE, &m_dbiBlockHeaders);
+  mdbx_dbi_open(txn, "checkpoints", MDBX_CREATE, &m_dbiCheckpoints);
+  mdbx_dbi_open(txn, "transactions", MDBX_CREATE, &m_dbiTransactions);
+  mdbx_dbi_open(txn, "spent_key_images", MDBX_CREATE, &m_dbiSpentKeyImages);
+  mdbx_dbi_open(txn, "timestamp_index", MDBX_CREATE, &m_dbiTimestampIndex);
+  mdbx_dbi_open(txn, "difficulty", MDBX_CREATE, &m_dbiDifficulty);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Updated printDatabaseStats (replaces existing method — adds new databases)
+// ─────────────────────────────────────────────────────────────────────────────
 
 std::string MDBXBlockchainStorage::printDatabaseStats() const
 {
-  // Returns a human‑readable summary of all databases: name, entry count, data size in MB
+  // Returns a human-readable summary of all databases
   std::string result;
 
   MDBX_txn *txn;
@@ -1012,16 +1520,18 @@ std::string MDBXBlockchainStorage::printDatabaseStats() const
     return "error: failed to begin transaction";
 
   MDBX_dbi dbis[] = {m_dbiHeights, m_dbiBlockHeights,
-                     m_dbiMeta, m_dbiBlockEntries, m_dbiBlockHeaders, m_dbiCheckpoints};
+                     m_dbiMeta, m_dbiBlockEntries, m_dbiBlockHeaders, m_dbiCheckpoints,
+                     m_dbiTransactions, m_dbiSpentKeyImages, m_dbiTimestampIndex, m_dbiDifficulty};
   const char *names[] = {"heights", "block_heights",
-                         "meta", "block_entries", "block_headers", "checkpoints"};
+                         "meta", "block_entries", "block_headers", "checkpoints",
+                         "transactions", "spent_key_images", "timestamp_index", "difficulty"};
 
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < 10; i++)
   {
     MDBX_stat stat;
     if (mdbx_dbi_stat(txn, dbis[i], &stat, sizeof(stat)) == MDBX_SUCCESS)
     {
-      size_t dataMB = (stat.ms_leaf_pages * 4096) >> 20; // Approximate: leaf pages × page size
+      size_t dataMB = (stat.ms_leaf_pages * 4096) >> 20;
       char line[128];
       snprintf(line, sizeof(line), "  %-18s %8lu entries  %6zu MB\n",
                names[i], (unsigned long)stat.ms_entries, dataMB);

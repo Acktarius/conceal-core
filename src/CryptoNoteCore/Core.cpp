@@ -26,7 +26,7 @@
 #include "CryptoNoteStatInfo.h"
 #include "Miner.h"
 #include "TransactionExtra.h"
-#include "IBlock.h"
+#include "CryptoNoteCore/IBlock.h"
 
 #undef ERROR
 
@@ -1139,11 +1139,7 @@ bool core::removeMessageQueue(MessageQueue<BlockchainMessage>& messageQueue) {
 
 std::string core::printDatabaseStats() const
 {
-#ifdef HAVE_MDBX
   return m_blockchain.printDatabaseStats();
-#else
-  return "MDBX not enabled";
-#endif
 }
 
 void core::setCheckpointGeneratedCallback(std::function<void(uint32_t, const crypto::Hash &)> callback)

@@ -18,7 +18,7 @@
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/Currency.h"
-#include "CryptoNoteCore/CheckpointList.h"
+#include "Blockchain/CheckpointList.h"
 #include "CryptoNoteCore/VerificationContext.h"
 #include "P2p/LevinProtocol.h"
 #include <cstdint>  // for UINT64_MAX
@@ -215,6 +215,17 @@ bool CryptoNoteProtocolHandler::process_payload_sync_data(const CORE_SYNC_DATA &
   {
     m_peersCount++;
     m_observerManager.notify(&ICryptoNoteProtocolObserver::peerCountUpdated, m_peersCount.load());
+  }
+
+  // Request checkpoints from peer after handshake
+  if (context.m_state == CryptoNoteConnectionContext::state_normal ||
+      context.m_state == CryptoNoteConnectionContext::state_sync_required ||
+      context.m_state == CryptoNoteConnectionContext::state_pool_sync_required)
+  {
+    NOTIFY_REQUEST_CHECKPOINT_LIST::request cpReq;
+    cpReq.startHeight = 0;
+    cpReq.endHeight = 0; // 0 means all available
+    post_notify<NOTIFY_REQUEST_CHECKPOINT_LIST>(*m_p2p, cpReq, context);
   }
 
   return true;

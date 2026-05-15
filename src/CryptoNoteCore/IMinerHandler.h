@@ -8,7 +8,7 @@
 #pragma once
 
 #include "CryptoNoteCore/CryptoNoteBasic.h"
-#include "CryptoNoteCore/Difficulty.h"
+#include "Difficulty.h"
 
 namespace cn {
   struct IMinerHandler {

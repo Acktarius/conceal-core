@@ -15,10 +15,10 @@
 #include <vector>
 
 #include <CryptoNote.h>
-#include "CryptoNoteCore/Difficulty.h"
-#include "CryptoNoteCore/CheckpointList.h"
+#include "Difficulty.h"
+#include "Blockchain/CheckpointList.h"
 #include "CryptoNoteCore/MessageQueue.h"
-#include "CryptoNoteCore/BlockchainMessages.h"
+#include "Blockchain/BlockchainMessages.h"
 
 namespace cn {
 
