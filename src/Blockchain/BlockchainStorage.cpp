@@ -213,6 +213,7 @@ namespace cn
     }
 
     // ── Merge mining check ───────────────────────────────────────────────
+    /*
     TransactionExtraMergeMiningTag mmTag;
     if (getMergeMiningTagFromExtra(blockData.baseTransaction.extra, mmTag) &&
         get_block_height(blockData) >= cn::parameters::UPGRADE_HEIGHT_V6)
@@ -220,6 +221,7 @@ namespace cn
       logger(logging::ERROR, logging::BRIGHT_RED) << "Merge mining tag found";
       return false;
     }
+    */
 
     // ── Chain continuity ─────────────────────────────────────────────────
     if (blockData.previousBlockHash != getTailId())
