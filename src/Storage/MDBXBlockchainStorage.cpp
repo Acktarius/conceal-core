@@ -111,8 +111,8 @@ void MDBXBlockchainStorage::openEnvironment(const std::string &path)
     mdbx_env_set_geometry(m_env, -1, -1, (intptr_t)1 << 36, 256 << 20, -1, -1);
   }
 
-  // Open flags: no external subdir, no readahead (SSD optimisation), coalesce free pages, LIFO reclaim
-  const MDBX_env_flags_t openFlags = MDBX_NOSUBDIR | MDBX_NORDAHEAD | MDBX_COALESCE | MDBX_LIFORECLAIM;
+  // Open flags: no external subdir, no readahead (SSD optimisation), LIFO reclaim
+  const MDBX_env_flags_t openFlags = MDBX_NOSUBDIR | MDBX_NORDAHEAD | MDBX_LIFORECLAIM;
 
   rc = mdbx_env_open(m_env, path.c_str(), openFlags, 0664);
   if (rc != MDBX_SUCCESS)
@@ -833,8 +833,11 @@ void MDBXBlockchainStorage::migrateToPaddedKeys()
 
     // Apply migrations
     size_t migrated = 0;
-    for (const auto &[oldKey, newKey] : migrations)
+    for (const auto &migration : migrations)
     {
+      const std::string &oldKey = migration.first;
+      const std::string &newKey = migration.second;
+
       MDBX_val oldK = to_val(oldKey);
       MDBX_val v;
       if (mdbx_get(txn, m_dbiBlockEntries, &oldK, &v) == MDBX_SUCCESS)
@@ -894,8 +897,11 @@ void MDBXBlockchainStorage::migrateToPaddedKeys()
     }
 
     size_t migrated = 0;
-    for (const auto &[oldKey, newKey] : migrations)
+    for (const auto &migration : migrations)
     {
+      const std::string &oldKey = migration.first;
+      const std::string &newKey = migration.second;
+
       MDBX_val oldK = to_val(oldKey);
       MDBX_val v;
       if (mdbx_get(txn, m_dbiBlockHeaders, &oldK, &v) == MDBX_SUCCESS)
