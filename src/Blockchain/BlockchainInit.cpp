@@ -583,12 +583,22 @@ namespace cn
 
     try
     {
+      logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving blockchain state before shutdown...";
       cacheStored = storeCache();
+
       if (m_blockchainIndexesEnabled)
+      {
+        logger(logging::INFO) << "Saving blockchain indices...";
         indicesStored = storeBlockchainIndices();
+      }
 
       if (m_mdbxStorage)
+      {
+        logger(logging::INFO) << "Flushing MDBX...";
         m_mdbxStorage->flush();
+      }
+
+      logger(logging::INFO, logging::BRIGHT_GREEN) << "Blockchain state saved.";
     }
     catch (const std::exception &)
     {
@@ -785,14 +795,18 @@ namespace cn
     if (!m_mdbxStorage)
       return false;
 
+    logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving MDBX index...";
+
     std::vector<uint8_t> buf;
 
     // Block hashes
+    logger(logging::INFO) << "  Saving block hashes (" << m_blockHashes.size() << " entries)...";
     m_mdbxStorage->putMeta("idx_hashes",
                            std::vector<uint8_t>((uint8_t *)m_blockHashes.data(),
                                                 (uint8_t *)m_blockHashes.data() + m_blockHashes.size() * sizeof(crypto::Hash)));
 
     // Hash → height map
+    logger(logging::INFO) << "  Saving hash map (" << m_hashToHeight.size() << " entries)...";
     buf.clear();
     for (const auto &p : m_hashToHeight)
     {
@@ -803,6 +817,7 @@ namespace cn
     m_mdbxStorage->putMeta("idx_hash2height", buf);
 
     // Transaction map
+    logger(logging::INFO) << "  Saving transaction map (" << m_transactionMap.size() << " entries)...";
     buf.clear();
     for (const auto &kv : m_transactionMap)
     {
@@ -812,7 +827,8 @@ namespace cn
     }
     m_mdbxStorage->putMeta("idx_txmap", buf);
 
-    // Spent keys — both meta blob (fast cache) and native DB (ground truth)
+    // Spent keys
+    logger(logging::INFO) << "  Saving spent keys (" << m_spent_keys.size() << " entries)...";
     buf.clear();
     std::vector<crypto::KeyImage> keyImages;
     keyImages.reserve(m_spent_keys.size());
@@ -824,7 +840,7 @@ namespace cn
       keyImages.push_back(p.first);
     }
     m_mdbxStorage->putMeta("idx_spentkeys", buf);
-    m_mdbxStorage->markKeyImagesSpent(keyImages); // Native DB for instant startup verification
+    m_mdbxStorage->markKeyImagesSpent(keyImages);
 
     // Top height
     uint32_t topHeight = m_mdbxStorage->topBlockHeight();
@@ -832,6 +848,7 @@ namespace cn
                            std::vector<uint8_t>((uint8_t *)&topHeight, (uint8_t *)&topHeight + sizeof(topHeight)));
 
     // Outputs index
+    logger(logging::INFO) << "  Saving outputs index (" << m_outputs.size() << " amounts)...";
     buf.clear();
     for (const auto &p : m_outputs)
     {
@@ -852,6 +869,7 @@ namespace cn
     m_mdbxStorage->putMeta("idx_outputs", buf);
 
     // Multisig outputs index
+    logger(logging::INFO) << "  Saving multisig outputs index (" << m_multisignatureOutputs.size() << " amounts)...";
     buf.clear();
     for (const auto &p : m_multisignatureOutputs)
     {
@@ -873,15 +891,22 @@ namespace cn
     }
     m_mdbxStorage->putMeta("idx_msig", buf);
 
-    // Deposit index — use the class's own serialize method for consistency
+    // Deposit index
+    logger(logging::INFO) << "  Saving deposit index (" << m_depositIndex.size() << " entries)...";
     {
       cn::BinaryArray temp;
       cn::toBinaryArray(m_depositIndex, temp);
       m_mdbxStorage->putMeta("idx_deposits", std::vector<uint8_t>(temp.begin(), temp.end()));
     }
 
+    logger(logging::INFO) << "  Flushing to disk...";
+    auto flushStart = std::chrono::steady_clock::now();
     m_mdbxStorage->flush();
-    logger(logging::INFO, logging::BRIGHT_GREEN) << "MDBX index saved successfully.";
+    auto flushMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - flushStart)
+                       .count();
+    logger(logging::INFO, logging::BRIGHT_GREEN) << "MDBX index saved successfully (" << flushMs << "ms).";
+
     return true;
   }
 

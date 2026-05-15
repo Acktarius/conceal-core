@@ -240,17 +240,6 @@ namespace cn
         return false;
       }
 
-      // Merge mining check
-      /*
-      TransactionExtraMergeMiningTag mmTag;
-      if (getMergeMiningTagFromExtra(bei.bl.baseTransaction.extra, mmTag) &&
-          bei.height >= cn::parameters::UPGRADE_HEIGHT_V6)
-      {
-        logger(logging::ERROR, logging::BRIGHT_RED) << "Merge mining tag found in miner transaction extra";
-        return false;
-      }
-      */
-
       // ── Difficulty & PoW ──────────────────────────────────────────────
       m_is_in_checkpoint_zone = false;
       difficulty_type current_diff = get_next_difficulty_for_alternative_chain(alt_chain, bei);
