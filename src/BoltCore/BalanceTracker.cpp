@@ -6,8 +6,9 @@
 
 namespace BoltCore
 {
-  void BalanceTracker::loadOutputs(const std::vector<OutputInfo> &outputs)
+  void BalanceTracker::loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight)
   {
+    m_currentHeight = currentHeight;
     m_outputs.clear();
     m_byAddress.clear();
     m_total = {0, 0, 0, 0};
@@ -30,15 +31,17 @@ namespace BoltCore
 
     if (out.isDeposit)
     {
-      if (out.blockHeight + out.term > 0) // locked
-      {
-        addr.lockedDeposit += out.amount;
-        total.lockedDeposit += out.amount;
-      }
-      else
+      // A deposit is locked until blockHeight + term <= currentHeight (reference: m_currentHeight + 1 >= blockHeight + term)
+      bool unlocked = (out.term > 0) && (m_currentHeight + 1 >= out.blockHeight + out.term);
+      if (unlocked)
       {
         addr.unlockedDeposit += out.amount;
         total.unlockedDeposit += out.amount;
+      }
+      else
+      {
+        addr.lockedDeposit += out.amount;
+        total.lockedDeposit += out.amount;
       }
     }
     else

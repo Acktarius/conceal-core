@@ -30,7 +30,9 @@ namespace BoltCore
     ~Wallet();
 
     // Load outputs from BoltSync scan or other source
-    void loadOutputs(const std::vector<OutputInfo> &outputs);
+    void loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight = 0);
+    void addOutput(const OutputInfo &output);
+    void setCurrentHeight(uint32_t height);
 
     // Balances
     Balance getBalance() const;

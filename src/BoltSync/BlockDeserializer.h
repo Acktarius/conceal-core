@@ -17,7 +17,7 @@ namespace BoltSync
   {
     CryptoNote::IBlockchainStorage &storage;
     const crypto::SecretKey &viewKey;
-    const crypto::PublicKey &viewPublicKey;
+    const crypto::PublicKey &spendPublicKey;
     const crypto::SecretKey *spendKey;
     std::atomic<uint64_t> &blocksProcessed;
     std::atomic<uint32_t> &lastCheckpointHeight;
@@ -31,4 +31,9 @@ namespace BoltSync
                              std::vector<cn::Transaction> &transactions);
 
   void scanSingleBlock(uint32_t height, ScanContext &ctx);
+
+  // Second pass: mark outputs whose keyImage appears in any KeyInput as spent.
+  void markSpentOutputs(CryptoNote::IBlockchainStorage &storage,
+                        uint32_t topHeight,
+                        std::vector<FoundOutput> &results);
 }

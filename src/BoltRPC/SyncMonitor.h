@@ -26,7 +26,7 @@ namespace BoltRPC
 
     SyncMonitor(cn::INode &node,
                 const crypto::SecretKey &viewKey,
-                const crypto::PublicKey &viewPub,
+                const crypto::PublicKey &spendPub,
                 const crypto::SecretKey *spendKey,
                 const std::string &dataDir,
                 uint32_t lastScannedHeight,
@@ -52,7 +52,7 @@ namespace BoltRPC
 
     cn::INode &m_node;
     crypto::SecretKey m_viewKey;
-    crypto::PublicKey m_viewPub;
+    crypto::PublicKey m_spendPub;
     const crypto::SecretKey *m_spendKey;
     std::string m_dataDir;
     std::atomic<uint32_t> m_lastScannedHeight;

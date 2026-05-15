@@ -752,6 +752,11 @@ bool RpcServer::k_on_check_reserve_proof(const K_COMMAND_RPC_CHECK_RESERVE_PROOF
       throw JsonRpc::JsonRpcError{CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "index_in_tx is out of bound"};
     }
 
+    if (tx.outputs[proof.index_in_tx].target.type() != typeid(KeyOutput))
+    {
+      throw JsonRpc::JsonRpcError{CORE_RPC_ERROR_CODE_INTERNAL_ERROR, std::string("output is not a key output: ") + tx.outputs[proof.index_in_tx].target.type().name()};
+    }
+
     const KeyOutput out_key = boost::get<KeyOutput>(tx.outputs[proof.index_in_tx].target);
 
     // get tx pub key

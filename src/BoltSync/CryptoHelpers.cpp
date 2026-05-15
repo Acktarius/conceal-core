@@ -13,13 +13,13 @@ namespace BoltSync
                     size_t outputIndex,
                     const crypto::PublicKey &outputKey,
                     const crypto::SecretKey &viewSecretKey,
-                    const crypto::PublicKey &viewPublicKey)
+                    const crypto::PublicKey &spendPublicKey)
   {
     crypto::KeyDerivation derivation;
     if (!crypto::generate_key_derivation(txPublicKey, viewSecretKey, derivation))
       return false;
     crypto::PublicKey derivedKey;
-    if (!crypto::derive_public_key(derivation, outputIndex, viewPublicKey, derivedKey))
+    if (!crypto::derive_public_key(derivation, outputIndex, spendPublicKey, derivedKey))
       return false;
     return derivedKey == outputKey;
   }

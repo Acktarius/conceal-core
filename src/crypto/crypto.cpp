@@ -576,7 +576,7 @@ void crypto_ops::generate_tx_proof(const Hash &prefix_hash, const PublicKey &R, 
         return false;
       }
       if (ge_frombytes_vartime(&tmp3, reinterpret_cast<const unsigned char*>(&*pubs[i])) != 0) {
-        abort();
+        return false;
       }
       ge_double_scalarmult_base_vartime(&tmp2, reinterpret_cast<const unsigned char*>(&sig[i]), &tmp3, reinterpret_cast<const unsigned char*>(&sig[i]) + 32);
       ge_tobytes(reinterpret_cast<unsigned char*>(&buf->ab[i].a), &tmp2);
