@@ -116,8 +116,8 @@ namespace cn
   {
     std::vector<uint32_t> heights;
     heights.reserve(m_points.size());
-    for (const auto &[height, hash] : m_points)
-      heights.push_back(height);
+    for (const auto &cp : m_points)
+      heights.push_back(cp.first);
     return heights;
   }
 
@@ -130,8 +130,10 @@ namespace cn
                                                 uint32_t endHeight) const
   {
     CheckpointList result;
-    for (const auto &[height, hash] : m_points)
+    for (const auto &cp : m_points)
     {
+      uint32_t height = cp.first;
+      const crypto::Hash &hash = cp.second;
       if (height >= startHeight && (endHeight == 0 || height <= endHeight))
         result.addCheckpoint(height, hash);
     }
@@ -259,9 +261,10 @@ namespace cn
     }
 
     size_t count = 0;
-    for (const auto &[height, hash] : m_points)
+    for (const auto &cp : m_points)
     {
-      file << height << "," << common::podToHex(hash) << "\n";
+      uint32_t height = cp.first;
+      file << height << "," << common::podToHex(cp.second) << "\n";
       ++count;
     }
 

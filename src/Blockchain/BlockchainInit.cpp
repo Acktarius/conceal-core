@@ -584,7 +584,9 @@ namespace cn
     try
     {
       logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving blockchain state before shutdown...";
-      cacheStored = storeCache();
+
+      // Full save on shutdown (writes all meta blobs)
+      cacheStored = m_useMdbx ? storeMdbxCache(true) : storeCache();
 
       if (m_blockchainIndexesEnabled)
       {
@@ -785,16 +787,24 @@ namespace cn
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
     if (m_useMdbx)
-      return storeMdbxCache();
+      return storeMdbxCache(false); // autosave: flush only
 
     return storeLegacyCache();
   }
 
-  bool Blockchain::storeMdbxCache()
+  bool Blockchain::storeMdbxCache(bool fullSave)
   {
     if (!m_mdbxStorage)
       return false;
 
+    if (!fullSave)
+    {
+      // Autosave: just flush pending writes to disk — no meta blob serialization
+      m_mdbxStorage->flush();
+      return true;
+    }
+
+    // Full save (shutdown): write all index blobs + native DB sync + flush
     logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving MDBX index...";
 
     std::vector<uint8_t> buf;
@@ -827,7 +837,7 @@ namespace cn
     }
     m_mdbxStorage->putMeta("idx_txmap", buf);
 
-    // Spent keys
+    // Spent keys — both meta blob (fast cache) and native DB (ground truth)
     logger(logging::INFO) << "  Saving spent keys (" << m_spent_keys.size() << " entries)...";
     buf.clear();
     std::vector<crypto::KeyImage> keyImages;
@@ -899,14 +909,12 @@ namespace cn
       m_mdbxStorage->putMeta("idx_deposits", std::vector<uint8_t>(temp.begin(), temp.end()));
     }
 
-    logger(logging::INFO) << "  Flushing to disk...";
     auto flushStart = std::chrono::steady_clock::now();
     m_mdbxStorage->flush();
     auto flushMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::steady_clock::now() - flushStart)
                        .count();
     logger(logging::INFO, logging::BRIGHT_GREEN) << "MDBX index saved successfully (" << flushMs << "ms).";
-
     return true;
   }
 

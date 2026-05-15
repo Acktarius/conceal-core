@@ -376,7 +376,7 @@ int main(int argc, char *argv[])
     po::options_description desc_cmd_sett("Command line options and settings options");
 
     desc_cmd_sett.add_options()("enable-blockchain-indexes,i", po::bool_switch()->default_value(false),
-                                "Enable blockchain indexes")("enable-autosave,a", po::bool_switch()->default_value(false),
+                                "Enable blockchain indexes")("enable-autosave,a", po::bool_switch()->default_value(true),
                                                              "Enable blockchain autosave every 720 blocks");
 
     command_line::add_arg(desc_cmd_only, command_line::arg_help);

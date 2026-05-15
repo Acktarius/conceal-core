@@ -630,16 +630,14 @@ namespace cn
     {
       m_config.m_net_config.connections_count = std::min(currentTarget + 1, m_maxOutgoingConnections);
       logger(INFO) << "Auto-scale: increasing target connections from "
-                   << currentTarget << " to " << m_config.m_net_config.connections_count
-                   << " (avg write: " << avgWriteDuration << "ms)";
+                   << currentTarget << " to " << m_config.m_net_config.connections_count;
     }
     // Scale down: writes are slow and we're above min
     else if (avgWriteDuration > 500 && currentTarget > m_minOutgoingConnections)
     {
       m_config.m_net_config.connections_count = std::max(currentTarget - 1, m_minOutgoingConnections);
       logger(INFO) << "Auto-scale: decreasing target connections from "
-                   << currentTarget << " to " << m_config.m_net_config.connections_count
-                   << " (avg write: " << avgWriteDuration << "ms)";
+                   << currentTarget << " to " << m_config.m_net_config.connections_count;
     }
   }
 

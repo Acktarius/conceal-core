@@ -509,7 +509,7 @@ namespace cn
                           uint32_t height);
     void saveTransactions(const std::vector<Transaction> &transactions, uint32_t height);
 
-    bool storeMdbxCache();
+    bool storeMdbxCache(bool fullSave = false);
     bool storeLegacyCache();
 
     // ═══════════════════════════════════════════════════════════════════════
