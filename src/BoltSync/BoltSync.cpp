@@ -91,7 +91,14 @@ namespace BoltSync
         for (uint32_t h = start; h <= end; ++h)
         {
           scanSingleBlock(h, ctx);
-          if (h % 10000 == 0) ctx.saveCheckpoint(h);
+          uint32_t reportInterval = (end - start) / 100; // every 1%
+          if (reportInterval < 1000)
+            reportInterval = 1000; // minimum every 1000 blocks
+          if (h % reportInterval == 0 || h == end)
+          {
+            ctx.saveCheckpoint(h);
+            if (config.onProgress) config.onProgress(h);
+          }
         } });
     }
 
@@ -105,7 +112,6 @@ namespace BoltSync
     progress.stop();
 
     // Second pass: mark outputs as spent by scanning KeyInput keyImages.
-    // This resolves outputs that were received and later spent (e.g. to fund a deposit).
     markSpentOutputs(storage, scanTopHeight, state.results);
 
     // Clear checkpoint on success

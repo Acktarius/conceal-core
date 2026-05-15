@@ -38,6 +38,7 @@ namespace BoltSync
     uint32_t startBlock = 0;
     uint32_t endBlock = 0;
     std::string progressFile;
+    std::function<void(uint32_t)> onProgress;
   };
 
   struct ScanState

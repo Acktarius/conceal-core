@@ -40,6 +40,59 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
 
   void SyncMonitor::runLoop()
   {
+    // ── Initial full scan if starting from 0 ──
+    if (m_lastScannedHeight.load(std::memory_order_relaxed) == 0 && !m_dataDir.empty())
+    {
+      uint32_t nodeHeight = m_node.getLastKnownBlockHeight();
+      if (nodeHeight == 0)
+        nodeHeight = m_node.getLastLocalBlockHeight();
+
+      if (nodeHeight > 0)
+      {
+        std::cerr << "SyncMonitor: starting initial scan 0-" << nodeHeight << std::endl;
+
+        BoltSync::Scanner scanner(m_viewKey, m_spendPub, m_spendKey);
+        BoltSync::ScanConfig cfg;
+        cfg.dataDir = m_dataDir;
+        cfg.numThreads = 0; // auto-detect threads for initial scan
+        cfg.startBlock = 0;
+        cfg.endBlock = nodeHeight;
+        cfg.onProgress = [this](uint32_t h)
+        {
+          m_lastScannedHeight.store(h, std::memory_order_relaxed);
+        };
+
+        BoltSync::ScanState state;
+        if (scanner.scan(cfg, state))
+        {
+          if (!state.results.empty())
+          {
+            std::vector<BoltCore::OutputInfo> newOutputs;
+            newOutputs.reserve(state.results.size());
+            for (const auto &fo : state.results)
+            {
+              BoltCore::OutputInfo info;
+              info.blockHeight = fo.blockHeight;
+              info.txHash = fo.txHash;
+              info.outputIndex = fo.outputIndex;
+              info.globalOutputIndex = fo.outputIndex;
+              info.amount = fo.amount;
+              info.outputKey = fo.outputKey;
+              info.txPublicKey = fo.txPublicKey;
+              info.keyImage = fo.keyImage;
+              info.spent = fo.spent;
+              info.isDeposit = fo.isDeposit;
+              info.term = fo.term;
+              newOutputs.push_back(std::move(info));
+            }
+            m_onNewOutputs(newOutputs, nodeHeight);
+          }
+          m_lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
+        }
+      }
+    }
+
+    // ── Incremental polling loop ──
     while (!m_stop)
     {
       std::this_thread::sleep_for(
@@ -50,20 +103,25 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
       if (m_dataDir.empty())
         continue;
 
-      uint32_t nodeHeight = m_node.getLastLocalBlockHeight();
+      uint32_t nodeHeight = m_node.getLastKnownBlockHeight();
+      if (nodeHeight == 0)
+        nodeHeight = m_node.getLastLocalBlockHeight();
+
       uint32_t lastScanned = m_lastScannedHeight.load(std::memory_order_relaxed);
 
       if (nodeHeight <= lastScanned + MIN_BLOCKS_TO_SCAN)
         continue;
 
-      // New blocks available — run BoltSync on the new range only
       BoltSync::Scanner scanner(m_viewKey, m_spendPub, m_spendKey);
-
       BoltSync::ScanConfig cfg;
       cfg.dataDir = m_dataDir;
-      cfg.numThreads = 1; // incremental scans are small, 1 thread is fine
+      cfg.numThreads = 1;
       cfg.startBlock = lastScanned + 1;
       cfg.endBlock = nodeHeight;
+      cfg.onProgress = [this](uint32_t h)
+      {
+        m_lastScannedHeight.store(h, std::memory_order_relaxed);
+      };
 
       BoltSync::ScanState state;
       if (!scanner.scan(cfg, state))
@@ -76,7 +134,6 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
 
       if (!state.results.empty())
       {
-        // Convert BoltSync results to BoltCore OutputInfo
         std::vector<BoltCore::OutputInfo> newOutputs;
         newOutputs.reserve(state.results.size());
         for (const auto &fo : state.results)
@@ -85,7 +142,7 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
           info.blockHeight = fo.blockHeight;
           info.txHash = fo.txHash;
           info.outputIndex = fo.outputIndex;
-          info.globalOutputIndex = fo.outputIndex; // TODO: resolve via node
+          info.globalOutputIndex = fo.outputIndex;
           info.amount = fo.amount;
           info.outputKey = fo.outputKey;
           info.txPublicKey = fo.txPublicKey;
@@ -95,12 +152,10 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
           info.term = fo.term;
           newOutputs.push_back(std::move(info));
         }
-
         m_onNewOutputs(newOutputs, nodeHeight);
       }
 
       m_lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
     }
   }
-
 } // namespace BoltRPC

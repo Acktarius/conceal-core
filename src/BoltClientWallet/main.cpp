@@ -102,6 +102,8 @@ int main(int argc, char *argv[])
   std::vector<BoltSync::FoundOutput> allOutputs;
   std::vector<BoltCore::OutputInfo> outputInfos;
 
+  uint32_t scannedHeight = 0;
+
   if (daemonConnected && !cfg.skipScan && !cfg.dataDir.empty())
   {
     std::cout << "\nScanning main chain...\n"
@@ -114,6 +116,7 @@ int main(int argc, char *argv[])
     if (scanner.scan(scanCfg, state))
     {
       allOutputs = std::move(state.results);
+      scannedHeight = state.scannedTopHeight;
       std::cout << "Scan complete. Found " << allOutputs.size() << " outputs.\n"
                 << std::endl;
     }
@@ -139,7 +142,7 @@ int main(int argc, char *argv[])
       outputInfos.push_back(info);
     }
     walletPtr.reset(new BoltCore::Wallet(viewKey, spendKey, viewPub, spendPub, node, currency));
-    walletPtr->loadOutputs(outputInfos);
+    walletPtr->loadOutputs(outputInfos, scannedHeight);
   }
 
   std::string input;

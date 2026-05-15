@@ -16,6 +16,9 @@
 #include "crypto/crypto.h"
 #include "version.h"
 
+#include "Storage/MDBXBlockchainStorage.h"
+#include "Common/PathHelpers.h"
+
 #include <sstream>
 #include <future>
 #include <mutex>
@@ -757,6 +760,15 @@ namespace BoltRPC
   std::string BoltRpcServer::methodGetWalletHeight(const common::JsonValue &)
   {
     uint32_t walletHeight = m_syncedHeight.load(std::memory_order_relaxed);
+
+    // Also check SyncMonitor progress during active scans
+    if (m_syncMonitor)
+    {
+      uint32_t scanHeight = m_syncMonitor->lastScannedHeight();
+      if (scanHeight > walletHeight)
+        walletHeight = scanHeight;
+    }
+
     uint32_t outputCount = 0;
     {
       std::lock_guard<std::mutex> lock(m_walletMutex);
@@ -903,8 +915,15 @@ namespace BoltRPC
   {
     uint32_t walletHeight = m_syncedHeight.load();
 
-    // Try NodeRpcProxy cache first; fall back to a direct /getheight call to the daemon.
-    uint32_t nodeHeight = m_node.getLastLocalBlockHeight();
+    // Also check SyncMonitor progress during active scans
+    if (m_syncMonitor)
+    {
+      uint32_t scanHeight = m_syncMonitor->lastScannedHeight();
+      if (scanHeight > walletHeight)
+        walletHeight = scanHeight;
+    }
+
+    uint32_t nodeHeight = m_node.getLastKnownBlockHeight();
 
     if (nodeHeight == 0 && !m_daemonHost.empty())
     {
@@ -914,12 +933,12 @@ namespace BoltRPC
         auto resp = client.get("/getheight");
         if (resp.success && !resp.body.empty())
         {
-          // Response: {"height":N,"status":"OK"}
           auto hpos = resp.body.find("\"height\":");
           if (hpos != std::string::npos)
           {
-            hpos += 9; // skip past "height":
-            while (hpos < resp.body.size() && !std::isdigit(resp.body[hpos])) ++hpos;
+            hpos += 9;
+            while (hpos < resp.body.size() && !std::isdigit(resp.body[hpos]))
+              ++hpos;
             uint32_t h = 0;
             while (hpos < resp.body.size() && std::isdigit(resp.body[hpos]))
               h = h * 10 + (resp.body[hpos++] - '0');
@@ -928,10 +947,11 @@ namespace BoltRPC
           }
         }
       }
-      catch (...) {}
+      catch (...)
+      {
+      }
     }
 
-    // Considered synced if wallet is within 1 block of the daemon (matches reference daemon logic).
     bool synced = (nodeHeight > 0) && (walletHeight + 1 >= nodeHeight);
 
     std::ostringstream ss;
@@ -1157,7 +1177,7 @@ namespace BoltRPC
     {
       std::lock_guard<std::mutex> lock(m_walletMutex);
       std::vector<BoltCore::OutputInfo> empty;
-      m_wallet.loadOutputs(empty);
+      m_wallet.loadOutputs(empty, 0);
     }
 
     if (m_stateManager)
@@ -1449,7 +1469,7 @@ namespace BoltRPC
                                 const crypto::SecretKey *spendKey)
   {
     if (m_syncMonitor)
-      return; // already running
+      return;
 
     m_dataDir = dataDir;
     m_syncViewKey = viewKey;
@@ -1461,6 +1481,17 @@ namespace BoltRPC
     }
 
     uint32_t startHeight = m_syncedHeight.load(std::memory_order_relaxed);
+
+    // Clear stale checkpoint for fresh wallets
+    if (startHeight == 0)
+    {
+      std::string dbPath = PathHelpers::appendPath(dataDir, "mdbx_blocks");
+      CryptoNote::MDBXBlockchainStorage storage(dbPath, 0);
+      storage.putMeta("wallet_init_progress", std::vector<uint8_t>());
+      storage.flush();
+    }
+
+    m_logger(logging::INFO) << "Starting sync from height " << startHeight;
 
     m_syncMonitor.reset(new SyncMonitor(
         m_node, viewKey, spendPub, spendKey, dataDir, startHeight,
@@ -1479,6 +1510,5 @@ namespace BoltRPC
         }));
 
     m_syncMonitor->start();
-    m_logger(logging::INFO) << "Sync monitor started from height " << startHeight;
   }
 } // namespace BoltRPC
