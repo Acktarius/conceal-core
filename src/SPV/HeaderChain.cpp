@@ -17,6 +17,21 @@ namespace SPV
 
   HeaderChain::~HeaderChain() {}
 
+#pragma pack(push, 1)
+  struct ExportedHeader
+  {
+    uint32_t height;
+    uint8_t majorVersion;
+    uint8_t minorVersion;
+    uint64_t timestamp;
+    uint32_t nonce;
+    uint64_t cumulativeDifficulty;
+    uint64_t alreadyGeneratedCoins;
+    crypto::Hash previousBlockHash;
+    crypto::Hash blockHash;
+  };
+#pragma pack(pop)
+
   bool HeaderChain::addHeader(const BlockHeader &header)
   {
     // Verify chain continuity
@@ -71,45 +86,26 @@ namespace SPV
       file.write(reinterpret_cast<const char *>(&empty), sizeof(empty));
     }
 
-    // Write each header
+    // Write each header using packed struct format
     for (const auto &h : m_headers)
     {
-      file.write(reinterpret_cast<const char *>(&h.height), sizeof(h.height));
-      file.write(reinterpret_cast<const char *>(&h.major_version), sizeof(h.major_version));
-      file.write(reinterpret_cast<const char *>(&h.minor_version), sizeof(h.minor_version));
-      file.write(reinterpret_cast<const char *>(&h.timestamp), sizeof(h.timestamp));
-      file.write(reinterpret_cast<const char *>(&h.nonce), sizeof(h.nonce));
-      file.write(reinterpret_cast<const char *>(&h.difficulty), sizeof(h.difficulty));
+      ExportedHeader exh;
+      exh.height = h.height;
+      exh.majorVersion = h.major_version;
+      exh.minorVersion = h.minor_version;
+      exh.timestamp = h.timestamp;
+      exh.nonce = h.nonce;
+      exh.cumulativeDifficulty = h.difficulty;
+      exh.alreadyGeneratedCoins = 0; // Not stored in BlockHeader
+      exh.previousBlockHash = h.prev_hash;
+      exh.blockHash = h.hash;
 
-      // Placeholder for cumulativeDifficulty (not used)
-      uint64_t zero = 0;
-      file.write(reinterpret_cast<const char *>(&zero), sizeof(zero));
-
-      // Placeholder for alreadyGeneratedCoins (not used)
-      file.write(reinterpret_cast<const char *>(&zero), sizeof(zero));
-
-      file.write(reinterpret_cast<const char *>(&h.prev_hash), sizeof(h.prev_hash));
-      file.write(reinterpret_cast<const char *>(&h.hash), sizeof(h.hash));
+      file.write(reinterpret_cast<const char *>(&exh), sizeof(ExportedHeader));
     }
 
     file.close();
     return true;
   }
-
-#pragma pack(push, 1)
-  struct ExportedHeader
-  {
-    uint32_t height;
-    uint8_t majorVersion;
-    uint8_t minorVersion;
-    uint64_t timestamp;
-    uint32_t nonce;
-    uint64_t cumulativeDifficulty;
-    uint64_t alreadyGeneratedCoins;
-    crypto::Hash previousBlockHash;
-    crypto::Hash blockHash;
-  };
-#pragma pack(pop)
 
   bool HeaderChain::load(const std::string &filename)
   {

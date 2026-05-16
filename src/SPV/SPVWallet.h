@@ -41,7 +41,7 @@ namespace SPV
                      std::vector<std::pair<crypto::Hash, uint64_t>> &outputs);
 
     void setDefaultPath(const std::string& path) { m_defaultPath = path; }
-    bool saveHeaders() { return !m_defaultPath.empty() && m_chain.save(m_defaultPath); }
+    bool saveHeaders();
 
     bool verifyCheckpoints() { return m_chain.verifyAllCheckpoints(); }
 

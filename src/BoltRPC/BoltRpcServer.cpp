@@ -25,6 +25,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <boost/filesystem.hpp>
 
 namespace BoltRPC
 {
@@ -1571,6 +1572,7 @@ namespace BoltRPC
 
     m_syncMonitor->start();
   }
+
   void BoltRpcServer::enableLightMode(const std::string &headersFile,
                                       const std::string &bootstrapUrl,
                                       const std::string &remoteHost,
@@ -1587,42 +1589,79 @@ namespace BoltRPC
     // Use raw pointer with new (C++11 compatible)
     m_spvWallet = new SPV::SPVWallet(remoteHost, remotePort);
 
-    // Try to load existing headers
-    if (!headersFile.empty())
+    // Use the directory of the state file for headers cache
+    std::string cacheDir = ".";
+    if (m_stateManager)
     {
-      if (m_spvWallet->initFromBootstrap(headersFile))
+      boost::filesystem::path statePath(m_stateManager->getFilePath());
+      cacheDir = statePath.parent_path().string();
+      if (cacheDir.empty())
+        cacheDir = ".";
+    }
+
+    // Create cache directory if it doesn't exist
+    boost::filesystem::path cachePath(cacheDir);
+    if (!boost::filesystem::exists(cachePath))
+    {
+      boost::filesystem::create_directories(cachePath);
+    }
+
+    std::string defaultHeadersPath = cacheDir + "/headers.bin";
+    m_spvWallet->setDefaultPath(defaultHeadersPath);
+
+    m_logger(logging::INFO) << "Headers cache path: " << defaultHeadersPath;
+
+    bool headersLoaded = false;
+
+    // Try to load from default cache first
+    if (m_spvWallet->initFromBootstrap(defaultHeadersPath))
+    {
+      m_logger(logging::INFO) << "Loaded cached headers from " << defaultHeadersPath;
+      headersLoaded = true;
+    }
+    // Then try user-provided bootstrap file
+    else if (!headersFile.empty() && m_spvWallet->initFromBootstrap(headersFile))
+    {
+      m_logger(logging::INFO) << "Loaded bootstrap headers from " << headersFile;
+      // Save to cache for next time
+      if (m_spvWallet->saveHeaders())
       {
-        m_logger(logging::INFO) << "Loaded " << m_spvWallet->getSyncedHeight() + 1 << " headers from " << headersFile;
+        m_logger(logging::INFO) << "Cached headers to " << defaultHeadersPath;
       }
       else
       {
-        m_logger(logging::WARNING) << "Failed to load headers from " << headersFile;
+        m_logger(logging::WARNING) << "Failed to cache headers to " << defaultHeadersPath;
       }
+      headersLoaded = true;
     }
+    // Then try download
     else if (!bootstrapUrl.empty())
     {
       m_logger(logging::INFO) << "Downloading bootstrap from " << bootstrapUrl;
-      if (!m_spvWallet->initFromDownload(bootstrapUrl))
+      if (m_spvWallet->initFromDownload(bootstrapUrl))
       {
-        m_logger(logging::WARNING) << "Failed to download bootstrap, falling back to slow sync";
-        m_spvWallet->initFromSync();
+        if (m_spvWallet->saveHeaders())
+        {
+          m_logger(logging::INFO) << "Cached downloaded headers to " << defaultHeadersPath;
+        }
+        headersLoaded = true;
       }
     }
-    else
+
+    if (!headersLoaded)
     {
-      m_logger(logging::INFO) << "No bootstrap provided, syncing headers via RPC (slow)";
-      m_spvWallet->initFromSync();
+      m_logger(logging::ERROR) << "No valid headers found. Please provide --headers-file with a bootstrap file";
+      return;
     }
 
-    // Sync recent headers
-    if (m_spvWallet->syncNewHeaders())
+    // Verify checkpoints
+    if (!m_spvWallet->verifyCheckpoints())
     {
-      m_logger(logging::INFO) << "Light mode synced to height " << m_spvWallet->getSyncedHeight();
+      m_logger(logging::ERROR) << "Checkpoint verification failed! Headers file may be corrupted or from wrong chain";
+      return;
     }
-    else
-    {
-      m_logger(logging::WARNING) << "Failed to sync recent headers";
-    }
+
+    m_logger(logging::INFO) << "Headers loaded and verified, synced to height " << m_spvWallet->getSyncedHeight();
   }
 
   uint32_t BoltRpcServer::getNodeHeightLight() const

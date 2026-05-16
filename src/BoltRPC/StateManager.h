@@ -40,6 +40,8 @@ namespace BoltRPC
 
     bool exists() const;
 
+    const std::string &getFilePath() const { return m_filePath; }
+
   private:
     std::string m_filePath;
 

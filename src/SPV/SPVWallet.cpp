@@ -284,4 +284,14 @@ namespace SPV
       return false;
     }
   }
+
+  bool SPVWallet::saveHeaders()
+  {
+    if (m_defaultPath.empty())
+    {
+      std::cerr << "No default path set for saving headers" << std::endl;
+      return false;
+    }
+    return m_chain.save(m_defaultPath);
+  }
 }
