@@ -19,6 +19,7 @@ namespace BoltSync
     ~ProgressWriter();
     void start();
     void stop();
+    void waitForThreads();
 
   private:
     std::string m_progressFile;
@@ -29,5 +30,7 @@ namespace BoltSync
     std::thread m_displayThread;
     std::thread m_fileThread;
     std::atomic<bool> m_stop{false};
+    std::atomic<bool> m_displayStopped{false};
+    std::atomic<bool> m_fileStopped{false};
   };
 }

@@ -20,6 +20,8 @@ namespace BoltSync
   void ProgressWriter::start()
   {
     m_stop = false;
+    m_displayStopped = false;
+    m_fileStopped = false;
 
     m_displayThread = std::thread([this]()
                                   {
@@ -45,7 +47,8 @@ namespace BoltSync
                   << " | Speed: " << (int)speed << " blk/s"
                   << " | ETA: " << (eta / 60) << "m " << (eta % 60) << "s"
                   << " | Outputs: " << m_results.size() << "    " << std::flush;
-      } });
+      }
+      m_displayStopped = true; });
 
     if (!m_progressFile.empty())
     {
@@ -60,16 +63,43 @@ namespace BoltSync
             pf.close();
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        } });
+        }
+        m_fileStopped = true; });
     }
+    else
+    {
+      m_fileStopped = true;
+    }
+  }
+
+  void ProgressWriter::waitForThreads()
+  {
+    // Wait for display thread to fully exit
+    for (int i = 0; i < 50 && !m_displayStopped; ++i)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Wait for file thread to fully exit
+    for (int i = 0; i < 50 && !m_fileStopped; ++i)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    if (m_displayThread.joinable())
+      m_displayThread.join();
+
+    if (m_fileThread.joinable())
+      m_fileThread.join();
   }
 
   void ProgressWriter::stop()
   {
     m_stop = true;
-    if (m_displayThread.joinable())
-      m_displayThread.join();
-    if (m_fileThread.joinable())
-      m_fileThread.join();
+
+    // Give threads time to notice the stop flag
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    waitForThreads();
   }
 }

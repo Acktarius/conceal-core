@@ -62,37 +62,47 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
           m_lastScannedHeight.store(h, std::memory_order_relaxed);
         };
 
-        BoltSync::ScanState state;
-        if (scanner.scan(cfg, state))
+        // Move ScanState to heap to control lifetime
+        std::unique_ptr<BoltSync::ScanState> state(new BoltSync::ScanState());
+
+        try
         {
-          if (!state.results.empty())
+          if (scanner.scan(cfg, *state))
           {
-            std::vector<BoltCore::OutputInfo> newOutputs;
-            newOutputs.reserve(state.results.size());
-            for (const auto &fo : state.results)
+            if (!state->results.empty())
             {
-              BoltCore::OutputInfo info;
-              info.blockHeight = fo.blockHeight;
-              info.txHash = fo.txHash;
-              info.outputIndex = fo.outputIndex;
-              info.globalOutputIndex = fo.outputIndex;
-              info.amount = fo.amount;
-              info.outputKey = fo.outputKey;
-              info.txPublicKey = fo.txPublicKey;
-              info.keyImage = fo.keyImage;
-              info.spent = fo.spent;
-              info.isDeposit = fo.isDeposit;
-              info.term = fo.term;
-              newOutputs.push_back(std::move(info));
+              std::vector<BoltCore::OutputInfo> newOutputs;
+              newOutputs.reserve(state->results.size());
+              for (const auto &fo : state->results)
+              {
+                BoltCore::OutputInfo info;
+                info.blockHeight = fo.blockHeight;
+                info.txHash = fo.txHash;
+                info.outputIndex = fo.outputIndex;
+                info.globalOutputIndex = fo.outputIndex;
+                info.amount = fo.amount;
+                info.outputKey = fo.outputKey;
+                info.txPublicKey = fo.txPublicKey;
+                info.keyImage = fo.keyImage;
+                info.spent = fo.spent;
+                info.isDeposit = fo.isDeposit;
+                info.term = fo.term;
+                newOutputs.push_back(std::move(info));
+              }
+              m_onNewOutputs(newOutputs, nodeHeight);
             }
-            m_onNewOutputs(newOutputs, nodeHeight);
+            m_lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
           }
-          m_lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);
         }
+        catch (const std::exception &e)
+        {
+          std::cerr << "SyncMonitor: scan failed with exception: " << e.what() << std::endl;
+        }
+        // state destructor called here, but ProgressWriter::stop() already joined threads
       }
     }
 
-    // ── Incremental polling loop with block detection ──
+    // ── Incremental polling loop ──
     while (!m_stop)
     {
       uint32_t lastScanned = m_lastScannedHeight.load(std::memory_order_relaxed);
@@ -100,12 +110,10 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
       if (nodeHeight == 0)
         nodeHeight = m_node.getLastLocalBlockHeight();
 
-      // If we're at the tip, wait for new blocks
       if (lastScanned >= nodeHeight && nodeHeight > 0)
       {
         uint32_t currentHeight = nodeHeight;
 
-        // Wait for node height to increase (no fixed sleep)
         while (!m_stop)
         {
           std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -125,7 +133,6 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
           break;
       }
 
-      // New blocks available - scan them
       if (m_dataDir.empty())
         continue;
 
@@ -145,36 +152,45 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
         m_lastScannedHeight.store(h, std::memory_order_relaxed);
       };
 
-      BoltSync::ScanState state;
-      if (!scanner.scan(cfg, state))
-      {
-        std::cerr << "SyncMonitor: incremental scan failed "
-                  << "(range " << cfg.startBlock << "-" << cfg.endBlock << ")"
-                  << std::endl;
-        continue;
-      }
+      std::unique_ptr<BoltSync::ScanState> state(new BoltSync::ScanState());
 
-      if (!state.results.empty())
+      try
       {
-        std::vector<BoltCore::OutputInfo> newOutputs;
-        newOutputs.reserve(state.results.size());
-        for (const auto &fo : state.results)
+        if (!scanner.scan(cfg, *state))
         {
-          BoltCore::OutputInfo info;
-          info.blockHeight = fo.blockHeight;
-          info.txHash = fo.txHash;
-          info.outputIndex = fo.outputIndex;
-          info.globalOutputIndex = fo.outputIndex;
-          info.amount = fo.amount;
-          info.outputKey = fo.outputKey;
-          info.txPublicKey = fo.txPublicKey;
-          info.keyImage = fo.keyImage;
-          info.spent = fo.spent;
-          info.isDeposit = fo.isDeposit;
-          info.term = fo.term;
-          newOutputs.push_back(std::move(info));
+          std::cerr << "SyncMonitor: incremental scan failed "
+                    << "(range " << cfg.startBlock << "-" << cfg.endBlock << ")"
+                    << std::endl;
+          continue;
         }
-        m_onNewOutputs(newOutputs, nodeHeight);
+
+        if (!state->results.empty())
+        {
+          std::vector<BoltCore::OutputInfo> newOutputs;
+          newOutputs.reserve(state->results.size());
+          for (const auto &fo : state->results)
+          {
+            BoltCore::OutputInfo info;
+            info.blockHeight = fo.blockHeight;
+            info.txHash = fo.txHash;
+            info.outputIndex = fo.outputIndex;
+            info.globalOutputIndex = fo.outputIndex;
+            info.amount = fo.amount;
+            info.outputKey = fo.outputKey;
+            info.txPublicKey = fo.txPublicKey;
+            info.keyImage = fo.keyImage;
+            info.spent = fo.spent;
+            info.isDeposit = fo.isDeposit;
+            info.term = fo.term;
+            newOutputs.push_back(std::move(info));
+          }
+          m_onNewOutputs(newOutputs, nodeHeight);
+        }
+      }
+      catch (const std::exception &e)
+      {
+        std::cerr << "SyncMonitor: incremental scan failed with exception: " << e.what() << std::endl;
+        continue;
       }
 
       m_lastScannedHeight.store(nodeHeight, std::memory_order_relaxed);

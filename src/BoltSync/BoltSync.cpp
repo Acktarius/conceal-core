@@ -85,23 +85,24 @@ namespace BoltSync
 
       threads.emplace_back([&, start, end]()
                            {
-        ScanContext ctx{ storage, m_viewKey, m_spendPublicKey, m_spendKey,
-                         state.blocksProcessed, state.lastCheckpointHeight,
-                         state.resultsMutex, state.results, saveCheckpoint };
-        for (uint32_t h = start; h <= end; ++h)
-        {
-          scanSingleBlock(h, ctx);
-          uint32_t reportInterval = (end - start) / 100; // every 1%
-          if (reportInterval < 1000)
-            reportInterval = 1000; // minimum every 1000 blocks
-          if (h % reportInterval == 0 || h == end)
-          {
-            ctx.saveCheckpoint(h);
-            if (config.onProgress) config.onProgress(h);
-          }
-        } });
+            ScanContext ctx{ storage, m_viewKey, m_spendPublicKey, m_spendKey,
+                             state.blocksProcessed, state.lastCheckpointHeight,
+                             state.resultsMutex, state.results, saveCheckpoint };
+            for (uint32_t h = start; h <= end; ++h)
+            {
+                scanSingleBlock(h, ctx);
+                uint32_t reportInterval = (end - start) / 100; // every 1%
+                if (reportInterval < 1000)
+                    reportInterval = 1000; // minimum every 1000 blocks
+                if (h % reportInterval == 0 || h == end)
+                {
+                    ctx.saveCheckpoint(h);
+                    if (config.onProgress) config.onProgress(h);
+                }
+            } });
     }
 
+    // Wait for all scan threads to complete
     for (auto &t : threads)
     {
       if (t.joinable())
@@ -110,6 +111,9 @@ namespace BoltSync
 
     state.progressDone = true;
     progress.stop();
+
+    // CRITICAL: Wait for ProgressWriter threads to fully exit before continuing
+    progress.waitForThreads();
 
     // Second pass: mark outputs as spent by scanning KeyInput keyImages.
     markSpentOutputs(storage, scanTopHeight, state.results);
