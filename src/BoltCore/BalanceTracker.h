@@ -14,6 +14,14 @@ namespace BoltCore
   class BalanceTracker
   {
   public:
+    struct PendingTx
+    {
+      crypto::Hash txHash;
+      uint64_t amount;
+      uint64_t fee;
+      uint64_t timestamp;
+    };
+
     void loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight = 0);
 
     Balance getTotalBalance() const;
@@ -30,6 +38,11 @@ namespace BoltCore
 
     const std::vector<OutputInfo> &getOutputs() const { return m_outputs; }
 
+    void addPendingOutgoing(const crypto::Hash &txHash, uint64_t amount, uint64_t fee);
+    void confirmTransaction(const crypto::Hash &txHash, uint32_t blockHeight);
+    uint64_t getPendingOutgoingAmount() const;
+    std::vector<PendingTx> getPendingTransactions() const;
+
   private:
     struct AddressBalance
     {
@@ -39,6 +52,9 @@ namespace BoltCore
       uint64_t unlockedDeposit = 0;
     };
 
+    mutable std::mutex m_pendingMutex;
+    std::unordered_map<crypto::Hash, PendingTx> m_pendingOutgoing;
+    uint64_t m_pendingOutgoingAmount = 0;
     uint32_t m_currentHeight = 0;
     std::vector<OutputInfo> m_outputs;
     std::unordered_map<std::string, AddressBalance> m_byAddress;

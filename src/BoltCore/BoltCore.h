@@ -5,6 +5,7 @@
 #pragma once
 
 #include "BoltCoreTypes.h"
+#include "BalanceTracker.h"
 #include "INode.h"
 #include <functional>
 #include <string>
@@ -68,6 +69,12 @@ namespace BoltCore
     WalletType getType() const;
     crypto::PublicKey getViewPublicKey() const;
     crypto::PublicKey getSpendPublicKey() const;
+
+    // Pending
+    void addPendingOutgoing(const crypto::Hash &txHash, uint64_t amount, uint64_t fee);
+    void confirmTransaction(const crypto::Hash &txHash, uint32_t blockHeight);
+    uint64_t getPendingOutgoingAmount() const;
+    std::vector<BalanceTracker::PendingTx> getPendingTransactions() const;
 
   private:
     struct Impl;

@@ -789,5 +789,38 @@ std::error_code NodeRpcProxy::jsonRpcCommand(const std::string& method, const Re
 
   return ec;
 }
+std::vector<crypto::Hash> NodeRpcProxy::getPoolTransactions()
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+
+  std::vector<crypto::Hash> result;
+
+  // Use existing pool changes method to get current mempool
+  std::vector<crypto::Hash> knownTxs; // empty = get all
+  crypto::Hash tailBlock = m_lastKnowHash;
+
+  bool isBcActual = false;
+  std::vector<std::unique_ptr<ITransactionReader>> addedTxs;
+  std::vector<crypto::Hash> deletedTxsIds;
+
+  std::error_code ec = doGetPoolSymmetricDifference(std::move(knownTxs), tailBlock, isBcActual, addedTxs, deletedTxsIds);
+
+  if (!ec && !addedTxs.empty())
+  {
+    result.reserve(addedTxs.size());
+    for (const auto &tx : addedTxs)
+    {
+      result.push_back(tx->getTransactionHash());
+    }
+  }
+
+  return result;
+}
+
+bool NodeRpcProxy::getTransactionSync(const crypto::Hash &txHash, cn::Transaction &tx)
+{
+  std::error_code ec = doGetTransaction(txHash, tx);
+  return !ec;
+}
 
 }
