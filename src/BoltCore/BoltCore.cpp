@@ -87,6 +87,18 @@ namespace BoltCore
     m_impl->balanceTracker.setCurrentHeight(height);
   }
 
+  uint32_t Wallet::getCurrentHeight() const
+  {
+    return m_impl->balanceTracker.getCurrentHeight();
+  }
+
+  uint64_t Wallet::calculateDepositInterest(const OutputInfo &deposit) const
+  {
+    if (!deposit.isDeposit || deposit.term == 0)
+      return 0;
+    return m_impl->currency.calculateInterest(deposit.amount, deposit.term, deposit.blockHeight);
+  }
+
   Balance Wallet::getBalance() const
   {
     return m_impl->balanceTracker.getTotalBalance();

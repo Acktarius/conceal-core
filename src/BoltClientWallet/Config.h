@@ -14,7 +14,7 @@ struct Config
   uint16_t daemonPort = 16000;
   std::string viewKeyHex;
   std::string spendKeyHex;
-  unsigned int scanThreads = 0;
+  unsigned int scanThreads = 1;
   bool skipScan = false;
   std::string sidechainHost = "127.0.0.1";
   uint16_t sidechainPort = 8080;

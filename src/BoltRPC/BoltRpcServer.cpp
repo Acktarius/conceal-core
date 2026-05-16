@@ -852,24 +852,39 @@ namespace BoltRPC
   // Mainchain wallet methods
   std::string BoltRpcServer::methodGetBalance(const common::JsonValue &)
   {
-    // Fast path: if wallet has no outputs, return zeros without blocking
+    std::lock_guard<std::mutex> lock(m_walletMutex);
+    auto outputs = m_wallet.getOutputs();
+
+    if (outputs.empty())
     {
-      std::lock_guard<std::mutex> lock(m_walletMutex);
-      auto outputs = m_wallet.getOutputs();
-      if (outputs.empty())
+      return R"({"availableBalance":0,"lockedAmount":0,"lockedDepositBalance":0,"unlockedDepositBalance":0,"accruedInterest":0,"currentHeight":0})";
+    }
+
+    auto bal = m_wallet.getBalance();
+    uint64_t accruedInterest = 0;
+    uint32_t currentHeight = m_wallet.getCurrentHeight();
+
+    // Calculate interest for deposits
+    for (const auto &out : outputs)
+    {
+      if (out.isDeposit && !out.spent && out.term > 0)
       {
-        return R"({"availableBalance":0,"lockedAmount":0,"lockedDepositBalance":0,"unlockedDepositBalance":0})";
+        uint32_t maturityHeight = out.blockHeight + out.term;
+        if (currentHeight >= maturityHeight)
+        {
+          // Use the same calculation as DepositManager
+          accruedInterest += m_currency.calculateInterest(out.amount, out.term, currentHeight);
+        }
       }
     }
 
-    // Wallet has outputs, take the lock again for the full balance query
-    std::lock_guard<std::mutex> lock(m_walletMutex);
-    auto bal = m_wallet.getBalance();
     std::ostringstream ss;
-    ss << R"({"availableBalance":)" << bal.actual
+    ss << R"({"availableBalance":)" << bal.actual + accruedInterest // Add interest to available
        << R"(,"lockedAmount":)" << bal.pending
        << R"(,"lockedDepositBalance":)" << bal.lockedDeposit
        << R"(,"unlockedDepositBalance":)" << bal.unlockedDeposit
+       << R"(,"accruedInterest":)" << accruedInterest
+       << R"(,"currentHeight":)" << currentHeight
        << "}";
     return ss.str();
   }

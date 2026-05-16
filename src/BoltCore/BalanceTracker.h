@@ -21,7 +21,9 @@ namespace BoltCore
 
     void addOutput(const OutputInfo &output);
     void markSpent(const crypto::KeyImage &keyImage);
+
     void setCurrentHeight(uint32_t height) { m_currentHeight = height; }
+    uint32_t getCurrentHeight() const { return m_currentHeight; }
 
     uint64_t totalActual() const;
     uint64_t totalPending() const;

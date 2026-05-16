@@ -54,7 +54,7 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
         BoltSync::Scanner scanner(m_viewKey, m_spendPub, m_spendKey);
         BoltSync::ScanConfig cfg;
         cfg.dataDir = m_dataDir;
-        cfg.numThreads = 0; // auto-detect threads for initial scan
+        cfg.numThreads = 1;
         cfg.startBlock = 0;
         cfg.endBlock = nodeHeight;
         cfg.onProgress = [this](uint32_t h)
@@ -92,24 +92,46 @@ constexpr uint32_t SyncMonitor::MIN_BLOCKS_TO_SCAN;
       }
     }
 
-    // ── Incremental polling loop ──
+    // ── Incremental polling loop with block detection ──
     while (!m_stop)
     {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(POLL_INTERVAL_MS));
-
-      if (m_stop)
-        break;
-      if (m_dataDir.empty())
-        continue;
-
+      uint32_t lastScanned = m_lastScannedHeight.load(std::memory_order_relaxed);
       uint32_t nodeHeight = m_node.getLastKnownBlockHeight();
       if (nodeHeight == 0)
         nodeHeight = m_node.getLastLocalBlockHeight();
 
-      uint32_t lastScanned = m_lastScannedHeight.load(std::memory_order_relaxed);
+      // If we're at the tip, wait for new blocks
+      if (lastScanned >= nodeHeight && nodeHeight > 0)
+      {
+        uint32_t currentHeight = nodeHeight;
 
-      if (nodeHeight <= lastScanned + MIN_BLOCKS_TO_SCAN)
+        // Wait for node height to increase (no fixed sleep)
+        while (!m_stop)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+          uint32_t newHeight = m_node.getLastKnownBlockHeight();
+          if (newHeight == 0)
+            newHeight = m_node.getLastLocalBlockHeight();
+
+          if (newHeight > currentHeight)
+          {
+            nodeHeight = newHeight;
+            break;
+          }
+        }
+
+        if (m_stop)
+          break;
+      }
+
+      // New blocks available - scan them
+      if (m_dataDir.empty())
+        continue;
+
+      uint32_t lastScannedNow = m_lastScannedHeight.load(std::memory_order_relaxed);
+
+      if (nodeHeight <= lastScannedNow + MIN_BLOCKS_TO_SCAN)
         continue;
 
       BoltSync::Scanner scanner(m_viewKey, m_spendPub, m_spendKey);

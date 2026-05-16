@@ -49,6 +49,8 @@ namespace BoltCore
     uint64_t pending;
     uint64_t lockedDeposit;
     uint64_t unlockedDeposit;
+    uint64_t accruedInterest; // Interest earned on deposits not yet withdrawn
+    uint32_t currentHeight;   // Current blockchain height for this balance
   };
 
   struct DepositInfo

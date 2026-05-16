@@ -32,7 +32,9 @@ namespace BoltCore
     // Load outputs from BoltSync scan or other source
     void loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight = 0);
     void addOutput(const OutputInfo &output);
+
     void setCurrentHeight(uint32_t height);
+    uint32_t getCurrentHeight() const;
 
     // Balances
     Balance getBalance() const;
@@ -46,6 +48,7 @@ namespace BoltCore
     TransferResult createDeposit(uint64_t amount, uint32_t term, const std::string &sourceAddress = "");
     TransferResult withdrawDeposit(uint64_t depositId);
     std::vector<DepositInfo> getDeposits() const;
+    uint64_t calculateDepositInterest(const OutputInfo &deposit) const;
 
     // Fusion
     FusionEstimate estimateFusion(uint64_t threshold) const;

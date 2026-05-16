@@ -11,7 +11,7 @@ namespace BoltCore
     m_currentHeight = currentHeight;
     m_outputs.clear();
     m_byAddress.clear();
-    m_total = {0, 0, 0, 0};
+    m_total = {0, 0, 0, 0, 0, 0};
 
     for (const auto &out : outputs)
     {
@@ -31,8 +31,8 @@ namespace BoltCore
 
     if (out.isDeposit)
     {
-      // A deposit is locked until blockHeight + term <= currentHeight (reference: m_currentHeight + 1 >= blockHeight + term)
       bool unlocked = (out.term > 0) && (m_currentHeight + 1 >= out.blockHeight + out.term);
+
       if (unlocked)
       {
         addr.unlockedDeposit += out.amount;
@@ -87,9 +87,9 @@ namespace BoltCore
     if (it != m_byAddress.end())
     {
       return {it->second.actual, it->second.pending,
-              it->second.lockedDeposit, it->second.unlockedDeposit};
+              it->second.lockedDeposit, it->second.unlockedDeposit, 0, m_currentHeight};
     }
-    return {0, 0, 0, 0};
+    return {0, 0, 0, 0, 0, m_currentHeight};
   }
 
   uint64_t BalanceTracker::totalActual() const
