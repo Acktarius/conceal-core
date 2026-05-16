@@ -18,6 +18,7 @@
 #include "CryptoNoteCore/Currency.h"
 #include "NodeRpcProxy/NodeRpcProxy.h"
 #include "Logging/LoggerRef.h"
+#include "SPV/SPVWallet.h"
 
 namespace BoltRPC
 {
@@ -74,6 +75,15 @@ namespace BoltRPC
                    const crypto::PublicKey &spendPub,
                    const crypto::SecretKey *spendKey);
     void setDataDir(const std::string &dataDir) { m_dataDir = dataDir; }
+
+    // SPV
+    void enableLightMode(const std::string& headersFile = "",
+                         const std::string& bootstrapUrl = "",
+                         const std::string& remoteHost = "seed1.conceal.network",
+                         uint16_t remotePort = 16000);
+    
+    bool isLightMode() const { return m_lightMode; }
+    uint32_t getNodeHeightLight() const;
 
   private:
     void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);
@@ -146,6 +156,14 @@ namespace BoltRPC
     uint16_t m_daemonPort = 16000;
     platform_system::Dispatcher &m_dispatcher;
     std::unique_ptr<BoltHttp::Server> m_server;
+
+    // Light mode members
+    bool m_lightMode = false;
+    SPV::SPVWallet *m_spvWallet;
+    std::string m_headersFile;
+    std::string m_bootstrapUrl;
+    std::string m_remoteHost;
+    uint16_t m_remotePort;
 
     // State persistence
     StateManager *m_stateManager = nullptr;

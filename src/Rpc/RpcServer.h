@@ -33,6 +33,10 @@ public:
   bool enableCors(const std::string& domain);
   std::string getCorsDomain() const;
 
+  bool exportHeadersToFile(const std::string &filename);
+  bool on_export_headers(const COMMAND_RPC_EXPORT_HEADERS::request &req,
+                         COMMAND_RPC_EXPORT_HEADERS::response &res);
+
 private:
 
   template <class Handler>
@@ -93,6 +97,11 @@ private:
   bool f_getMixin(const Transaction& transaction, uint64_t& mixin) const;
 
   bool fill_f_block_details_response(const crypto::Hash& hash, f_block_details_response& block);
+
+  bool on_get_merkle_proof(const COMMAND_RPC_GET_MERKLE_PROOF::request &req,
+                           COMMAND_RPC_GET_MERKLE_PROOF::response &res);
+  bool on_get_outputs_for_address(const COMMAND_RPC_GET_OUTPUTS_FOR_ADDRESS::request &req,
+                                  COMMAND_RPC_GET_OUTPUTS_FOR_ADDRESS::response &res);
 
   logging::LoggerRef logger;
   core& m_core;

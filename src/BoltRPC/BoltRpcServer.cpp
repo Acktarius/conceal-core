@@ -98,7 +98,7 @@ namespace BoltRPC
                                const cn::Currency &currency,
                                const std::string &address)
       : m_logger(logger, "BoltRPC"), m_wallet(wallet), m_node(node),
-        m_currency(currency), m_address(address), m_dispatcher(dispatcher)
+        m_currency(currency), m_address(address), m_dispatcher(dispatcher), m_spvWallet(NULL)
   {
   }
 
@@ -113,6 +113,12 @@ namespace BoltRPC
     m_savedSpendKey = emptyKey;
     m_syncViewKey = emptyKey;
     m_syncSpendKey = emptyKey;
+
+    if (m_spvWallet)
+    {
+      delete m_spvWallet;
+      m_spvWallet = NULL;
+    }
   }
 
   void BoltRpcServer::start(const std::string &bindIp, uint16_t bindPort, size_t threadCount)
@@ -913,6 +919,29 @@ namespace BoltRPC
 
   std::string BoltRpcServer::methodGetSyncStatus(const common::JsonValue &params)
   {
+    if (m_lightMode && m_spvWallet)
+    {
+      uint32_t localHeight = m_spvWallet->getSyncedHeight();
+      uint32_t remoteHeight = m_spvWallet->getNodeHeight();
+      bool synced = (localHeight >= remoteHeight);
+
+      std::ostringstream ss;
+      ss << R"({"walletHeight":)" << localHeight
+         << R"(,"nodeHeight":)" << remoteHeight
+         << R"(,"synced":)" << (synced ? "true" : "false")
+         << R"(,"lightMode":true)";
+
+      if (m_sidechainConnected)
+      {
+        ss << R"(,"sidechainHost":")" << m_sidechainHost << R"(")"
+           << R"(,"sidechainPort":)" << m_sidechainPort;
+      }
+
+      ss << "}";
+      return ss.str();
+    }
+
+    // Original full node code...
     uint32_t walletHeight = m_syncedHeight.load();
 
     // Also check SyncMonitor progress during active scans
@@ -998,6 +1027,37 @@ namespace BoltRPC
       throw std::runtime_error(result.error);
 
     submitTransaction(result);
+
+    // Light mode: Verify the transaction via SPV after submission
+    if (m_lightMode && m_spvWallet && !result.txHash.empty())
+    {
+      crypto::Hash tx_hash;
+      if (common::podFromHex(result.txHash, tx_hash))
+      {
+        m_logger(logging::INFO) << "Verifying transaction via SPV: " << result.txHash;
+
+        // Wait a few seconds for the transaction to be mined (in light mode, we rely on remote node)
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+
+        SPV::TransactionProof proof;
+        if (m_spvWallet->getTransactionProof(tx_hash, proof))
+        {
+          if (m_spvWallet->verifyTransaction(proof))
+          {
+            m_logger(logging::INFO) << "Transaction verified via SPV in block " << proof.block_height;
+          }
+          else
+          {
+            m_logger(logging::WARNING) << "Transaction verification failed: " << result.txHash;
+          }
+        }
+        else
+        {
+          // Transaction may still be in mempool, not yet mined
+          m_logger(logging::INFO) << "Transaction submitted but not yet confirmed (still in mempool)";
+        }
+      }
+    }
 
     std::ostringstream ss;
     ss << R"({"transactionHash":")" << result.txHash << R"("})";
@@ -1510,5 +1570,67 @@ namespace BoltRPC
         }));
 
     m_syncMonitor->start();
+  }
+  void BoltRpcServer::enableLightMode(const std::string &headersFile,
+                                      const std::string &bootstrapUrl,
+                                      const std::string &remoteHost,
+                                      uint16_t remotePort)
+  {
+    m_lightMode = true;
+    m_headersFile = headersFile;
+    m_bootstrapUrl = bootstrapUrl;
+    m_remoteHost = remoteHost;
+    m_remotePort = remotePort;
+
+    m_logger(logging::INFO) << "Initializing light mode with remote node " << remoteHost << ":" << remotePort;
+
+    // Use raw pointer with new (C++11 compatible)
+    m_spvWallet = new SPV::SPVWallet(remoteHost, remotePort);
+
+    // Try to load existing headers
+    if (!headersFile.empty())
+    {
+      if (m_spvWallet->initFromBootstrap(headersFile))
+      {
+        m_logger(logging::INFO) << "Loaded " << m_spvWallet->getSyncedHeight() + 1 << " headers from " << headersFile;
+      }
+      else
+      {
+        m_logger(logging::WARNING) << "Failed to load headers from " << headersFile;
+      }
+    }
+    else if (!bootstrapUrl.empty())
+    {
+      m_logger(logging::INFO) << "Downloading bootstrap from " << bootstrapUrl;
+      if (!m_spvWallet->initFromDownload(bootstrapUrl))
+      {
+        m_logger(logging::WARNING) << "Failed to download bootstrap, falling back to slow sync";
+        m_spvWallet->initFromSync();
+      }
+    }
+    else
+    {
+      m_logger(logging::INFO) << "No bootstrap provided, syncing headers via RPC (slow)";
+      m_spvWallet->initFromSync();
+    }
+
+    // Sync recent headers
+    if (m_spvWallet->syncNewHeaders())
+    {
+      m_logger(logging::INFO) << "Light mode synced to height " << m_spvWallet->getSyncedHeight();
+    }
+    else
+    {
+      m_logger(logging::WARNING) << "Failed to sync recent headers";
+    }
+  }
+
+  uint32_t BoltRpcServer::getNodeHeightLight() const
+  {
+    if (m_spvWallet)
+    {
+      return m_spvWallet->getNodeHeight();
+    }
+    return m_node.getLastLocalBlockHeight();
   }
 } // namespace BoltRPC

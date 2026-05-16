@@ -1067,4 +1067,116 @@ struct K_COMMAND_RPC_CHECK_RESERVE_PROOF {
 	};
 };
 
+struct COMMAND_RPC_GET_MERKLE_PROOF
+{
+  struct request
+  {
+    crypto::Hash tx_hash;
+
+    void serialize(ISerializer &s)
+    {
+      s(tx_hash, "tx_hash");
+    }
+  };
+
+  struct response
+  {
+    uint32_t block_height;
+    std::string block_hash;
+    std::string merkle_root;
+    uint32_t tx_index;
+    std::vector<std::string> merkle_branch;
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      s(block_height, "block_height");
+      s(block_hash, "block_hash");
+      s(merkle_root, "merkle_root");
+      s(tx_index, "tx_index");
+      s(merkle_branch, "merkle_branch");
+      s(status, "status");
+    }
+  };
+};
+
+struct COMMAND_RPC_GET_OUTPUTS_FOR_ADDRESS
+{
+  struct request
+  {
+    std::string view_pub_key; // hex-encoded public view key
+    uint32_t from_height;
+    uint32_t to_height;
+    uint32_t max_outputs = 10000; // Limit to prevent overwhelming client
+
+    void serialize(ISerializer &s)
+    {
+      s(view_pub_key, "view_pub_key");
+      s(from_height, "from_height");
+      s(to_height, "to_height");
+      if (s.type() == ISerializer::INPUT)
+      {
+        s(max_outputs, "max_outputs");
+      }
+    }
+  };
+
+  struct response
+  {
+    struct OutputEntry
+    {
+      uint32_t block_height;
+      std::string tx_hash;
+      uint64_t amount;
+      uint32_t global_output_index;
+      std::string output_public_key;
+      uint64_t timestamp;
+
+      void serialize(ISerializer &s)
+      {
+        s(block_height, "block_height");
+        s(tx_hash, "tx_hash");
+        s(amount, "amount");
+        s(global_output_index, "global_output_index");
+        s(output_public_key, "output_public_key");
+        s(timestamp, "timestamp");
+      }
+    };
+    std::vector<OutputEntry> outputs;
+    uint32_t next_from_height; // For pagination, where to continue from
+    bool has_more;             // Whether there are more outputs beyond max_outputs
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      s(outputs, "outputs");
+      s(next_from_height, "next_from_height");
+      s(has_more, "has_more");
+      s(status, "status");
+    }
+  };
+};
+
+struct COMMAND_RPC_EXPORT_HEADERS
+{
+  struct request
+  {
+    std::string filename;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(filename)
+    }
+  };
+
+  struct response
+  {
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(status)
+    }
+  };
+};
 }

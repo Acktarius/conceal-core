@@ -410,8 +410,7 @@ int CryptoNoteProtocolHandler::handle_request_get_objects(int command, NOTIFY_RE
   size_t maxObjects = m_maxObjectCount.load();
   const size_t totalObjects = arg.blocks.size() + arg.txs.size();
 
-  logger(INFO) << "DEBUG: Request for " << totalObjects << " objects (limit: " << maxObjects << ")";
-
+  logger(DEBUGGING) << "Request for " << totalObjects << " objects (limit: " << maxObjects << ")";
 
   if (totalObjects > maxObjects)
   {

@@ -72,12 +72,21 @@ struct Config
   uint16_t sidechainPort = 8080;
   size_t rpcThreads = 1;
   std::string password;
+
+  // Light mode options
+  bool lightMode = false;
+  std::string headersFile;
+  std::string bootstrapUrl;
+  std::string remoteDaemonHost = "seed1.conceal.network";
+  uint16_t remoteDaemonPort = 16000;
 };
 
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("BoltRPC — Conceal RPC Wallet (walletd replacement)");
-  desc.add_options()("help,h", "Show help")("view-key", po::value<std::string>()->default_value(""), "64-char hex private view key (optional at startup)")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")("password", po::value<std::string>()->default_value(""), "Passphrase to encrypt wallet state file (optional at startup)")("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")("testnet", po::bool_switch(), "Run in testnet mode")("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count");
+  desc.add_options()("help,h", "Show help")("view-key", po::value<std::string>()->default_value(""), "64-char hex private view key (optional at startup)")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional, for full wallet)")("password", po::value<std::string>()->default_value(""), "Passphrase to encrypt wallet state file (optional at startup)")("data-dir", po::value<std::string>()->default_value(""), "Path to blockchain MDBX data directory (required for initial scan)")("skip-scan", po::bool_switch(), "Skip initial chain scan, load from state file instead")("threads", po::value<unsigned int>()->default_value(0), "Number of scan threads (0 = auto)")("daemon-host", po::value<std::string>()->default_value("127.0.0.1"), "Daemon RPC host")("daemon-port", po::value<uint16_t>()->default_value(16000), "Daemon RPC port")("bind-ip", po::value<std::string>()->default_value("127.0.0.1"), "RPC server bind IP")("bind-port", po::value<uint16_t>()->default_value(8070), "RPC server bind port")("state-file", po::value<std::string>()->default_value("bolt-wallet.state"), "File to persist wallet state")("sidechain-host", po::value<std::string>()->default_value(""), "Sidechain validator RPC host")("sidechain-port", po::value<uint16_t>()->default_value(8080), "Sidechain validator RPC port")("testnet", po::bool_switch(), "Run in testnet mode")("rpc-threads", po::value<size_t>()->default_value(1), "RPC server thread count")
+      // Light mode options
+      ("light", po::bool_switch(), "Enable light mode (SPV wallet, no local node required)")("headers-file", po::value<std::string>()->default_value(""), "Path to headers.bin file for light mode bootstrap")("bootstrap-url", po::value<std::string>()->default_value(""), "URL to download headers.bin from")("remote-daemon", po::value<std::string>()->default_value("seed1.conceal.network:16000"), "Remote daemon for light mode (host:port)");
 
   po::variables_map vm;
   try
@@ -125,6 +134,27 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   cfg.sidechainPort = vm["sidechain-port"].as<uint16_t>();
   cfg.testnet = vm["testnet"].as<bool>();
   cfg.rpcThreads = vm["rpc-threads"].as<size_t>();
+
+  // Parse light mode options
+  cfg.lightMode = vm["light"].as<bool>();
+  cfg.headersFile = vm["headers-file"].as<std::string>();
+  cfg.bootstrapUrl = vm["bootstrap-url"].as<std::string>();
+
+  if (vm.count("remote-daemon"))
+  {
+    std::string remoteDaemon = vm["remote-daemon"].as<std::string>();
+    auto colonPos = remoteDaemon.find(':');
+    if (colonPos != std::string::npos)
+    {
+      cfg.remoteDaemonHost = remoteDaemon.substr(0, colonPos);
+      cfg.remoteDaemonPort = static_cast<uint16_t>(std::stoi(remoteDaemon.substr(colonPos + 1)));
+    }
+    else
+    {
+      cfg.remoteDaemonHost = remoteDaemon;
+      cfg.remoteDaemonPort = 16000;
+    }
+  }
 
   return true;
 }
@@ -189,21 +219,37 @@ int main(int argc, char *argv[])
     logger(logging::INFO) << "Use the GUI or importWallet RPC to set keys later";
   }
 
-  // Connect to daemon
+  // Connect to daemon or setup light mode
   platform_system::Dispatcher dispatcher;
   cn::Currency currency = cn::CurrencyBuilder(logManager).currency();
-  NodeRpcProxy node(dispatcher, cfg.daemonHost, cfg.daemonPort, consoleLogger);
-  NodeInitObserver initObs;
-  node.init([&initObs](std::error_code ec)
-            { initObs.initCompleted(ec); });
-  try
+
+  // Node proxy for full mode (raw pointer for C++11)
+  NodeRpcProxy *node = nullptr;
+  bool lightModeActive = cfg.lightMode;
+
+  if (!lightModeActive)
   {
-    initObs.waitForInitEnd();
-    logger(logging::INFO) << "Connected to daemon " << cfg.daemonHost << ":" << cfg.daemonPort;
+    node = new NodeRpcProxy(dispatcher, cfg.daemonHost, cfg.daemonPort, consoleLogger);
+    NodeInitObserver initObs;
+    node->init([&initObs](std::error_code ec)
+               { initObs.initCompleted(ec); });
+    try
+    {
+      initObs.waitForInitEnd();
+      logger(logging::INFO) << "Connected to daemon " << cfg.daemonHost << ":" << cfg.daemonPort;
+    }
+    catch (...)
+    {
+      logger(logging::WARNING) << "Daemon not reachable — running in offline mode (no transactions can be sent)";
+    }
   }
-  catch (...)
+  else
   {
-    logger(logging::WARNING) << "Daemon not reachable — running in offline mode (no transactions can be sent)";
+    logger(logging::INFO) << "Starting in LIGHT MODE (SPV wallet)";
+    logger(logging::INFO) << "Remote daemon: " << cfg.remoteDaemonHost << ":" << cfg.remoteDaemonPort;
+    // Create a dummy node proxy that won't be used (light mode uses SPVWallet instead)
+    node = new NodeRpcProxy(dispatcher, cfg.remoteDaemonHost, cfg.remoteDaemonPort, consoleLogger);
+    // Don't actually connect - light mode uses HTTP directly
   }
 
   // Load or scan wallet state (outputs only — keys are loaded separately via RPC unlock)
@@ -345,7 +391,7 @@ int main(int argc, char *argv[])
       }
     }
   }
-  else if (hasViewKey)
+  else if (hasViewKey && !stateLoaded)
   {
     // No state file exists, but keys were provided on CLI
     logger(logging::INFO) << "No existing state file — keys will be used for initial scan";
@@ -415,8 +461,8 @@ int main(int argc, char *argv[])
     logger(logging::INFO) << "Use 'importWallet' or 'generateWallet' RPC to set up a wallet";
   }
 
-  // Initialize wallet
-  BoltCore::Wallet wallet(viewKey, spendKey, viewPub, spendPub, node, currency);
+  // Initialize wallet (use the node proxy, which may be a dummy in light mode)
+  BoltCore::Wallet wallet(viewKey, spendKey, viewPub, spendPub, *node, currency);
   if (hasViewKey)
   {
     wallet.loadOutputs(outputInfos, lastScannedHeight.load());
@@ -432,7 +478,14 @@ int main(int argc, char *argv[])
 
   // RPC server
   BoltRPC::BoltRpcServer rpcServer(dispatcher, consoleLogger,
-                                   wallet, node, currency, address);
+                                   wallet, *node, currency, address);
+
+  // Enable light mode if configured
+  if (lightModeActive)
+  {
+    rpcServer.enableLightMode(cfg.headersFile, cfg.bootstrapUrl,
+                              cfg.remoteDaemonHost, cfg.remoteDaemonPort);
+  }
 
   // Wire up StateManager so save() and auto-save can persist wallet state
   rpcServer.setStateManager(&stateManager, &outputInfos, &lastScannedHeight);
@@ -476,7 +529,8 @@ int main(int argc, char *argv[])
   rpcServer.setSyncedHeight(lastScannedHeight.load());
 
   // If keys were provided at startup and data dir is available, begin incremental sync now
-  if (hasViewKey && !cfg.dataDir.empty())
+  // Skip in light mode since we use SPVWallet
+  if (!lightModeActive && hasViewKey && !cfg.dataDir.empty())
   {
     rpcServer.startSync(cfg.dataDir, viewKey, spendPub,
                         hasSpendKey ? &spendKey : nullptr);
@@ -502,6 +556,11 @@ int main(int argc, char *argv[])
     logger(logging::INFO) << "Setup mode — waiting for 'importWallet' or 'generateWallet' RPC call";
   }
 
+  if (lightModeActive)
+  {
+    logger(logging::INFO) << "Light mode active — using SPV verification for transactions";
+  }
+
   if (!cfg.sidechainHost.empty())
   {
     logger(logging::INFO) << "Sidechain features enabled via " << cfg.sidechainHost << ":" << cfg.sidechainPort;
@@ -522,7 +581,12 @@ int main(int argc, char *argv[])
   // The RPC server will handle secure cleanup in its destructor
   rpcServer.stop();
 
-  node.shutdown();
+  if (node)
+  {
+    node->shutdown();
+    delete node;
+    node = nullptr;
+  }
 
   // Secure cleanup of any sensitive data remaining in config
   secureZero(cfg.password);

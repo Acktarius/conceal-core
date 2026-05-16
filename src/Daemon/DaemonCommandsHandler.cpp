@@ -71,6 +71,8 @@ DaemonCommandsHandler::DaemonCommandsHandler(cn::core &core, cn::NodeServer &srv
                               "set_log <level> - Change current log level, <level> is a number 0-4");
   m_consoleHandler.setHandler("export_snapshot", boost::bind(&DaemonCommandsHandler::export_snapshot, this, boost::arg<1>()),
                               "Export blockchain snapshot to file, export_snapshot <file_path>");
+  m_consoleHandler.setHandler("export_headers", boost::bind(&DaemonCommandsHandler::export_headers, this, boost::arg<1>()),
+                              "Export all block headers to a binary file for light client bootstrap, export_headers <file_path>");
 }
 
 // ── Help ──────────────────────────────────────────────────────────────
@@ -587,6 +589,117 @@ bool DaemonCommandsHandler::export_snapshot(const std::vector<std::string> &args
       << "Snapshot exported: " << outputFile
       << " (" << (fileSize / 1024 / 1024) << " MB approx, "
       << checkpointCount << " checkpoints)";
+
+  return true;
+}
+
+bool DaemonCommandsHandler::export_headers(const std::vector<std::string> &args)
+{
+  std::string outputFile;
+
+  if (args.empty())
+  {
+    boost::filesystem::path headersPath = boost::filesystem::current_path();
+    headersPath /= "conceal-headers.bin";
+    outputFile = headersPath.string();
+  }
+  else
+  {
+    outputFile = args.front();
+  }
+
+  logger(logging::INFO) << "Exporting headers to " << outputFile;
+
+  uint32_t blockchainHeight = m_core.get_current_blockchain_height();
+  if (blockchainHeight == 0)
+  {
+    logger(logging::ERROR) << "Blockchain not initialized";
+    return true;
+  }
+
+  // Find last valid block (not NULL_HASH)
+  uint32_t topHeight = blockchainHeight - 1;
+  while (topHeight > 0 && m_core.getBlockIdByHeight(topHeight) == cn::NULL_HASH)
+  {
+    topHeight--;
+  }
+
+  if (topHeight == 0 && m_core.getBlockIdByHeight(0) == cn::NULL_HASH)
+  {
+    logger(logging::ERROR) << "No valid blocks found in blockchain";
+    return true;
+  }
+
+  logger(logging::INFO) << "Blockchain reported height: " << blockchainHeight
+                        << ", last valid block height: " << topHeight;
+
+  std::ofstream file(outputFile, std::ios::binary);
+  if (!file.is_open())
+  {
+    logger(logging::ERROR) << "Failed to open " << outputFile;
+    return true;
+  }
+
+  // Write magic bytes "CCHD" (Conceal Headers)
+  uint32_t magic = 0x43434844;
+  file.write(reinterpret_cast<char *>(&magic), sizeof(magic));
+
+  // Write version
+  uint32_t version = 1;
+  file.write(reinterpret_cast<char *>(&version), sizeof(version));
+
+  // Write total header count (topHeight + 1)
+  uint32_t count = topHeight + 1;
+  file.write(reinterpret_cast<char *>(&count), sizeof(count));
+
+  logger(logging::INFO) << "Exporting " << count << " headers...";
+
+  // Write genesis hash for verification
+  crypto::Hash genesisHash = m_core.getBlockIdByHeight(0);
+  file.write(reinterpret_cast<char *>(&genesisHash), sizeof(genesisHash));
+
+  // Write each header
+  for (uint32_t h = 0; h <= topHeight; ++h)
+  {
+    // Verify block exists before trying to export
+    crypto::Hash blockHash = m_core.getBlockIdByHeight(h);
+    if (blockHash == cn::NULL_HASH)
+    {
+      logger(logging::WARNING) << "Block at height " << h << " is NULL_HASH, stopping export";
+      break;
+    }
+
+    cn::BlockHeaderPOD hdr = m_core.getBlockHeader(h);
+
+    // Write header data in compact binary format
+    file.write(reinterpret_cast<const char *>(&hdr.height), sizeof(hdr.height));
+    file.write(reinterpret_cast<const char *>(&hdr.majorVersion), sizeof(hdr.majorVersion));
+    file.write(reinterpret_cast<const char *>(&hdr.minorVersion), sizeof(hdr.minorVersion));
+    file.write(reinterpret_cast<const char *>(&hdr.timestamp), sizeof(hdr.timestamp));
+    file.write(reinterpret_cast<const char *>(&hdr.nonce), sizeof(hdr.nonce));
+    file.write(reinterpret_cast<const char *>(&hdr.cumulativeDifficulty), sizeof(hdr.cumulativeDifficulty));
+    file.write(reinterpret_cast<const char *>(&hdr.alreadyGeneratedCoins), sizeof(hdr.alreadyGeneratedCoins));
+    file.write(reinterpret_cast<const char *>(&hdr.previousBlockHash), sizeof(hdr.previousBlockHash));
+
+    // Write block hash for quick lookup
+    file.write(reinterpret_cast<const char *>(&blockHash), sizeof(blockHash));
+
+    if (h % 100000 == 0 && h > 0)
+    {
+      logger(logging::INFO) << "Exported header " << h << " of " << topHeight;
+    }
+  }
+
+  file.close();
+
+  // Get actual file size
+  std::ifstream checkFile(outputFile, std::ios::binary | std::ios::ate);
+  uint64_t fileSize = checkFile.tellg();
+  checkFile.close();
+
+  logger(logging::INFO, logging::BRIGHT_GREEN)
+      << "Successfully exported headers to " << outputFile
+      << " (" << (fileSize / 1024 / 1024) << " MB)";
 
   return true;
 }

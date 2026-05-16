@@ -10,10 +10,8 @@ if(ENABLE_MDBX)
   file(GLOB_RECURSE MDBX_STORAGE_FILES Storage/*)
 endif()
 
-# ── New: Blockchain directory (split out from CryptoNoteCore) ──────────────
 file(GLOB_RECURSE Blockchain_FILES Blockchain/*)
-
-# ── Existing globs (CryptoNoteCore no longer includes Blockchain files) ────
+file(GLOB_RECURSE SPV_FILES SPV/*)
 file(GLOB_RECURSE BlockchainExplorer BlockchainExplorer/*)
 file(GLOB_RECURSE Common Common/*)
 file(GLOB_RECURSE crypto crypto/*)
@@ -58,6 +56,7 @@ if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
 endif()
 
 source_group("Blockchain" FILES ${Blockchain_FILES})
+source_group("SPV" FILES ${SPV_FILES})  # Changed from LightClient to SPV
 
 # ── Libraries ──────────────────────────────────────────────────────────────
 add_library(Blockchain STATIC ${Blockchain_FILES})
@@ -91,6 +90,18 @@ if(ENABLE_MDBX AND MDBX_STORAGE_FILES)
   endif()
 endif()
 
+# SPV static library (replaces LightClientLib)
+add_library(SPVLib STATIC ${SPV_FILES})
+target_link_libraries(SPVLib PUBLIC 
+    Common 
+    CryptoNoteCore 
+    Serialization 
+    crypto 
+    ${Boost_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+add_dependencies(SPVLib version)
+
 # Sidechain static library
 add_library(SidechainLib STATIC ${SIDECHAIN_FILES})
 target_link_libraries(SidechainLib PUBLIC Blockchain NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
@@ -113,6 +124,7 @@ add_executable(Optimizer ${Optimizer})
 add_executable(BoltClientWallet ${BOLT_TUI_FILES})
 add_executable(BoltRPC ${BOLTRPC_FILES})
 add_executable(Sidechain ${SIDECHAIN_FILES})
+# Note: conceal-light executable removed - use conceal-rpc --light instead
 
 if (MSVC)
   target_link_libraries(System ws2_32)
@@ -144,7 +156,23 @@ target_link_libraries(BoltClientWallet BoltSync BoltCore NodeRpcProxy Rpc Http S
   ${CMAKE_THREAD_LIBS_INIT}
 )
 
-target_link_libraries(BoltRPC BoltSync BoltCore BoltHttp Mnemonics NodeRpcProxy Rpc Http System Blockchain CryptoNoteCore Serialization Logging
+# BoltRPC now links against SPVLib for light mode support
+target_link_libraries(BoltRPC 
+  SPVLib
+  BoltSync 
+  BoltCore 
+  BoltHttp 
+  Mnemonics 
+  NodeRpcProxy 
+  Rpc 
+  Http 
+  System 
+  Blockchain 
+  CryptoNoteCore 
+  Serialization 
+  Logging
+  Common
+  crypto
   -Wl,--start-group
       Common
       crypto
@@ -183,6 +211,7 @@ add_dependencies(PaymentGateService version)
 add_dependencies(P2P version)
 add_dependencies(BoltRPC version)
 add_dependencies(Sidechain version)
+add_dependencies(Storage version)
 
 set_property(TARGET ConcealWallet PROPERTY OUTPUT_NAME "concealwallet")
 set_property(TARGET PaymentGateService PROPERTY OUTPUT_NAME "walletd")

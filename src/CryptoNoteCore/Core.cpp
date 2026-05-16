@@ -1146,4 +1146,10 @@ void core::setCheckpointGeneratedCallback(std::function<void(uint32_t, const cry
 {
   m_blockchain.setCheckpointGeneratedCallback(std::move(callback));
 }
+
+BlockHeaderPOD core::getBlockHeader(uint32_t height) const
+{
+  return m_blockchain.getBlockHeader(height);
+}
+
 }
