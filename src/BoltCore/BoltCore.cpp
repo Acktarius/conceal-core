@@ -311,5 +311,23 @@ namespace BoltCore
   {
     return m_impl->spendPub;
   }
+  void Wallet::addPendingOutgoing(const crypto::Hash &txHash, uint64_t amount, uint64_t fee)
+  {
+    m_impl->balanceTracker.addPendingOutgoing(txHash, amount, fee);
+  }
 
+  void Wallet::confirmTransaction(const crypto::Hash &txHash, uint32_t blockHeight)
+  {
+    m_impl->balanceTracker.confirmTransaction(txHash, blockHeight);
+  }
+
+  uint64_t Wallet::getPendingOutgoingAmount() const
+  {
+    return m_impl->balanceTracker.getPendingOutgoingAmount();
+  }
+
+  std::vector<BalanceTracker::PendingTx> Wallet::getPendingTransactions() const
+  {
+    return m_impl->balanceTracker.getPendingTransactions();
+  }
 } // namespace BoltCore

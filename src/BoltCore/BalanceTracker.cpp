@@ -101,4 +101,49 @@ namespace BoltCore
   {
     return m_total.pending;
   }
+
+  void BalanceTracker::addPendingOutgoing(const crypto::Hash &txHash, uint64_t amount, uint64_t fee)
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+
+    PendingTx pending;
+    pending.txHash = txHash;
+    pending.amount = amount;
+    pending.fee = fee;
+    pending.timestamp = std::time(nullptr);
+
+    m_pendingOutgoing[txHash] = pending;
+    m_pendingOutgoingAmount += amount + fee;
+  }
+
+  void BalanceTracker::confirmTransaction(const crypto::Hash &txHash, uint32_t blockHeight)
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+
+    auto it = m_pendingOutgoing.find(txHash);
+    if (it != m_pendingOutgoing.end())
+    {
+      m_pendingOutgoingAmount -= it->second.amount + it->second.fee;
+      m_pendingOutgoing.erase(it);
+    }
+  }
+
+  uint64_t BalanceTracker::getPendingOutgoingAmount() const
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    return m_pendingOutgoingAmount;
+  }
+
+  std::vector<BalanceTracker::PendingTx> BalanceTracker::getPendingTransactions() const
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+
+    std::vector<PendingTx> result;
+    result.reserve(m_pendingOutgoing.size());
+    for (const auto &pair : m_pendingOutgoing)
+    {
+      result.push_back(pair.second);
+    }
+    return result;
+  }
 }

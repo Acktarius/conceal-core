@@ -878,11 +878,14 @@ namespace BoltRPC
       }
     }
 
+    uint64_t pendingOutgoing = m_wallet.getPendingOutgoingAmount();
+
     std::ostringstream ss;
-    ss << R"({"availableBalance":)" << bal.actual + accruedInterest // Add interest to available
+    ss << R"({"availableBalance":)" << bal.actual + accruedInterest - pendingOutgoing
        << R"(,"lockedAmount":)" << bal.pending
        << R"(,"lockedDepositBalance":)" << bal.lockedDeposit
        << R"(,"unlockedDepositBalance":)" << bal.unlockedDeposit
+       << R"(,"pendingOutgoing":)" << pendingOutgoing
        << R"(,"accruedInterest":)" << accruedInterest
        << R"(,"currentHeight":)" << currentHeight
        << "}";
@@ -1042,48 +1045,40 @@ namespace BoltRPC
     if (!result.success)
       throw std::runtime_error(result.error);
 
+    // Add to pending transactions IMMEDIATELY (before blockchain confirmation)
+    crypto::Hash tx_hash;
+    if (common::podFromHex(result.txHash, tx_hash))
+    {
+      uint64_t totalAmount = 0;
+      for (const auto &t : transfers)
+        totalAmount += t.amount;
+
+      m_wallet.addPendingOutgoing(tx_hash, totalAmount, result.fee);
+      m_logger(logging::INFO) << "Transaction submitted - pending: " << result.txHash;
+    }
+
     submitTransaction(result);
 
-    // Light mode: Verify the transaction via SPV after submission
-    if (m_lightMode && m_spvWallet && !result.txHash.empty())
+    // Trigger immediate mempool scan to detect any incoming transactions
+    if (m_syncMonitor)
     {
-      crypto::Hash tx_hash;
-      if (common::podFromHex(result.txHash, tx_hash))
-      {
-        m_logger(logging::INFO) << "Verifying transaction via SPV: " << result.txHash;
-
-        // Wait a few seconds for the transaction to be mined (in light mode, we rely on remote node)
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-
-        SPV::TransactionProof proof;
-        if (m_spvWallet->getTransactionProof(tx_hash, proof))
-        {
-          if (m_spvWallet->verifyTransaction(proof))
-          {
-            m_logger(logging::INFO) << "Transaction verified via SPV in block " << proof.block_height;
-          }
-          else
-          {
-            m_logger(logging::WARNING) << "Transaction verification failed: " << result.txHash;
-          }
-        }
-        else
-        {
-          // Transaction may still be in mempool, not yet mined
-          m_logger(logging::INFO) << "Transaction submitted but not yet confirmed (still in mempool)";
-        }
-      }
+      m_syncMonitor->scanMempool();
     }
 
     std::ostringstream ss;
-    ss << R"({"transactionHash":")" << result.txHash << R"("})";
+    ss << R"({"transactionHash":")" << result.txHash << R"(","pending":true})";
     return ss.str();
   }
 
   std::string BoltRpcServer::methodGetTransactions(const common::JsonValue &params)
   {
     std::lock_guard<std::mutex> lock(m_walletMutex);
+
+    // Get confirmed outputs
     auto outputs = m_wallet.getOutputs();
+
+    // Get pending outgoing transactions
+    auto pendingOutgoing = m_wallet.getPendingTransactions();
 
     // Pagination support
     uint32_t firstBlockIndex = params.contains("firstBlockIndex")
@@ -1093,40 +1088,78 @@ namespace BoltRPC
                               ? static_cast<uint32_t>(params("blockCount").getInteger())
                               : 0;
 
-    uint32_t totalItems = static_cast<uint32_t>(outputs.size());
-
-    // Sort by block height descending (newest first) for predictable pagination
-    std::sort(outputs.begin(), outputs.end(),
-              [](const BoltCore::OutputInfo &a, const BoltCore::OutputInfo &b)
-              { return a.blockHeight > b.blockHeight; });
-
     std::ostringstream ss;
     ss << R"({"items":[)";
     bool first = true;
     uint32_t index = 0;
-    for (const auto &out : outputs)
+
+    // Add pending outgoing transactions first (they appear at the top)
+    for (const auto &pending : pendingOutgoing)
     {
-      // Skip items before the requested start index
+      // Skip pagination
       if (index < firstBlockIndex)
       {
         ++index;
         continue;
       }
-      // Stop if we've reached the requested page size
       if (blockCount > 0 && (index - firstBlockIndex) >= blockCount)
         break;
 
       if (!first)
         ss << ",";
       first = false;
-      ss << R"({"hash":")" << common::podToHex(out.txHash) << R"(")"
-         << R"(,"amount":)" << out.amount
-         << R"(,"blockHeight":)" << out.blockHeight
-         << R"(,"spent":)" << (out.spent ? "true" : "false")
-         << R"(,"isDeposit":)" << (out.isDeposit ? "true" : "false")
+      ss << R"({"hash":")" << common::podToHex(pending.txHash) << R"(")"
+         << R"(,"amount":)" << pending.amount + pending.fee
+         << R"(,"fee":)" << pending.fee
+         << R"(,"blockHeight":0)"
+         << R"(,"confirmations":0)"
+         << R"(,"isPending":true)"
+         << R"(,"timestamp":)" << pending.timestamp
          << "}";
       ++index;
     }
+
+    // Sort confirmed outputs by block height descending (newest first)
+    std::vector<BoltCore::OutputInfo> sortedOutputs = outputs;
+    std::sort(sortedOutputs.begin(), sortedOutputs.end(),
+              [](const BoltCore::OutputInfo &a, const BoltCore::OutputInfo &b)
+              { return a.blockHeight > b.blockHeight; });
+
+    // Add confirmed outputs
+    for (const auto &out : sortedOutputs)
+    {
+      if (index < firstBlockIndex)
+      {
+        ++index;
+        continue;
+      }
+      if (blockCount > 0 && (index - firstBlockIndex) >= blockCount)
+        break;
+
+      if (!first)
+        ss << ",";
+      first = false;
+
+      uint32_t currentHeight = m_wallet.getCurrentHeight();
+      uint32_t confirmations = (out.blockHeight > 0 && currentHeight > out.blockHeight)
+                                   ? currentHeight - out.blockHeight
+                                   : 0;
+
+      ss << R"({"hash":")" << common::podToHex(out.txHash) << R"(")"
+         << R"(,"amount":)" << out.amount
+         << R"(,"fee":0)"
+         << R"(,"blockHeight":)" << out.blockHeight
+         << R"(,"confirmations":)" << confirmations
+         << R"(,"isPending":false)"
+         << R"(,"isDeposit":)" << (out.isDeposit ? "true" : "false")
+         << R"(,"spent":)" << (out.spent ? "true" : "false")
+         << R"(,"timestamp":0)"
+         << "}";
+      ++index;
+    }
+
+    uint32_t totalItems = static_cast<uint32_t>(pendingOutgoing.size() + sortedOutputs.size());
+
     ss << R"(],"totalItems":)" << totalItems
        << R"(,"firstBlockIndex":)" << firstBlockIndex
        << R"(,"blockCount":)" << (blockCount > 0 ? blockCount : totalItems) << "}";

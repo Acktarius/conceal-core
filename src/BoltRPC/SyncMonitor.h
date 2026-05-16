@@ -8,6 +8,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unordered_set>
+#include <mutex>
 
 #include "BoltCore/BoltCore.h"
 #include "BoltSync/BoltSync.h"
@@ -47,6 +49,8 @@ namespace BoltRPC
       return m_lastScannedHeight.load(std::memory_order_relaxed) < m_node.getLastLocalBlockHeight();
     }
 
+    void scanMempool();
+
   private:
     void runLoop();
 
@@ -57,6 +61,8 @@ namespace BoltRPC
     std::string m_dataDir;
     std::atomic<uint32_t> m_lastScannedHeight;
     OutputCallback m_onNewOutputs;
+    std::mutex m_mempoolMutex;
+    std::unordered_set<crypto::Hash> m_processedMempoolTxs;
 
     std::atomic<bool> m_stop{false};
     std::thread m_thread;

@@ -109,6 +109,10 @@ public:
   void getPoolTransactions(uint64_t timestampBegin, uint64_t timestampEnd, uint32_t transactionsNumberLimit, std::vector<TransactionDetails>& transactions, uint64_t& transactionsNumberWithinTimestamps, const Callback& callback) override;
   void isSynchronized(bool& syncStatus, const Callback& callback) override;
 
+  // Sync version
+  virtual std::vector<crypto::Hash> getPoolTransactions() override;
+  bool getTransactionSync(const crypto::Hash &txHash, cn::Transaction &tx) override;
+
   unsigned int rpcTimeout() const { return m_rpcTimeout; }
   void rpcTimeout(unsigned int val) { m_rpcTimeout = val; }
 
