@@ -139,6 +139,14 @@ namespace BoltRPC
 
   void BoltRpcServer::stop()
   {
+    // Stop SyncMonitor first — it holds a reference to m_node which will be
+    // deleted by the caller immediately after stop() returns.
+    if (m_syncMonitor)
+    {
+      m_syncMonitor->stop();
+      m_syncMonitor.reset();
+    }
+
     // Stop auto-save timer
     m_autoSaveRunning.store(false, std::memory_order_relaxed);
     if (m_autoSaveThread.joinable())
