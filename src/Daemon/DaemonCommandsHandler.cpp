@@ -592,6 +592,20 @@ bool DaemonCommandsHandler::export_snapshot(const std::vector<std::string> &args
 
   return true;
 }
+#pragma pack(push, 1)
+struct ExportedHeader
+{
+  uint32_t height;
+  uint8_t majorVersion;
+  uint8_t minorVersion;
+  uint64_t timestamp;
+  uint32_t nonce;
+  uint64_t cumulativeDifficulty;
+  uint64_t alreadyGeneratedCoins;
+  crypto::Hash previousBlockHash;
+  crypto::Hash blockHash;
+};
+#pragma pack(pop)
 
 bool DaemonCommandsHandler::export_headers(const std::vector<std::string> &args)
 {
@@ -658,7 +672,7 @@ bool DaemonCommandsHandler::export_headers(const std::vector<std::string> &args)
   crypto::Hash genesisHash = m_core.getBlockIdByHeight(0);
   file.write(reinterpret_cast<char *>(&genesisHash), sizeof(genesisHash));
 
-  // Write each header
+  // Write each header using packed struct
   for (uint32_t h = 0; h <= topHeight; ++h)
   {
     // Verify block exists before trying to export
@@ -671,18 +685,18 @@ bool DaemonCommandsHandler::export_headers(const std::vector<std::string> &args)
 
     cn::BlockHeaderPOD hdr = m_core.getBlockHeader(h);
 
-    // Write header data in compact binary format
-    file.write(reinterpret_cast<const char *>(&hdr.height), sizeof(hdr.height));
-    file.write(reinterpret_cast<const char *>(&hdr.majorVersion), sizeof(hdr.majorVersion));
-    file.write(reinterpret_cast<const char *>(&hdr.minorVersion), sizeof(hdr.minorVersion));
-    file.write(reinterpret_cast<const char *>(&hdr.timestamp), sizeof(hdr.timestamp));
-    file.write(reinterpret_cast<const char *>(&hdr.nonce), sizeof(hdr.nonce));
-    file.write(reinterpret_cast<const char *>(&hdr.cumulativeDifficulty), sizeof(hdr.cumulativeDifficulty));
-    file.write(reinterpret_cast<const char *>(&hdr.alreadyGeneratedCoins), sizeof(hdr.alreadyGeneratedCoins));
-    file.write(reinterpret_cast<const char *>(&hdr.previousBlockHash), sizeof(hdr.previousBlockHash));
+    ExportedHeader exh;
+    exh.height = hdr.height;
+    exh.majorVersion = hdr.majorVersion;
+    exh.minorVersion = hdr.minorVersion;
+    exh.timestamp = hdr.timestamp;
+    exh.nonce = hdr.nonce;
+    exh.cumulativeDifficulty = hdr.cumulativeDifficulty;
+    exh.alreadyGeneratedCoins = hdr.alreadyGeneratedCoins;
+    exh.previousBlockHash = hdr.previousBlockHash;
+    exh.blockHash = blockHash;
 
-    // Write block hash for quick lookup
-    file.write(reinterpret_cast<const char *>(&blockHash), sizeof(blockHash));
+    file.write(reinterpret_cast<const char *>(&exh), sizeof(ExportedHeader));
 
     if (h % 100000 == 0 && h > 0)
     {

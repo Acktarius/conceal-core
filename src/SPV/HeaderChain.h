@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <map>
 #include "crypto/hash.h"
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 
@@ -49,12 +50,21 @@ namespace SPV
     // Persistence
     bool load(const std::string &filename);
     bool save(const std::string &filename);
+    void setFilename(const std::string &filename) { m_filename = filename; }
+    const std::string &getFilename() const { return m_filename; }
 
     // SPV verification
     bool verifyTransaction(const TransactionProof &proof) const;
 
+    // Checkpoint verification
+    bool verifyCheckpoint(uint32_t height, const crypto::Hash &expectedHash);
+    bool verifyAllCheckpoints();
+
   private:
     std::vector<BlockHeader> m_headers;
     uint32_t m_height;
+    std::string m_filename;
+
+    static std::map<uint32_t, crypto::Hash> getCheckpoints();
   };
 }

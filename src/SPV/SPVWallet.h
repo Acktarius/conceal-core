@@ -40,12 +40,18 @@ namespace SPV
                      uint32_t toHeight,
                      std::vector<std::pair<crypto::Hash, uint64_t>> &outputs);
 
+    void setDefaultPath(const std::string& path) { m_defaultPath = path; }
+    bool saveHeaders() { return !m_defaultPath.empty() && m_chain.save(m_defaultPath); }
+
+    bool verifyCheckpoints() { return m_chain.verifyAllCheckpoints(); }
+
   private:
     RemoteNode *m_node; // Raw pointer for C++11
     HeaderChain m_chain;
     std::string m_remoteHost;
     uint16_t m_remotePort;
     std::string m_dataDir;
+    std::string m_defaultPath;
 
     bool sendJsonRpc(const std::string &method, const std::string &params, std::string &response);
     bool getBlockHeaderByHeight(uint32_t height, BlockHeader &header);

@@ -13,7 +13,7 @@ using namespace common;
 namespace SPV
 {
   SPVWallet::SPVWallet(const std::string &remoteHost, uint16_t remotePort)
-      : m_remoteHost(remoteHost), m_remotePort(remotePort), m_node(NULL)
+      : m_remoteHost(remoteHost), m_remotePort(remotePort), m_node(NULL), m_defaultPath("")
   {
     m_node = new RemoteNode(remoteHost, remotePort);
   }
@@ -25,12 +25,23 @@ namespace SPV
 
   bool SPVWallet::initFromBootstrap(const std::string &headersFile)
   {
+    m_chain.setFilename(headersFile);
     if (!m_chain.load(headersFile))
     {
       std::cerr << "Failed to load headers from " << headersFile << std::endl;
       return false;
     }
     std::cout << "Loaded " << m_chain.getHeight() + 1 << " headers from " << headersFile << std::endl;
+
+    // If this was a bootstrap file, save to default location for next time
+    if (!m_defaultPath.empty() && headersFile != m_defaultPath)
+    {
+      if (m_chain.save(m_defaultPath))
+      {
+        std::cout << "Cached headers to " << m_defaultPath << std::endl;
+      }
+    }
+
     return true;
   }
 
@@ -154,30 +165,22 @@ namespace SPV
 
   bool SPVWallet::syncNewHeaders()
   {
+    // Don't sync headers one by one - just use the bootstrap file
+    // Check if remote height is significantly ahead of our headers
     uint32_t localHeight = m_chain.getHeight();
     uint32_t remoteHeight = getNodeHeight();
 
     if (remoteHeight <= localHeight)
       return true;
 
-    std::cout << "Syncing headers from " << localHeight + 1 << " to " << remoteHeight << std::endl;
-
-    for (uint32_t h = localHeight + 1; h <= remoteHeight; ++h)
+    // If we're more than 1000 blocks behind, suggest re-bootstrapping
+    if (remoteHeight - localHeight > 1000)
     {
-      BlockHeader header;
-      if (!getBlockHeaderByHeight(h, header))
-        return false;
-
-      if (!verifyPoW(header))
-        return false;
-
-      if (!m_chain.addHeader(header))
-        return false;
-
-      if (h % 1000 == 0)
-        std::cout << "Synced to height " << h << std::endl;
+      std::cerr << "Warning: Local headers are " << (remoteHeight - localHeight)
+                << " blocks behind. Consider updating your bootstrap file." << std::endl;
     }
 
+    // For now, just warn - don't sync one by one
     return true;
   }
 
