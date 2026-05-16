@@ -572,8 +572,8 @@ int main(int argc, char *argv[])
 
   logger(logging::INFO) << "Press Ctrl+C to stop";
 
-  while (!stopRequested)
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  while (!stopRequested.load(std::memory_order_relaxed))
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   logger(logging::INFO) << "Shutting down...";
 
