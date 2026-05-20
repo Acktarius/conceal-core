@@ -18,14 +18,12 @@
 
 #include <parallel_hashmap/phmap.h>
 
-#include "Blockchain/BlockIndex.h"
 #include "Blockchain/BlockchainIndices.h"
 #include "Blockchain/BlockchainMessages.h"
 #include "Blockchain/Checkpoints.h"
 #include "Blockchain/DepositIndex.h"
 #include "Blockchain/IBlockchainStorageObserver.h"
 #include "Blockchain/ITransactionValidator.h"
-#include "Blockchain/SwappedVector.h"
 #include "Blockchain/UpgradeDetector.h"
 #include "Common/ObserverManager.h"
 #include "Common/Util.h"
@@ -44,29 +42,22 @@
 
 namespace cn
 {
-
-  // ── Forward declarations ────────────────────────────────────────────────────
+  // Forward declarations
   struct NOTIFY_REQUEST_GET_OBJECTS_request;
   struct NOTIFY_RESPONSE_GET_OBJECTS_request;
   struct COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_request;
   struct COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_response;
   struct COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_outs_for_amount;
 
-  class BlockCacheSerializer;
   class BlockchainIndicesSerializer;
 
   using cn::BlockInfo;
   using phmap::parallel_flat_hash_map;
 
-  // ═══════════════════════════════════════════════════════════════════════════════
-  //  Blockchain
-  // ═══════════════════════════════════════════════════════════════════════════════
-
   class Blockchain : public cn::ITransactionValidator
   {
   public:
-    // ── Nested types ──────────────────────────────────────────────────────
-
+    // Nested types
     struct TransactionIndex
     {
       uint32_t block;
@@ -113,40 +104,32 @@ namespace cn
 
     using CheckpointGeneratedCallback = std::function<void(uint32_t height, const crypto::Hash &hash)>;
 
-    // ── Construction / destruction ────────────────────────────────────────
-
+    // Construction / destruction
     Blockchain(const Currency &currency, tx_memory_pool &tx_pool,
-               logging::ILogger &logger, bool blockchainIndexesEnabled,
-               bool blockchainAutosaveEnabled, bool useMdbx = false);
+               logging::ILogger &logger, bool blockchainIndexesEnabled);
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────
-
+    // Lifecycle
     bool init() { return init(tools::getDefaultDataDirectory(), true, m_testnet); }
     bool init(const std::string &config_folder, bool load_existing, bool testnet);
     bool deinit();
     bool resetAndSetGenesisBlock(const Block &b);
 
-    // ── Cache management ──────────────────────────────────────────────────
-
+    // Cache management
     bool rebuildCache();
-    bool rebuildBlocks();
     bool storeCache();
 
-    // ── Observer pattern ──────────────────────────────────────────────────
-
+    // Observer pattern
     bool addObserver(IBlockchainStorageObserver *observer);
     bool removeObserver(IBlockchainStorageObserver *observer);
 
-    // ── ITransactionValidator interface ────────────────────────────────────
-
+    // ITransactionValidator interface
     bool checkTransactionInputs(const Transaction &tx, BlockInfo &maxUsedBlock) override;
     bool checkTransactionInputs(const Transaction &tx, BlockInfo &maxUsedBlock,
                                 BlockInfo &lastFailed) override;
     bool haveSpentKeyImages(const Transaction &tx) override;
     bool checkTransactionSize(size_t blobSize) override;
 
-    // ── Block storage access ──────────────────────────────────────────────
-
+    // Block storage access
     size_t blocksSize() const;
     bool blocksEmpty() const;
     const BlockEntry &blocksAt(size_t i) const;
@@ -155,8 +138,7 @@ namespace cn
     void blocksClear();
     BlockHeaderPOD getBlockHeader(uint32_t height) const;
 
-    // ── Chain state queries ───────────────────────────────────────────────
-
+    // Chain state queries
     uint32_t getCurrentBlockchainHeight();
     crypto::Hash getTailId();
     crypto::Hash getTailId(uint32_t &height);
@@ -173,8 +155,7 @@ namespace cn
     uint64_t coinsEmittedAtHeight(uint64_t height);
     uint8_t get_block_major_version_for_height(uint64_t height) const;
 
-    // ── Transaction queries ───────────────────────────────────────────────
-
+    // Transaction queries
     bool getBlockContainingTransaction(const crypto::Hash &txId,
                                        crypto::Hash &blockId, uint32_t &blockHeight);
     bool getTransactionOutputGlobalIndexes(const crypto::Hash &tx_id,
@@ -188,23 +169,20 @@ namespace cn
     bool have_tx_keyimg_as_spent(const crypto::KeyImage &key_im);
     bool haveTransactionKeyImagesAsSpent(const Transaction &tx);
 
-    // ── Multisignature queries ────────────────────────────────────────────
-
+    // Multisignature queries
     bool get_out_by_msig_gindex(uint64_t amount, uint64_t gindex,
                                 MultisignatureOutput &out);
     bool getMultisigOutputReference(const MultisignatureInput &txInMultisig,
                                     std::pair<crypto::Hash, size_t> &outputReference);
 
-    // ── Block metadata queries ────────────────────────────────────────────
-
+    // Block metadata queries
     bool getAlreadyGeneratedCoins(const crypto::Hash &hash, uint64_t &generatedCoins);
     bool getBlockSize(const crypto::Hash &hash, size_t &size);
     uint64_t blockDifficulty(size_t i);
     difficulty_type difficultyAtHeight(uint64_t height);
     uint64_t getCurrentCumulativeBlocksizeLimit() const;
 
-    // ── Difficulty ────────────────────────────────────────────────────────
-
+    // Difficulty
     difficulty_type getDifficultyForNextBlock();
     difficulty_type calculateDifficulty(uint8_t majorVersion, uint64_t blockIndex,
                                         const std::vector<uint64_t> &timestamps,
@@ -219,8 +197,7 @@ namespace cn
                                        std::vector<difficulty_type> &cumulativeDifficulties);
     bool loadBlockEntry(uint64_t height, BlockEntry &entry);
 
-    // ── Index queries ─────────────────────────────────────────────────────
-
+    // Index queries
     bool getGeneratedTransactionsNumber(uint32_t height, uint64_t &generatedTransactions);
     bool getBlockIdsByTimestamp(uint64_t timestampBegin, uint64_t timestampEnd,
                                 uint32_t blocksNumberLimit,
@@ -229,27 +206,23 @@ namespace cn
     bool getOrphanBlockIdsByHeight(uint32_t height,
                                    std::vector<crypto::Hash> &blockHashes);
 
-    // ── Random output selection (ring signature mixins) ───────────────────
-
+    // Random output selection (ring signature mixins)
     bool getRandomOutsByAmount(
         const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_request &req,
         COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_response &res);
 
-    // ── Deposit tracking ──────────────────────────────────────────────────
-
+    // Deposit tracking
     uint64_t fullDepositAmount() const;
     uint64_t depositAmountAtHeight(size_t height) const;
     uint64_t depositInterestAtHeight(size_t height) const;
 
-    // ── Block addition / reorg ────────────────────────────────────────────
-
+    // Block addition / reorg
     bool addNewBlock(const Block &bl_, block_verification_context &bvc);
     bool rollbackBlockchainTo(uint32_t height);
     bool getAlternativeBlocks(std::list<Block> &blocks);
     uint32_t getAlternativeBlocksCount();
 
-    // ── Sync helpers ──────────────────────────────────────────────────────
-
+    // Sync helpers
     std::vector<crypto::Hash> buildSparseChain();
     std::vector<crypto::Hash> buildSparseChain(const crypto::Hash &startBlockId);
     uint32_t findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids);
@@ -265,13 +238,11 @@ namespace cn
     void invalidateSparseChainCache();
     std::vector<crypto::Hash> getCachedSparseChain();
 
-    // ── P2P handlers ──────────────────────────────────────────────────────
-
+    // P2P handlers
     bool handleGetObjects(NOTIFY_REQUEST_GET_OBJECTS_request &arg,
                           NOTIFY_RESPONSE_GET_OBJECTS_request &rsp);
 
-    // ── Checkpoints ───────────────────────────────────────────────────────
-
+    // Checkpoints
     void setCheckpoints(Checkpoints &&chk_pts) { m_checkpoints = std::move(chk_pts); }
     CheckpointList getCheckpointList(uint32_t startHeight, uint32_t endHeight) const
     {
@@ -283,33 +254,28 @@ namespace cn
     }
     void setCheckpointGeneratedCallback(CheckpointGeneratedCallback callback);
 
-    // ── Message queue ─────────────────────────────────────────────────────
-
+    // Message queue
     bool addMessageQueue(MessageQueue<BlockchainMessage> &messageQueue);
     bool removeMessageQueue(MessageQueue<BlockchainMessage> &messageQueue);
 
-    // ── Validation (public) ───────────────────────────────────────────────
-
+    // Validation (public)
     bool check_tx_outputs(const Transaction &tx, uint32_t height) const;
     bool checkTransactionInputs(const Transaction &tx,
                                 uint32_t &pmax_used_block_height,
                                 crypto::Hash &max_used_block_id,
                                 BlockInfo *tail = nullptr);
 
-    // ── Debug ─────────────────────────────────────────────────────────────
-
+    // Debug
     void print_blockchain(uint64_t start_index, uint64_t end_index);
     void print_blockchain_index(bool print_all);
     void print_blockchain_outs(const std::string &file);
     std::string printDatabaseStats() const;
 
-    // ── Serialisation ─────────────────────────────────────────────────────
-
+    // Serialisation
     template <class archive_t>
     void serialize(archive_t &ar, const unsigned int version);
 
-    // ── Template helpers (public, used by P2P / RPC) ──────────────────────
-
+    // Template helpers (public, used by P2P / RPC)
     template <class visitor_t>
     bool scanOutputKeysForIndexes(const KeyInput &tx_in_to_key, visitor_t &vis,
                                   uint32_t *pmax_related_block_height = nullptr);
@@ -327,13 +293,15 @@ namespace cn
     void getTransactions(const t_ids_container &txs_ids, t_tx_container &txs,
                          t_missed_container &missed_txs, bool checkTxPool = false);
 
-    // ── Legacy public member ──────────────────────────────────────────────
+    CryptoNote::MDBXBlockchainStorage *getMdbxStorage() const { return m_mdbxStorage.get(); }
 
+    void setEnableWalletIndexes(bool enable);
+
+    // Legacy public member
     uint8_t blockMajorVersion;
 
   private:
-    // ── Private nested types ──────────────────────────────────────────────
-
+    // Private nested types
     struct MultisignatureOutputUsage
     {
       TransactionIndex transactionIndex;
@@ -354,9 +322,7 @@ namespace cn
       BlockEntry entry;
     };
 
-    // ── Type aliases ──────────────────────────────────────────────────────
-
-    using Blocks = SwappedVector<BlockEntry>;
+    // Type aliases
     using key_images_container = parallel_flat_hash_map<crypto::KeyImage, uint32_t>;
     using blocks_ext_by_hash = parallel_flat_hash_map<crypto::Hash, BlockEntry>;
     using outputs_container = parallel_flat_hash_map<uint64_t,
@@ -366,20 +332,16 @@ namespace cn
     using BlockMap = parallel_flat_hash_map<crypto::Hash, uint32_t>;
     using TransactionMap = parallel_flat_hash_map<crypto::Hash, TransactionIndex>;
 
-    // ── Constants ─────────────────────────────────────────────────────────
-
+    // Constants
     static constexpr size_t MDBX_CACHE_SIZE = 256;
     static constexpr uint32_t SPARSE_CHAIN_CACHE_DURATION_SECONDS = 10;
     static constexpr uint32_t SPARSE_CHAIN_CACHE_BLOCK_DELTA = 100;
 
-    // ── Friends ───────────────────────────────────────────────────────────
-
-    friend class BlockCacheSerializer;
+    // Friends
     friend class BlockchainIndicesSerializer;
     friend class LockedBlockchainStorage;
 
-    // ── Core members ──────────────────────────────────────────────────────
-
+    // Core members
     bool m_testnet = false;
     const Currency &m_currency;
     tx_memory_pool &m_tx_pool;
@@ -391,23 +353,17 @@ namespace cn
     std::atomic<bool> m_is_in_checkpoint_zone;
     logging::LoggerRef logger;
 
-    // ── Storage backends ──────────────────────────────────────────────────
-
+    // Storage backend
     std::unique_ptr<CryptoNote::MDBXBlockchainStorage> m_mdbxStorage;
-    bool m_useMdbx = false;
+    bool m_enableWalletIndexes = false;
 
-    // Legacy backend
-    Blocks m_blocks;
-    cn::BlockIndex m_blockIndex;
-
-    // MDBX in-memory indexes
+    // In-memory chain index
     std::vector<crypto::Hash> m_blockHashes;
     parallel_flat_hash_map<crypto::Hash, uint32_t> m_hashToHeight;
     mutable std::vector<CachedEntry> m_cachedEntries;
     mutable size_t m_cacheIndex = 0;
 
-    // ── In-memory caches ─────────────────────────────────────────────────
-
+    // In-memory caches
     key_images_container m_spent_keys;
     size_t m_current_block_cumul_sz_limit = 0;
     blocks_ext_by_hash m_alternative_chains;
@@ -415,62 +371,46 @@ namespace cn
     TransactionMap m_transactionMap;
     MultisignatureOutputsContainer m_multisignatureOutputs;
 
-    // ── Deposit tracking ─────────────────────────────────────────────────
-
+    // Deposit tracking
     cn::DepositIndex m_depositIndex;
 
-    // ── Upgrade detectors ─────────────────────────────────────────────────
-
+    // Upgrade detectors
     BasicUpgradeDetector m_upgradeDetectorV2;
     BasicUpgradeDetector m_upgradeDetectorV3;
     BasicUpgradeDetector m_upgradeDetectorV4;
     BasicUpgradeDetector m_upgradeDetectorV7;
     BasicUpgradeDetector m_upgradeDetectorV8;
 
-    // ── Optional blockchain indexes ───────────────────────────────────────
-
+    // Optional blockchain indexes
     bool m_blockchainIndexesEnabled;
-    bool m_blockchainAutosaveEnabled;
     PaymentIdIndex m_paymentIdIndex;
     TimestampBlocksIndex m_timestampIndex;
     GeneratedTransactionsIndex m_generatedTransactionsIndex;
     OrphanBlocksIndex m_orthanBlocksIndex;
 
-    // ── Message queue ─────────────────────────────────────────────────────
-
+    // Message queue
     IntrusiveLinkedList<MessageQueue<BlockchainMessage>> m_messageQueueList;
 
-    // ── Sparse chain cache ────────────────────────────────────────────────
-
+    // Sparse chain cache
     mutable std::mutex m_sparseChainCacheMutex;
     mutable std::vector<crypto::Hash> m_cachedSparseChain;
     mutable uint32_t m_cachedSparseChainHeight;
     mutable std::chrono::steady_clock::time_point m_lastSparseChainUpdate;
     mutable bool m_sparseChainCacheValid;
 
-    // ── Checkpoint callback ───────────────────────────────────────────────
-
+    // Checkpoint callback
     CheckpointGeneratedCallback m_checkpointGeneratedCallback;
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Init
-    // ═══════════════════════════════════════════════════════════════════════
-
     bool initMdbxStorage(const std::string &config_folder);
     bool initMdbx(bool load_existing);
-    bool loadMdbxFastPath();
     void rebuildMdbxIndex();
-    bool initLegacyStorage(const std::string &config_folder);
-    bool loadLegacyCache(bool load_existing);
     bool ensureGenesisBlock();
     bool validateGenesisBlock();
     bool initUpgradeDetectors();
     void logInitSummary();
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Storage
-    // ═══════════════════════════════════════════════════════════════════════
-
     bool blockExistsInMainChain(const crypto::Hash &blockHash) const;
     const TransactionEntry &transactionByIndex(TransactionIndex index);
     static cn::BlockHeaderPOD headerFromBlockEntry(const BlockEntry &entry);
@@ -509,13 +449,9 @@ namespace cn
                           uint32_t height);
     void saveTransactions(const std::vector<Transaction> &transactions, uint32_t height);
 
-    bool storeMdbxCache(bool fullSave = false);
-    bool storeLegacyCache();
+    bool storeMdbxCache();
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Validation
-    // ═══════════════════════════════════════════════════════════════════════
-
     bool checkTransactionInputs(const Transaction &tx, uint32_t *pmax_used_block_height);
     bool checkTransactionInputs(const Transaction &tx, const crypto::Hash &tx_prefix_hash,
                                 uint32_t *pmax_used_block_height);
@@ -556,10 +492,7 @@ namespace cn
 
     bool checkCheckpoints(uint32_t &lastValidCheckpointHeight);
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Reorg
-    // ═══════════════════════════════════════════════════════════════════════
-
     bool switch_to_alternative_blockchain(const std::list<crypto::Hash> &alt_chain,
                                           bool discard_disconnected_chain);
     bool handle_alternative_block(const Block &b, const crypto::Hash &id,
@@ -572,14 +505,10 @@ namespace cn
     bool verifyAlternativeChainTransactions(const std::list<crypto::Hash> &alt_chain,
                                             uint32_t split_height);
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Sync
-    // ═══════════════════════════════════════════════════════════════════════
-
     std::vector<crypto::Hash> doBuildSparseChain(const crypto::Hash &startBlockId) const;
     std::vector<crypto::Hash> doBuildSparseChainUnlocked(const crypto::Hash &startBlockId) const;
     std::vector<crypto::Hash> doBuildSparseChainMdbx(const crypto::Hash &startBlockId) const;
-    std::vector<crypto::Hash> doBuildSparseChainLegacy(const crypto::Hash &startBlockId) const;
     std::vector<crypto::Hash> buildSparseFromHeightMdbx(size_t height) const;
     bool findHashHeight(const crypto::Hash &hash, size_t &height) const;
     crypto::Hash walkAlternativeChainToAncestor(const crypto::Hash &startId,
@@ -590,25 +519,16 @@ namespace cn
     uint32_t findBlockchainSupplementInternal(
         const std::vector<crypto::Hash> &qblock_ids) const;
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Difficulty
-    // ═══════════════════════════════════════════════════════════════════════
-
     difficulty_type get_next_difficulty_for_alternative_chain(
         const std::list<crypto::Hash> &alt_chain, const BlockEntry &bei);
     bool get_last_n_blocks_sizes(std::vector<size_t> &sz, size_t count);
     bool update_next_comulative_size_limit();
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Deposit
-    // ═══════════════════════════════════════════════════════════════════════
-
     void pushToDepositIndex(const BlockEntry &block, uint64_t interest);
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Random outputs
-    // ═══════════════════════════════════════════════════════════════════════
-
     bool add_out_to_get_random_outs(
         std::vector<std::pair<TransactionIndex, uint16_t>> &amount_outs,
         COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_outs_for_amount &result_outs,
@@ -616,25 +536,16 @@ namespace cn
     size_t find_end_of_allowed_index(
         const std::vector<std::pair<TransactionIndex, uint16_t>> &amount_outs);
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Indices
-    // ═══════════════════════════════════════════════════════════════════════
-
     bool storeBlockchainIndices();
     bool loadBlockchainIndices();
     void rebuildBlockchainIndices();
 
-    // ═══════════════════════════════════════════════════════════════════════
     //  Private methods — Messaging
-    // ═══════════════════════════════════════════════════════════════════════
-
     void sendMessage(const BlockchainMessage &message);
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════════
   //  LockedBlockchainStorage — RAII mutex guard
-  // ═══════════════════════════════════════════════════════════════════════════════
-
   class LockedBlockchainStorage : private boost::noncopyable
   {
   public:
@@ -648,10 +559,7 @@ namespace cn
     std::lock_guard<std::recursive_mutex> m_lock;
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════════
   //  Template method implementations
-  // ═══════════════════════════════════════════════════════════════════════════════
-
   template <class visitor_t>
   bool Blockchain::scanOutputKeysForIndexes(const KeyInput &tx_in_to_key,
                                             visitor_t &vis,
@@ -715,24 +623,14 @@ namespace cn
 
     for (const auto &bl_id : block_ids)
     {
-      uint32_t height = 0;
-
-      if (m_useMdbx)
-      {
-        auto it = m_hashToHeight.find(bl_id);
-        if (it == m_hashToHeight.end())
-        {
-          missed_bs.push_back(bl_id);
-          continue;
-        }
-        height = it->second;
-      }
-      else if (!m_blockIndex.getBlockHeight(bl_id, height))
+      auto it = m_hashToHeight.find(bl_id);
+      if (it == m_hashToHeight.end())
       {
         missed_bs.push_back(bl_id);
         continue;
       }
 
+      uint32_t height = it->second;
       if (height >= blocksSize())
       {
         logger(logging::ERROR, logging::BRIGHT_RED)

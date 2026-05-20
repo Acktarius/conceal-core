@@ -9,13 +9,13 @@
 #include "BoltSync.h"
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/CryptoNoteBasic.h"
-#include "Storage/IBlockchainStorage.h"
+#include "Storage/MDBXBlockchainStorage.h"
 
 namespace BoltSync
 {
   struct ScanContext
   {
-    CryptoNote::IBlockchainStorage &storage;
+    CryptoNote::MDBXBlockchainStorage &storage;
     const crypto::SecretKey &viewKey;
     const crypto::PublicKey &spendPublicKey;
     const crypto::SecretKey *spendKey;
@@ -32,8 +32,7 @@ namespace BoltSync
 
   void scanSingleBlock(uint32_t height, ScanContext &ctx);
 
-  // Second pass: mark outputs whose keyImage appears in any KeyInput as spent.
-  void markSpentOutputs(CryptoNote::IBlockchainStorage &storage,
+  void markSpentOutputs(CryptoNote::MDBXBlockchainStorage &storage,
                         uint32_t topHeight,
                         std::vector<FoundOutput> &results);
 }

@@ -11,19 +11,21 @@
 
 #include <boost/program_options.hpp>
 
-namespace cn {
+namespace cn
+{
 
-class CoreConfig {
-public:
-  CoreConfig();
+  class CoreConfig
+  {
+  public:
+    CoreConfig();
 
-  static void initOptions(const boost::program_options::options_description& desc);
-  void init(const boost::program_options::variables_map& options);
+    static void initOptions(const boost::program_options::options_description &desc);
+    void init(const boost::program_options::variables_map &options);
 
-  std::string configFolder;
-  bool configFolderDefaulted = true;
-  bool testnet = false;
-  bool useMdbx = false;
-};
+    std::string configFolder;
+    bool configFolderDefaulted = true;
+    bool testnet = false;
+    bool enableWalletIndexes = false;
+  };
 
-} //namespace cn
+} // namespace cn

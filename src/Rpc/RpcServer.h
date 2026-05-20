@@ -102,6 +102,10 @@ private:
                            COMMAND_RPC_GET_MERKLE_PROOF::response &res);
   bool on_get_outputs_for_address(const COMMAND_RPC_GET_OUTPUTS_FOR_ADDRESS::request &req,
                                   COMMAND_RPC_GET_OUTPUTS_FOR_ADDRESS::response &res);
+  
+  bool on_get_spv_outputs(const COMMAND_RPC_GET_SPV_OUTPUTS::request &req, COMMAND_RPC_GET_SPV_OUTPUTS::response &res);
+  bool on_get_wallet_snapshot(const COMMAND_RPC_GET_WALLET_SNAPSHOT::request &req,
+                              COMMAND_RPC_GET_WALLET_SNAPSHOT::response &res);
 
   logging::LoggerRef logger;
   core& m_core;

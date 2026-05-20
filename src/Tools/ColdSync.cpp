@@ -1,25 +1,33 @@
-// conceal-wallet-init – Cold storage wallet initializer using BoltCore
-// Creates an encrypted, pre-synced wallet container ready for conceal-rpc
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+//
+// Distributed under the MIT/X11 software license.
+
+// conceal-coldsync – Offline wallet pre-syncer
+// Creates an encrypted wallet state file by scanning the MDBX blockchain directly.
+// No daemon connection required.
 
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <vector>
 
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 
-#include "BoltSync/BoltSync.h"
-#include "BoltSync/CryptoHelpers.h"
-#include "BoltCore/BoltCore.h"
+#include "BoltRPC/SyncManager.h"
 #include "BoltRPC/StateManager.h"
+#include "BoltRPC/WalletManager.h"
+#include "Storage/MDBXBlockchainStorage.h"
 
 #include "Common/Util.h"
 #include "Common/StringTools.h"
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/Currency.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Logging/ConsoleLogger.h"
 #include "Logging/LoggerManager.h"
+#include "NodeRpcProxy/NodeRpcProxy.h"
 #include "CryptoNoteConfig.h"
 
 namespace po = boost::program_options;
@@ -36,7 +44,7 @@ struct Config
   std::string spendKeyHex;
   bool scanBlocks = true;
   std::string progressFile;
-  unsigned int numThreads = 0;
+  unsigned int numThreads = 1;
   uint32_t startBlock = 0;
   uint32_t endBlock = 0;
   bool forceOverwrite = false;
@@ -91,22 +99,25 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
 }
 
 // ---------------------------------------------------------------------------
-// Dummy INode for offline operation (implements required methods)
+// Offline INode stub (satisfies INode interface, never connects)
 // ---------------------------------------------------------------------------
 class OfflineNode : public cn::INode
 {
 public:
   virtual ~OfflineNode() {}
-  bool addObserver(cn::INodeObserver *o) override { return true; }
-  bool removeObserver(cn::INodeObserver *o) override { return true; }
+
+  bool addObserver(cn::INodeObserver *) override { return true; }
+  bool removeObserver(cn::INodeObserver *) override { return true; }
   void init(const Callback &cb) override { cb(std::error_code()); }
   bool shutdown() override { return true; }
+
   size_t getPeerCount() const override { return 0; }
   uint32_t getLastLocalBlockHeight() const override { return 0; }
   uint32_t getLastKnownBlockHeight() const override { return 0; }
   uint32_t getLocalBlockCount() const override { return 0; }
   uint32_t getKnownBlockCount() const override { return 0; }
   uint64_t getLastLocalBlockTimestamp() const override { return 0; }
+
   void relayTransaction(const cn::Transaction &, const Callback &cb) override { cb(std::error_code()); }
   void getRandomOutsByAmounts(std::vector<uint64_t> &&, uint64_t, std::vector<cn::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> &, const Callback &cb) override { cb(std::error_code()); }
   void getNewBlocks(std::vector<crypto::Hash> &&, std::vector<cn::block_complete_entry> &, uint32_t &, const Callback &cb) override { cb(std::error_code()); }
@@ -121,16 +132,14 @@ public:
   void getTransactions(const std::vector<crypto::Hash> &, std::vector<cn::TransactionDetails> &, const Callback &cb) override { cb(std::error_code()); }
   void getTransactionsByPaymentId(const crypto::Hash &, std::vector<cn::TransactionDetails> &, const Callback &cb) override { cb(std::error_code()); }
   void getPoolTransactions(uint64_t, uint64_t, uint32_t, std::vector<cn::TransactionDetails> &, uint64_t &, const Callback &cb) override { cb(std::error_code()); }
-
-  // Required by INode (pure virtual)
-  virtual std::vector<crypto::Hash> getPoolTransactions() override { return std::vector<crypto::Hash>(); }
-  virtual bool getTransactionSync(const crypto::Hash &txHash, cn::Transaction &tx) override { return false; }
-
   void isSynchronized(bool &sync, const Callback &cb) override
   {
     sync = true;
     cb(std::error_code());
   }
+
+  std::vector<crypto::Hash> getPoolTransactions() override { return {}; }
+  bool getTransactionSync(const crypto::Hash &, cn::Transaction &) override { return false; }
 };
 
 // ---------------------------------------------------------------------------
@@ -146,14 +155,14 @@ int main(int argc, char *argv[])
 
     // Parse keys
     crypto::SecretKey viewKey, spendKey;
-    if (!BoltSync::hexToSecretKey(cfg.viewKeyHex, viewKey))
+    if (!common::podFromHex(cfg.viewKeyHex, viewKey))
     {
       std::cerr << "Error: Invalid view key hex" << std::endl;
       return 1;
     }
 
     bool hasSpendKey = !cfg.spendKeyHex.empty();
-    if (hasSpendKey && !BoltSync::hexToSecretKey(cfg.spendKeyHex, spendKey))
+    if (hasSpendKey && !common::podFromHex(cfg.spendKeyHex, spendKey))
     {
       std::cerr << "Error: Invalid spend key hex" << std::endl;
       return 1;
@@ -176,146 +185,154 @@ int main(int argc, char *argv[])
     }
 
     // Setup currency and address
-    logging::LoggerManager logManager;
     logging::ConsoleLogger consoleLogger;
     cn::Currency currency = cn::CurrencyBuilder(consoleLogger).currency();
     cn::AccountPublicAddress address = {spendPub, viewPub};
     std::string addressStr = currency.accountAddressAsString(address);
     std::cout << "Wallet address: " << addressStr << std::endl;
 
-    // Determine container path (bolt-wallet.state format)
+    // Determine container path
     std::string containerPath;
     if (!cfg.containerFile.empty())
+    {
       containerPath = cfg.containerFile;
+    }
     else
     {
-      boost::filesystem::path walletDir = boost::filesystem::current_path();
       std::string shortAddr = addressStr.substr(0, 12);
       std::string walletType = hasSpendKey ? "full" : "view";
-      walletDir /= "bolt_" + walletType + "_" + shortAddr + ".state";
-      containerPath = walletDir.string();
+      containerPath = "bolt_" + walletType + "_" + shortAddr + ".state";
     }
 
     // Check for existing container
-    bool containerExists = false;
     {
       std::ifstream testFile(containerPath);
-      containerExists = testFile.good();
+      if (testFile.good() && !cfg.forceOverwrite)
+      {
+        std::cerr << "Error: Container already exists: " << containerPath << std::endl;
+        std::cerr << "Use --force to overwrite, or --container to specify a different path." << std::endl;
+        return 1;
+      }
     }
 
-    if (containerExists && !cfg.forceOverwrite)
-    {
-      std::cerr << "Error: Container already exists: " << containerPath << std::endl;
-      std::cerr << "Use --force to overwrite, or --container to specify a different path." << std::endl;
-      return 1;
-    }
-
-    // Scan for outputs using BoltSync
-    std::vector<BoltCore::OutputInfo> outputs;
+    // ── Scan blockchain directly via MDBX ──────────────────────────────
+    std::vector<BoltRPC::OutputInfo> outputs;
     uint32_t scannedHeight = 0;
 
     if (cfg.scanBlocks && !cfg.dataDir.empty())
     {
-      std::cout << "Starting blockchain scan..." << std::endl;
+      std::cout << "Opening MDBX blockchain at " << cfg.dataDir << "/mdbx_blocks ..." << std::endl;
 
-      BoltSync::Scanner scanner(viewKey, spendPub, hasSpendKey ? &spendKey : nullptr);
-      BoltSync::ScanConfig scanCfg;
-      scanCfg.dataDir = cfg.dataDir;
-      scanCfg.numThreads = cfg.numThreads;
-      scanCfg.startBlock = cfg.startBlock;
-      scanCfg.endBlock = cfg.endBlock;
-      scanCfg.progressFile = cfg.progressFile;
+      std::string dbPath = cfg.dataDir + "/mdbx_blocks";
+      CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
 
-      BoltSync::ScanState state;
-      if (!scanner.scan(scanCfg, state))
+      uint32_t topHeight = storage.topBlockHeight();
+      if (cfg.endBlock == 0 || cfg.endBlock > topHeight)
+        cfg.endBlock = topHeight;
+
+      std::cout << "Scanning blocks " << cfg.startBlock << " to " << cfg.endBlock
+                << " (chain height: " << topHeight << ")" << std::endl;
+
+      // Use SyncManager-style derivation to find owned outputs
+      OfflineNode offlineNode;
+      BoltRPC::SyncManager syncManager(
+          offlineNode, viewKey, spendPub, cfg.dataDir,
+          [](const std::string &, const std::string &) -> std::string
+          { return ""; });
+
+      // Scan by fetching all tx_pub_keys and outputs from MDBX indexes
+      std::vector<crypto::PublicKey> allKeys = storage.getNewTxPubKeys(cfg.startBlock, cfg.endBlock);
+      std::cout << "Found " << allKeys.size() << " unique tx public keys in range" << std::endl;
+
+      std::vector<CryptoNote::WalletOutputInfo> candidates;
+      std::unordered_set<std::string> spentImages;
+      storage.getOutputsByTxPubKeys(allKeys, candidates, spentImages);
+
+      std::cout << "Retrieved " << candidates.size() << " output candidates" << std::endl;
+
+      // Convert and derive ownership
+      uint64_t totalReceived = 0, totalSpent = 0;
+      for (const auto &c : candidates)
       {
-        std::cerr << "Error: Blockchain scan failed" << std::endl;
-        return 1;
+        BoltRPC::OutputInfo info;
+        info.blockHeight = c.block_height;
+        info.txHash = c.tx_hash;
+        info.amount = c.amount;
+        info.outputIndex = c.output_index;
+        info.outputKey = c.output_key;
+        info.txPublicKey = c.tx_public_key;
+        info.spent = false;
+        info.isDeposit = false;
+        info.term = 0;
+
+        // Derive ownership (using SyncManager's logic via WalletManager's key derivation)
+        crypto::KeyDerivation derivation;
+        if (crypto::generate_key_derivation(c.tx_public_key, viewKey, derivation))
+        {
+          crypto::PublicKey derivedKey;
+          if (crypto::derive_public_key(derivation, c.output_index, spendPub, derivedKey) &&
+              std::memcmp(&derivedKey, &c.output_key, sizeof(crypto::PublicKey)) == 0)
+          {
+            // Check spent status
+
+            if (hasSpendKey)
+            {
+              crypto::KeyImage ki;
+              crypto::SecretKey ephemeralSec;
+              derive_secret_key(derivation, c.output_index, spendKey, ephemeralSec);
+              crypto::PublicKey ephemeralPub;
+              crypto::secret_key_to_public_key(ephemeralSec, ephemeralPub);
+              crypto::generate_key_image(ephemeralPub, ephemeralSec, ki);
+              info.spent = storage.isSpentKeyImage(ki);
+            }
+
+            outputs.push_back(info);
+            totalReceived += info.amount;
+            if (info.spent)
+              totalSpent += info.amount;
+          }
+        }
       }
 
-      scannedHeight = state.scannedTopHeight;
-
-      // Convert FoundOutput to OutputInfo
-      outputs.reserve(state.results.size());
-      for (const auto &fo : state.results)
-      {
-        BoltCore::OutputInfo info;
-        info.blockHeight = fo.blockHeight;
-        info.txHash = fo.txHash;
-        info.outputIndex = fo.outputIndex;
-        info.globalOutputIndex = fo.outputIndex;
-        info.amount = fo.amount;
-        info.outputKey = fo.outputKey;
-        info.txPublicKey = fo.txPublicKey;
-        info.keyImage = fo.keyImage;
-        info.spent = fo.spent;
-        info.isDeposit = fo.isDeposit;
-        info.term = fo.term;
-        info.subAddress = addressStr;
-        outputs.push_back(info);
-      }
-
-      std::cout << "Scan complete. Found " << outputs.size() << " outputs at height " << scannedHeight << std::endl;
+      scannedHeight = cfg.endBlock;
+      std::cout << "Scan complete. Found " << outputs.size() << " owned outputs."
+                << " Received: " << totalReceived
+                << ", Spent: " << totalSpent
+                << ", Balance: " << (totalReceived - totalSpent) << std::endl;
     }
 
-    // Create BoltRPC state file (encrypted container)
+    // ── Save wallet state via StateManager ──────────────────────────────
     BoltRPC::StateManager stateManager(containerPath);
 
-    // Prepare output list for saving
-    std::vector<BoltCore::OutputInfo> emptyOutputs;
+    BoltRPC::WalletState state;
+    state.lastHeight = scannedHeight;
+    state.balance = 0;
+    state.unlockedBalance = 0;
 
-    if (stateManager.save(outputs, scannedHeight, cfg.viewKeyHex, cfg.spendKeyHex, cfg.password))
+    for (const auto &out : outputs)
     {
-      std::cout << std::endl
-                << "========================================" << std::endl
-                << "Wallet container created successfully!" << std::endl
-                << "========================================" << std::endl
-                << "Path: " << containerPath << std::endl
-                << "Address: " << addressStr << std::endl
-                << "Type: " << (hasSpendKey ? "Full wallet" : "View-only wallet") << std::endl
-                << "Outputs: " << outputs.size() << std::endl
-                << "Synced height: " << scannedHeight << std::endl
-                << "========================================" << std::endl;
+      state.ownedOutputs.push_back(out);
+      if (!out.spent)
+        state.balance += out.amount;
     }
-    else
+
+    if (!stateManager.save(state))
     {
-      std::cerr << "Error: Failed to save wallet container" << std::endl;
+      std::cerr << "Error: Failed to save wallet state" << std::endl;
       return 1;
     }
 
-    // Write JSON results for debugging
-    if (!outputs.empty())
-    {
-      uint64_t totalReceived = 0, totalSpent = 0;
-      for (const auto &out : outputs)
-      {
-        totalReceived += out.amount;
-        if (out.spent)
-          totalSpent += out.amount;
-      }
-
-      std::string resultsFile = containerPath + ".scan_results";
-      std::ofstream results(resultsFile);
-      if (results.is_open())
-      {
-        results << "{" << std::endl
-                << "  \"address\": \"" << addressStr << "\"," << std::endl
-                << "  \"syncedHeight\": " << scannedHeight << "," << std::endl
-                << "  \"totalOutputs\": " << outputs.size() << "," << std::endl
-                << "  \"totalReceived\": " << totalReceived << "," << std::endl
-                << "  \"totalSpent\": " << totalSpent << "," << std::endl
-                << "  \"balance\": " << (totalReceived - totalSpent) << std::endl
-                << "}" << std::endl;
-        results.close();
-        std::cout << "Detailed results: " << resultsFile << std::endl;
-      }
-    }
-
     std::cout << std::endl
-              << "You can now:" << std::endl
-              << "  1. Move this file to your desired location" << std::endl
-              << "  2. Use with conceal-rpc: conceal-rpc --state-file " << containerPath << " --password <pwd>" << std::endl
-              << std::endl;
+              << "========================================" << std::endl
+              << "Wallet container created successfully!" << std::endl
+              << "========================================" << std::endl
+              << "Path: " << containerPath << std::endl
+              << "Address: " << addressStr << std::endl
+              << "Type: " << (hasSpendKey ? "Full wallet" : "View-only wallet") << std::endl
+              << "Outputs: " << outputs.size() << std::endl
+              << "Balance: " << state.balance << std::endl
+              << "Synced height: " << scannedHeight << std::endl
+              << "========================================" << std::endl;
 
     return 0;
   }

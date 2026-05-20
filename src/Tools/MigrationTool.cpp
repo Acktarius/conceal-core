@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -13,6 +14,7 @@
 #include <boost/program_options.hpp>
 
 #include "Blockchain/Blockchain.h"
+#include "Blockchain/SwappedVector.h"
 #include "Common/CommandLine.h"
 #include "Common/FileMappedVector.h"
 #include "Common/PathHelpers.h"
@@ -25,6 +27,8 @@
 #include "Logging/ConsoleLogger.h"
 #include "Storage/MDBXBlockchainStorage.h"
 
+#include <mdbx.h>
+
 namespace po = boost::program_options;
 using namespace cn;
 using namespace common;
@@ -32,22 +36,19 @@ using namespace common;
 namespace
 {
   const command_line::arg_descriptor<std::string> arg_old_data_dir = {
-      "old-dir", "Path to the old blockchain data (SwappedVector format) or existing MDBX database (with --rescue)", ""};
+      "old-dir", "Path to the old blockchain data (SwappedVector format)", ""};
   const command_line::arg_descriptor<std::string> arg_new_data_dir = {
       "new-dir", "Path where the new MDBX database will be created", ""};
   const command_line::arg_descriptor<bool> arg_testnet = {
       "testnet", "Use testnet parameters", false};
-  const command_line::arg_descriptor<uint64_t> arg_size_limit = {
-      "size-limit", "Maximum database size in GB (0 = no limit, default: 128)", 128};
-  const command_line::arg_descriptor<bool> arg_no_limit = {
-      "no-limit", "Remove upper size limit entirely (cannot be used with --size-limit)", false};
-  const command_line::arg_descriptor<bool> arg_bulk = {
-      "bulk", "Enable bulk/NOSYNC mode for maximum migration speed", false};
-  const command_line::arg_descriptor<bool> arg_rescue = {
-      "rescue", "Rescue an existing MDBX database. Reads blocks, verifies consistency, and rewrites with atomic writes", false};
+  const command_line::arg_descriptor<bool> arg_skip_validation = {
+      "skip-validation", "Skip chain continuity validation (faster, daemon will reject invalid blocks)", false};
+  const command_line::arg_descriptor<uint32_t> arg_batch_size = {
+      "batch-size", "Blocks per MDBX transaction (default: 50000, higher = faster but more RAM)", 50000};
 }
 
-//  Block source abstraction
+// ── Block source abstraction ──────────────────────────────────────────────
+
 struct BlockSource
 {
   virtual ~BlockSource() = default;
@@ -100,304 +101,73 @@ struct SwappedVectorSource : BlockSource
   void close() override { blocks.close(); }
 };
 
-struct MdbxSource : BlockSource
+// ── Key helpers (match MDBXBlockchainStorage) ─────────────────────────────
+
+std::string blockEntryKey(uint32_t height)
 {
-  std::unique_ptr<CryptoNote::MDBXBlockchainStorage> storage;
-  uint32_t blockCount = 0;
+  std::ostringstream oss;
+  oss << "be_" << std::setw(8) << std::setfill('0') << height;
+  return oss.str();
+}
 
-  bool open(const std::string &path)
-  {
-    storage.reset(new CryptoNote::MDBXBlockchainStorage(path, false, 0));
-
-    uint32_t topHeight = storage->topBlockHeight();
-    if (topHeight == 0)
-    {
-      std::cerr << "Error: MDBX database is empty or has no blocks" << std::endl;
-      return false;
-    }
-
-    cn::BinaryArray ba;
-    bool hasPaddedKeys = storage->getBlockEntry(0, ba);
-    if (!hasPaddedKeys)
-    {
-      std::cout << "Legacy key format detected (unpadded keys). Running key migration..." << std::endl;
-      try
-      {
-        auto migStart = std::chrono::steady_clock::now();
-        storage->migrateToPaddedKeys();
-        auto migEnd = std::chrono::steady_clock::now();
-        auto migSeconds = std::chrono::duration_cast<std::chrono::seconds>(migEnd - migStart).count();
-        std::cout << "Key migration complete. (" << migSeconds << "s)" << std::endl;
-
-        if (!storage->getBlockEntry(0, ba))
-        {
-          std::cerr << "Error: genesis still unreadable after key migration" << std::endl;
-          return false;
-        }
-      }
-      catch (const std::exception &e)
-      {
-        std::cerr << "Error: key migration failed: " << e.what() << std::endl;
-        return false;
-      }
-    }
-
-    blockCount = topHeight + 1;
-    return true;
-  }
-
-  uint32_t size() const override { return blockCount; }
-
-  bool getBlock(uint32_t height, Blockchain::BlockEntry &entry) const override
-  {
-    cn::BinaryArray ba;
-    if (!storage->getBlockEntry(height, ba))
-      return false;
-    return cn::fromBinaryArray(entry, ba);
-  }
-
-  crypto::Hash getHash(uint32_t height) const override
-  {
-    return storage->getBlockHash(height);
-  }
-
-  void close() override
-  {
-    if (storage)
-      storage->close();
-  }
-};
-
-//  In-memory index structures (mirrors Blockchain's private members)
-struct MultisigOutputUsage
+std::string blockHeaderKey(uint32_t height)
 {
-  Blockchain::TransactionIndex transactionIndex;
-  uint16_t outputIndex;
-  bool isUsed;
-};
+  std::ostringstream oss;
+  oss << "hdr_" << std::setw(8) << std::setfill('0') << height;
+  return oss.str();
+}
+
+// ── MDBX_val helper ──────────────────────────────────────────────────────
+
+MDBX_val toMdbxVal(const void *data, size_t len)
+{
+  MDBX_val v;
+  v.iov_base = const_cast<void *>(data);
+  v.iov_len = len;
+  return v;
+}
+
+// ── In-memory index structures (for spot-check verification only) ─────────
 
 struct MigrationIndexes
 {
   std::vector<crypto::Hash> blockHashes;
   std::unordered_map<crypto::Hash, uint32_t> hashToHeight;
-  std::unordered_map<crypto::Hash, Blockchain::TransactionIndex> transactionMap;
-  std::unordered_map<crypto::KeyImage, uint32_t> spentKeys;
-  std::unordered_map<uint64_t, std::vector<std::pair<Blockchain::TransactionIndex, uint16_t>>> outputs;
-  std::unordered_map<uint64_t, std::vector<MultisigOutputUsage>> multisigOutputs;
-  std::vector<uint64_t> depositIndex;
 
   void reserve(uint32_t totalBlocks)
   {
     blockHashes.reserve(totalBlocks);
     hashToHeight.reserve(totalBlocks);
-    transactionMap.reserve(totalBlocks * 8);
-    spentKeys.reserve(totalBlocks * 8);
   }
 };
 
-//  Transaction validation
-bool validateTransaction(const Transaction &tx, uint32_t height)
+// ── Progress formatting ──────────────────────────────────────────────────
+
+std::string formatDuration(int64_t seconds)
 {
-  for (const auto &input : tx.inputs)
-  {
-    if (input.type() == typeid(KeyInput))
-    {
-      static const crypto::KeyImage ZERO_KI = {};
-      if (memcmp(&boost::get<KeyInput>(input).keyImage, &ZERO_KI, sizeof(crypto::KeyImage)) == 0)
-        return false;
-    }
-    else if (input.type() == typeid(MultisignatureInput))
-    {
-      if (boost::get<MultisignatureInput>(input).amount == 0)
-        return false;
-    }
-    else if (input.type() == typeid(BaseInput))
-    {
-      if (boost::get<BaseInput>(input).blockIndex != height)
-        return false;
-    }
-    else
-    {
-      return false;
-    }
-  }
-
-  for (const auto &output : tx.outputs)
-  {
-    if (output.amount == 0)
-      return false;
-
-    if (output.target.type() == typeid(KeyOutput))
-    {
-      static const crypto::PublicKey ZERO_PK = {};
-      if (memcmp(&boost::get<KeyOutput>(output.target).key, &ZERO_PK, sizeof(crypto::PublicKey)) == 0)
-        return false;
-    }
-    else if (output.target.type() == typeid(MultisignatureOutput))
-    {
-      const auto &mo = boost::get<MultisignatureOutput>(output.target);
-      if (mo.keys.empty() || mo.requiredSignatureCount == 0)
-        return false;
-    }
-    else
-    {
-      return false;
-    }
-  }
-
-  if (tx.unlockTime > static_cast<uint64_t>(time(nullptr)) + (100ULL * 365 * 24 * 60 * 60))
-    return false;
-
-  if (tx.version < 1 || tx.version > 2)
-    return false;
-
-  if (tx.signatures.size() != tx.inputs.size())
-    return false;
-
-  return true;
+  if (seconds < 0)
+    return "0s";
+  if (seconds < 60)
+    return std::to_string(seconds) + "s";
+  if (seconds < 3600)
+    return std::to_string(seconds / 60) + "m " + std::to_string(seconds % 60) + "s";
+  return std::to_string(seconds / 3600) + "h " + std::to_string((seconds % 3600) / 60) + "m " + std::to_string(seconds % 60) + "s";
 }
 
-//  Fast-index writer
-void writeFastIndexes(CryptoNote::MDBXBlockchainStorage &storage, const MigrationIndexes &idx)
+std::string formatSpeed(double blocksPerSecond)
 {
-  std::cout << "Writing in-memory indexes to meta database..." << std::endl;
-  std::vector<uint8_t> buf;
-
-  // Block hashes
-  storage.putMeta("idx_hashes",
-                  std::vector<uint8_t>(
-                      reinterpret_cast<const uint8_t *>(idx.blockHashes.data()),
-                      reinterpret_cast<const uint8_t *>(idx.blockHashes.data()) +
-                          idx.blockHashes.size() * sizeof(crypto::Hash)));
-
-  // Hash → height map
-  buf.clear();
-  for (const auto &p : idx.hashToHeight)
+  if (blocksPerSecond >= 1000)
   {
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(p.first.data),
-               reinterpret_cast<const uint8_t *>(p.first.data) + sizeof(crypto::Hash));
-    uint32_t h = p.second;
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&h),
-               reinterpret_cast<const uint8_t *>(&h) + sizeof(h));
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << (blocksPerSecond / 1000.0) << "k blk/s";
+    return oss.str();
   }
-  storage.putMeta("idx_hash2height", buf);
-
-  // Transaction map
-  buf.clear();
-  for (const auto &kv : idx.transactionMap)
-  {
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(kv.first.data),
-               reinterpret_cast<const uint8_t *>(kv.first.data) + sizeof(crypto::Hash));
-    uint64_t packed = (static_cast<uint64_t>(kv.second.block) << 16) | kv.second.transaction;
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&packed),
-               reinterpret_cast<const uint8_t *>(&packed) + sizeof(packed));
-  }
-  storage.putMeta("idx_txmap", buf);
-
-  // Spent keys — meta blob + native MDBX DB
-  buf.clear();
-  std::vector<crypto::KeyImage> keyImages;
-  keyImages.reserve(idx.spentKeys.size());
-  for (const auto &p : idx.spentKeys)
-  {
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(p.first.data),
-               reinterpret_cast<const uint8_t *>(p.first.data) + sizeof(crypto::KeyImage));
-    uint32_t h = p.second;
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&h),
-               reinterpret_cast<const uint8_t *>(&h) + sizeof(h));
-    keyImages.push_back(p.first);
-  }
-  storage.putMeta("idx_spentkeys", buf);
-  storage.markKeyImagesSpent(keyImages);
-
-  // Outputs index
-  buf.clear();
-  for (const auto &p : idx.outputs)
-  {
-    uint64_t amount = p.first;
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&amount),
-               reinterpret_cast<const uint8_t *>(&amount) + sizeof(amount));
-    uint32_t count = static_cast<uint32_t>(p.second.size());
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&count),
-               reinterpret_cast<const uint8_t *>(&count) + sizeof(count));
-    for (const auto &pair : p.second)
-    {
-      uint32_t block = pair.first.block;
-      uint16_t tx = pair.first.transaction;
-      uint16_t outIdx = pair.second;
-      buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&block),
-                 reinterpret_cast<const uint8_t *>(&block) + sizeof(block));
-      buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&tx),
-                 reinterpret_cast<const uint8_t *>(&tx) + sizeof(tx));
-      buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&outIdx),
-                 reinterpret_cast<const uint8_t *>(&outIdx) + sizeof(outIdx));
-    }
-  }
-  storage.putMeta("idx_outputs", buf);
-
-  // Multisig outputs index
-  buf.clear();
-  for (const auto &p : idx.multisigOutputs)
-  {
-    uint64_t amount = p.first;
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&amount),
-               reinterpret_cast<const uint8_t *>(&amount) + sizeof(amount));
-    uint32_t count = static_cast<uint32_t>(p.second.size());
-    buf.insert(buf.end(),
-               reinterpret_cast<const uint8_t *>(&count),
-               reinterpret_cast<const uint8_t *>(&count) + sizeof(count));
-    for (const auto &usage : p.second)
-    {
-      uint32_t block = usage.transactionIndex.block;
-      uint16_t tx = usage.transactionIndex.transaction;
-      uint16_t outIdx = usage.outputIndex;
-      uint8_t used = usage.isUsed ? 1 : 0;
-      buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&block),
-                 reinterpret_cast<const uint8_t *>(&block) + sizeof(block));
-      buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&tx),
-                 reinterpret_cast<const uint8_t *>(&tx) + sizeof(tx));
-      buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&outIdx),
-                 reinterpret_cast<const uint8_t *>(&outIdx) + sizeof(outIdx));
-      buf.push_back(used);
-    }
-  }
-  storage.putMeta("idx_msig", buf);
-
-  // Deposit index
-  {
-    buf.clear();
-    buf.reserve(sizeof(uint64_t) * idx.depositIndex.size());
-    for (size_t i = 0; i < idx.depositIndex.size(); ++i)
-    {
-      uint64_t val = idx.depositIndex[i];
-      buf.insert(buf.end(),
-                 reinterpret_cast<const uint8_t *>(&val),
-                 reinterpret_cast<const uint8_t *>(&val) + sizeof(val));
-    }
-    storage.putMeta("idx_deposits", buf);
-  }
-
-  // Top height
-  {
-    uint32_t topHeight = static_cast<uint32_t>(idx.blockHashes.size() - 1);
-    storage.putMeta("idx_topheight",
-                    std::vector<uint8_t>(
-                        reinterpret_cast<const uint8_t *>(&topHeight),
-                        reinterpret_cast<const uint8_t *>(&topHeight) + sizeof(topHeight)));
-  }
-
-  storage.flush();
-  std::cout << "Fast indexes written successfully." << std::endl;
+  return std::to_string(static_cast<int>(blocksPerSecond)) + " blk/s";
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  main
+// ═══════════════════════════════════════════════════════════════════════════════
 
 int main(int argc, char *argv[])
 {
@@ -405,10 +175,8 @@ int main(int argc, char *argv[])
   command_line::add_arg(desc, arg_old_data_dir);
   command_line::add_arg(desc, arg_new_data_dir);
   command_line::add_arg(desc, arg_testnet);
-  command_line::add_arg(desc, arg_size_limit);
-  command_line::add_arg(desc, arg_no_limit);
-  command_line::add_arg(desc, arg_bulk);
-  command_line::add_arg(desc, arg_rescue);
+  command_line::add_arg(desc, arg_skip_validation);
+  command_line::add_arg(desc, arg_batch_size);
 
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -417,18 +185,13 @@ int main(int argc, char *argv[])
   std::string oldDir = command_line::get_arg(vm, arg_old_data_dir);
   std::string newDir = command_line::get_arg(vm, arg_new_data_dir);
   bool testnet = command_line::get_arg(vm, arg_testnet);
-  uint64_t sizeLimitGB = command_line::get_arg(vm, arg_size_limit);
-  bool noLimit = command_line::get_arg(vm, arg_no_limit);
-  bool bulkMode = command_line::get_arg(vm, arg_bulk);
-  bool rescueMode = command_line::get_arg(vm, arg_rescue);
+  bool skipValidation = command_line::get_arg(vm, arg_skip_validation);
+  uint32_t batchSize = command_line::get_arg(vm, arg_batch_size);
 
-  if (sizeLimitGB != 128 && noLimit)
-  {
-    std::cerr << "Error: --size-limit and --no-limit cannot be used together" << std::endl;
-    return 1;
-  }
-
-  uint64_t sizeLimitBytes = noLimit ? 0 : (sizeLimitGB << 30);
+  if (batchSize == 0)
+    batchSize = 50000;
+  if (batchSize > 100000)
+    batchSize = 100000;
 
   if (oldDir.empty() || newDir.empty())
   {
@@ -448,123 +211,102 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  std::cout << "Conceal Migration Tool v2" << std::endl;
-  std::cout << "Source dir: " << oldDir << std::endl;
-  std::cout << "Target dir: " << newDir << std::endl;
-  std::cout << "Testnet: " << (testnet ? "yes" : "no") << std::endl;
-  std::cout << "Mode: " << (rescueMode ? "RESCUE (from MDBX)" : "MIGRATE (from SwappedVector)") << std::endl;
-  std::cout << "Write mode: " << (bulkMode ? "BULK" : "SAFE") << std::endl;
+  std::cout << "Conceal Migration Tool v3" << std::endl;
+  std::cout << "Source dir:  " << oldDir << std::endl;
+  std::cout << "Target dir:  " << newDir << std::endl;
+  std::cout << "Testnet:     " << (testnet ? "yes" : "no") << std::endl;
+  std::cout << "Validation:  " << (skipValidation ? "SKIPPED" : "ENABLED") << std::endl;
+  std::cout << "Batch size:  " << batchSize << " blocks" << std::endl;
 
   logging::ConsoleLogger consoleLogger;
   Currency currency = CurrencyBuilder(consoleLogger).currency();
 
-  // Open source
-  std::unique_ptr<BlockSource> source;
-  if (rescueMode)
-  {
-    auto mdbxSource = std::unique_ptr<MdbxSource>(new MdbxSource());
-    std::string mdbxSourcePath = PathHelpers::appendPath(oldDir, "mdbx_blocks");
-    if (!mdbxSource->open(mdbxSourcePath))
-      return 1;
-    source = std::move(mdbxSource);
-  }
-  else
-  {
-    auto svSource = std::unique_ptr<SwappedVectorSource>(new SwappedVectorSource());
-    if (!svSource->open(oldDir))
-      return 1;
-    source = std::move(svSource);
-  }
+  // Open SwappedVector source
+  std::cout << std::endl
+            << "Opening SwappedVector blockchain..." << std::endl;
+  auto svSource = std::unique_ptr<SwappedVectorSource>(new SwappedVectorSource());
+  if (!svSource->open(oldDir))
+    return 1;
 
-  uint32_t totalBlocks = source->size();
+  uint32_t totalBlocks = svSource->size();
   std::cout << "Source blockchain height: " << (totalBlocks - 1) << std::endl;
 
   // Verify genesis
+  std::cout << "Verifying genesis block..." << std::endl;
   Blockchain::BlockEntry genesisEntry;
-  if (!source->getBlock(0, genesisEntry))
+  if (!svSource->getBlock(0, genesisEntry))
   {
     std::cerr << "Error: failed to read genesis block" << std::endl;
     return 1;
   }
   crypto::Hash genesisHash = get_block_hash(genesisEntry.bl);
 
-  if (!testnet && genesisHash != currency.genesisBlockHash())
+  if (!skipValidation && !testnet && genesisHash != currency.genesisBlockHash())
   {
     std::cerr << "Error: genesis block mismatch" << std::endl;
     std::cerr << "  expected: " << common::podToHex(currency.genesisBlockHash()) << std::endl;
-    std::cerr << "  actual: " << common::podToHex(genesisHash) << std::endl;
+    std::cerr << "  actual:   " << common::podToHex(genesisHash) << std::endl;
     return 1;
   }
   std::cout << "Genesis block verified: " << common::podToHex(genesisHash) << std::endl;
 
-  // Initialize MDBX
+  // Initialize MDBX storage (no wallet indexes needed for migration)
   std::cout << "Initializing MDBX storage backend..." << std::endl;
   std::string mdbxPath = PathHelpers::appendPath(newDir, "mdbx_blocks");
-  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, bulkMode, sizeLimitBytes);
+  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, false);
 
-  // Build indexes during migration
+  // Get MDBX handles for batched writes
+  MDBX_env *env = mdbxStorage.getEnv();
+  MDBX_dbi dbiEntries = mdbxStorage.getDbiBlockEntries();
+  MDBX_dbi dbiHeaders = mdbxStorage.getDbiBlockHeaders();
+  MDBX_dbi dbiHeights = mdbxStorage.getDbiHeights();
+
+  // Build indexes during migration (for verification only)
   MigrationIndexes idx;
   idx.reserve(totalBlocks);
 
-  uint32_t brokenBlocks = 0;
-  uint32_t corruptedTxs = 0;
-  uint32_t lastGoodHeight = 0;
+  uint32_t skippedBlocks = 0;
+  uint32_t migratedBlocks = 0;
 
-  std::cout << "Starting migration..." << std::endl;
+  // Batched transaction state
+  MDBX_txn *batchTxn = nullptr;
+  uint32_t batchCount = 0;
+
+  std::cout << std::endl;
+  std::cout << "═══════════════════════════════════════════════════════" << std::endl;
+  std::cout << "  Starting migration" << std::endl;
+  std::cout << "  Total blocks: " << totalBlocks << std::endl;
+  std::cout << "  Batch size:   " << batchSize << std::endl;
+  std::cout << "  Commits:      ~" << (totalBlocks / batchSize + 1) << std::endl;
+  std::cout << "  Progress updates every 10,000 blocks" << std::endl;
+  std::cout << "═══════════════════════════════════════════════════════" << std::endl;
+  std::cout << std::endl;
+
   auto startTime = std::chrono::steady_clock::now();
+  auto lastReportTime = startTime;
+  uint32_t lastReportBlocks = 0;
 
   for (uint32_t h = 0; h < totalBlocks; ++h)
   {
     Blockchain::BlockEntry entry;
-    if (!source->getBlock(h, entry))
+    if (!svSource->getBlock(h, entry))
     {
-      std::cerr << "Error: failed to read block at height " << h << std::endl;
-      if (rescueMode)
-      {
-        brokenBlocks++;
-        totalBlocks = lastGoodHeight + 1;
-        break;
-      }
-      return 1;
+      std::cerr << "Warning: failed to read block at height " << h << " - skipping" << std::endl;
+      skippedBlocks++;
+      continue;
     }
 
     crypto::Hash blockHash = get_block_hash(entry.bl);
 
-    if (rescueMode)
+    // Chain continuity check
+    if (!skipValidation)
     {
-      crypto::Hash sourceHash = source->getHash(h);
-      if (sourceHash != crypto::Hash() && blockHash != sourceHash)
+      if (h > 0 && entry.bl.previousBlockHash != idx.blockHashes.back())
       {
-        std::cerr << "Warning: block " << h << " hash mismatch" << std::endl;
-        brokenBlocks++;
+        std::cerr << "Warning: block " << h << " has invalid previous hash - skipping" << std::endl;
+        skippedBlocks++;
+        continue;
       }
-    }
-
-    // Validate transactions
-    bool blockValid = true;
-    for (uint32_t t = 0; t < entry.transactions.size(); ++t)
-    {
-      if (!validateTransaction(entry.transactions[t].tx, h))
-      {
-        std::cerr << "Warning: block " << h << " has corrupted transaction at index " << t << std::endl;
-        corruptedTxs++;
-        blockValid = false;
-        break;
-      }
-    }
-
-    if (blockValid && !validateTransaction(entry.bl.baseTransaction, h))
-    {
-      std::cerr << "Warning: block " << h << " has corrupted base transaction" << std::endl;
-      corruptedTxs++;
-      blockValid = false;
-    }
-
-    if (!blockValid)
-    {
-      brokenBlocks++;
-      totalBlocks = lastGoodHeight + 1;
-      break;
     }
 
     // Build header POD
@@ -579,134 +321,139 @@ int main(int argc, char *argv[])
     hdr.alreadyGeneratedCoins = entry.already_generated_coins;
     hdr.height = entry.height;
 
-    // Build indexes
-    for (uint32_t t = 0; t < entry.transactions.size(); ++t)
-    {
-      crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
-      Blockchain::TransactionIndex txIdx = {h, static_cast<uint16_t>(t)};
-      idx.transactionMap[txHash] = txIdx;
-
-      for (const auto &input : entry.transactions[t].tx.inputs)
-      {
-        if (input.type() == typeid(KeyInput))
-          idx.spentKeys[boost::get<KeyInput>(input).keyImage] = h;
-        else if (input.type() == typeid(MultisignatureInput))
-        {
-          const auto &msInput = boost::get<MultisignatureInput>(input);
-          if (idx.multisigOutputs.count(msInput.amount) > 0 &&
-              msInput.outputIndex < idx.multisigOutputs[msInput.amount].size())
-            idx.multisigOutputs[msInput.amount][msInput.outputIndex].isUsed = true;
-        }
-      }
-
-      for (uint32_t o = 0; o < entry.transactions[t].tx.outputs.size(); ++o)
-      {
-        const auto &out = entry.transactions[t].tx.outputs[o];
-        if (out.target.type() == typeid(KeyOutput))
-          idx.outputs[out.amount].push_back(std::make_pair(txIdx, o));
-        else if (out.target.type() == typeid(MultisignatureOutput))
-        {
-          MultisigOutputUsage usage;
-          usage.transactionIndex = txIdx;
-          usage.outputIndex = static_cast<uint16_t>(o);
-          usage.isUsed = false;
-          idx.multisigOutputs[out.amount].push_back(usage);
-        }
-      }
-    }
-
-    // Track deposits
-    int64_t deposit = 0;
-    uint64_t interest = 0;
-    for (const auto &tx : entry.transactions)
-    {
-      for (const auto &in : tx.tx.inputs)
-      {
-        if (in.type() == typeid(MultisignatureInput))
-        {
-          const auto &multisign = boost::get<MultisignatureInput>(in);
-          if (multisign.term > 0)
-            deposit -= multisign.amount;
-        }
-      }
-      for (const auto &out : tx.tx.outputs)
-      {
-        if (out.target.type() == typeid(MultisignatureOutput))
-        {
-          const auto &multisign = boost::get<MultisignatureOutput>(out.target);
-          if (multisign.term > 0)
-            deposit += out.amount;
-        }
-      }
-      interest += currency.calculateTotalTransactionInterest(tx.tx, h);
-    }
-
-    if (h == 0)
-      idx.depositIndex.push_back(static_cast<uint64_t>(deposit));
-    else
-      idx.depositIndex.push_back(idx.depositIndex.back() + deposit);
-
-    // Atomic write
+    // Serialize block entry
     BinaryArray ba = toBinaryArray(entry);
-    mdbxStorage.pushCompleteBlock(h, blockHash, ba, hdr);
+
+    // ── Begin batch transaction if needed ──────────────────────────────
+    if (batchTxn == nullptr)
+    {
+      int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &batchTxn);
+      if (rc != MDBX_SUCCESS)
+      {
+        std::cerr << "Error: failed to begin MDBX transaction: " << mdbx_strerror(rc) << std::endl;
+        return 1;
+      }
+    }
+
+    // ── Write height → hash ───────────────────────────────────────────
+    {
+      MDBX_val hkey = toMdbxVal(&h, sizeof(h));
+      MDBX_val hval = toMdbxVal(blockHash.data, sizeof(blockHash));
+      mdbx_put(batchTxn, dbiHeights, &hkey, &hval, MDBX_UPSERT);
+    }
+
+    // ── Write block entry ─────────────────────────────────────────────
+    {
+      std::string beKey = blockEntryKey(h);
+      MDBX_val bkey = toMdbxVal(beKey.data(), beKey.size());
+      MDBX_val bval = toMdbxVal(ba.data(), ba.size());
+      mdbx_put(batchTxn, dbiEntries, &bkey, &bval, MDBX_UPSERT);
+    }
+
+    // ── Write block header ────────────────────────────────────────────
+    {
+      std::string hdrKey = blockHeaderKey(h);
+      MDBX_val hk = toMdbxVal(hdrKey.data(), hdrKey.size());
+      MDBX_val hv = toMdbxVal(&hdr, sizeof(hdr));
+      mdbx_put(batchTxn, dbiHeaders, &hk, &hv, MDBX_UPSERT);
+    }
 
     idx.blockHashes.push_back(blockHash);
     idx.hashToHeight[blockHash] = h;
-    lastGoodHeight = h;
+    migratedBlocks++;
+    batchCount++;
 
-    // Progress
-    if (h % (totalBlocks / 100 + 1) == 0 || h == totalBlocks - 1)
+    // ── Commit batch if full or final block ────────────────────────────
+    if (batchCount >= batchSize || h == totalBlocks - 1)
     {
-      auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::steady_clock::now() - startTime)
-                         .count();
-      std::cout << "Progress: " << h << " / " << totalBlocks
-                << " (" << (h * 100 / totalBlocks) << "%)"
-                << " - " << elapsed << "s elapsed";
-      if (brokenBlocks > 0)
-        std::cout << " [" << brokenBlocks << " blocks skipped]";
-      if (corruptedTxs > 0)
-        std::cout << " [" << corruptedTxs << " corrupted txs]";
-      std::cout << std::endl;
+      int rc = mdbx_txn_commit(batchTxn);
+      if (rc != MDBX_SUCCESS)
+      {
+        std::cerr << "Error: failed to commit MDBX transaction at height " << h
+                  << ": " << mdbx_strerror(rc) << std::endl;
+        mdbx_txn_abort(batchTxn);
+        return 1;
+      }
+      batchTxn = nullptr;
+      batchCount = 0;
+    }
+
+    // ── Progress report every 10,000 blocks or final block ─────────────
+    if (migratedBlocks % 10000 == 0 || h == totalBlocks - 1)
+    {
+      auto now = std::chrono::steady_clock::now();
+      auto totalElapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
+      auto intervalElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReportTime).count();
+
+      float percent = migratedBlocks * 100.0f / totalBlocks;
+
+      float overallSpeed = totalElapsed > 0 ? migratedBlocks / (float)totalElapsed : 0;
+
+      uint32_t blocksInInterval = migratedBlocks - lastReportBlocks;
+      float recentSpeed = intervalElapsed > 0 ? blocksInInterval / (intervalElapsed / 1000.0f) : 0;
+
+      uint64_t remaining = totalBlocks - migratedBlocks;
+      int64_t etaSeconds = overallSpeed > 0 ? (int64_t)(remaining / overallSpeed) : 0;
+
+      std::cout << "\r  ["
+                << std::setw(7) << migratedBlocks << " / " << std::setw(7) << totalBlocks
+                << "] " << std::fixed << std::setprecision(1) << std::setw(6) << percent << "%"
+                << " | Overall: " << std::setw(10) << formatSpeed(overallSpeed)
+                << " | Recent: " << std::setw(10) << formatSpeed(recentSpeed)
+                << " | ETA: " << formatDuration(etaSeconds)
+                << " | Elapsed: " << formatDuration(totalElapsed);
+
+      if (skippedBlocks > 0)
+        std::cout << " | Skipped: " << skippedBlocks;
+
+      std::cout << std::flush;
+
+      if (migratedBlocks % 100000 == 0 || h == totalBlocks - 1)
+        std::cout << std::endl;
+
+      lastReportTime = now;
+      lastReportBlocks = migratedBlocks;
     }
   }
 
-  writeFastIndexes(mdbxStorage, idx);
+  // Final flush
   mdbxStorage.flush();
 
   auto endTime = std::chrono::steady_clock::now();
   auto totalSeconds = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count();
 
   std::cout << std::endl;
-  std::cout << "Migration complete!" << std::endl;
-  std::cout << "  Blocks migrated: " << idx.blockHashes.size() << std::endl;
-  std::cout << "  Transactions indexed: " << idx.transactionMap.size() << std::endl;
-  std::cout << "  Key images tracked: " << idx.spentKeys.size() << std::endl;
-  std::cout << "  Output amounts tracked: " << idx.outputs.size() << std::endl;
-  std::cout << "  Multisig amounts tracked: " << idx.multisigOutputs.size() << std::endl;
-  std::cout << "  Time: " << (totalSeconds / 60) << "m " << (totalSeconds % 60) << "s" << std::endl;
-  std::cout << "  Speed: " << (idx.blockHashes.size() / std::max(totalSeconds, 1L)) << " blocks/sec" << std::endl;
-  std::cout << "  New database: " << mdbxPath << std::endl;
-  if (brokenBlocks > 0)
+  std::cout << std::endl;
+  std::cout << "═══════════════════════════════════════════════════════" << std::endl;
+  std::cout << "  Migration complete!" << std::endl;
+  std::cout << "═══════════════════════════════════════════════════════" << std::endl;
+  std::cout << "  Blocks migrated: " << migratedBlocks << std::endl;
+  std::cout << "  Blocks skipped:  " << skippedBlocks << std::endl;
+  std::cout << "  Total time:      " << formatDuration(totalSeconds) << std::endl;
+  std::cout << "  Avg speed:       " << formatSpeed(totalSeconds > 0 ? migratedBlocks / (float)totalSeconds : 0) << std::endl;
+  std::cout << "  Database:        " << mdbxPath << std::endl;
+  std::cout << "═══════════════════════════════════════════════════════" << std::endl;
+
+  if (skippedBlocks > 0)
   {
     std::cout << std::endl;
-    std::cout << "  WARNING: " << brokenBlocks << " blocks were skipped due to corruption." << std::endl;
-    std::cout << "  The chain was truncated at height " << lastGoodHeight << "." << std::endl;
+    std::cout << "  NOTE: " << skippedBlocks << " blocks were skipped." << std::endl;
+    std::cout << "  The daemon will validate the chain on startup." << std::endl;
   }
 
-  // Spot-check verification
-  std::cout << std::endl
-            << "Verifying migrated data..." << std::endl;
+  // ── Spot-check verification ─────────────────────────────────────────
+  std::cout << std::endl;
+  std::cout << "Verifying migrated data (spot-check)..." << std::endl;
   bool verificationOk = true;
-  uint32_t blocksToCheck = std::min(static_cast<uint32_t>(20), static_cast<uint32_t>(idx.blockHashes.size()));
+  uint32_t blocksToCheck = std::min(static_cast<uint32_t>(20), migratedBlocks);
   for (uint32_t i = 0; i < blocksToCheck && verificationOk; ++i)
   {
-    uint32_t h = (i == 0) ? 0 : (static_cast<uint32_t>(rand()) % (idx.blockHashes.size() - 1) + 1);
+    uint32_t h = (i == 0) ? 0 : (static_cast<uint32_t>(rand()) % (migratedBlocks - 1) + 1);
 
     BinaryArray migratedBa;
     if (!mdbxStorage.getBlockEntry(h, migratedBa))
     {
-      std::cerr << "Verification failed: block " << h << " not found" << std::endl;
+      std::cerr << "  FAIL: block " << h << " not found in MDBX" << std::endl;
       verificationOk = false;
       break;
     }
@@ -714,7 +461,7 @@ int main(int argc, char *argv[])
     Blockchain::BlockEntry migratedEntry;
     if (!cn::fromBinaryArray(migratedEntry, migratedBa))
     {
-      std::cerr << "Verification failed: block " << h << " failed to deserialise" << std::endl;
+      std::cerr << "  FAIL: block " << h << " failed to deserialize" << std::endl;
       verificationOk = false;
       break;
     }
@@ -722,23 +469,27 @@ int main(int argc, char *argv[])
     crypto::Hash migratedHash = get_block_hash(migratedEntry.bl);
     if (idx.blockHashes[h] != migratedHash)
     {
-      std::cerr << "Verification failed: block " << h << " hash mismatch" << std::endl;
+      std::cerr << "  FAIL: block " << h << " hash mismatch" << std::endl;
+      std::cerr << "    expected: " << common::podToHex(idx.blockHashes[h]) << std::endl;
+      std::cerr << "    actual:   " << common::podToHex(migratedHash) << std::endl;
       verificationOk = false;
       break;
     }
   }
 
   if (verificationOk)
-    std::cout << "Verification passed!" << std::endl;
+    std::cout << "  All " << blocksToCheck << " spot-checks passed!" << std::endl;
   else
-    std::cerr << "Verification failed. Some blocks may not have migrated correctly." << std::endl;
+    std::cerr << "  Verification FAILED." << std::endl;
 
-  source->close();
+  svSource->close();
   mdbxStorage.close();
 
-  std::cout << std::endl
-            << "Done. Start your daemon with:" << std::endl;
-  std::cout << "  ./conceald --use-mdbx --data-dir " << newDir << std::endl;
+  std::cout << std::endl;
+  std::cout << "Done. Start your daemon with:" << std::endl;
+  std::cout << "  ./conceald --data-dir " << newDir << std::endl;
+  std::cout << std::endl;
+  std::cout << "In-memory indexes will be rebuilt automatically on first startup." << std::endl;
 
   return verificationOk ? 0 : 1;
 }

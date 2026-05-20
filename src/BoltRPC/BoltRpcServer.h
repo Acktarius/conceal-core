@@ -1,198 +1,132 @@
-// BoltRpcServer.h — BoltRPC wallet JSON-RPC server (walletd replacement)
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
-// Distributed under the MIT/X11 software license
+//
+// Distributed under the MIT/X11 software license.
 
 #pragma once
 
-#include <atomic>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
-#include <thread>
+#include<atomic>
 #include <functional>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
-#include "BoltHttp/BoltHttpServer.h"
-#include "BoltCore/BoltCore.h"
+#include "WalletManager.h"
 #include "Common/JsonValue.h"
-#include "CryptoNoteCore/Currency.h"
-#include "NodeRpcProxy/NodeRpcProxy.h"
-#include "Logging/LoggerRef.h"
-#include "SPV/SPVWallet.h"
+
+namespace cn
+{
+  class INode;
+  class Currency;
+}
 
 namespace BoltRPC
 {
-  class StateManager;
-  class SyncMonitor;
+
+  class WalletManager;
+
+  // ─── JSON-RPC Request / Response ───────────────────────────────────────────
+
+  struct JsonRpcRequest
+  {
+    std::string jsonrpc;
+    std::string method;
+    common::JsonValue params;
+    common::JsonValue id;
+  };
+
+  struct JsonRpcResponse
+  {
+    common::JsonValue result;
+    common::JsonValue error;
+    common::JsonValue id;
+
+    std::string toJson() const;
+  };
+
+  // ─── Method handler type ───────────────────────────────────────────────────
+
+  using RpcMethod = std::function<common::JsonValue(const common::JsonValue &params)>;
+
+  // ─── BoltRpcServer ─────────────────────────────────────────────────────────
 
   class BoltRpcServer
   {
   public:
-    BoltRpcServer(platform_system::Dispatcher &dispatcher,
-                  logging::ILogger &logger,
-                  BoltCore::Wallet &wallet,
+    BoltRpcServer(uint16_t port,
                   cn::INode &node,
                   const cn::Currency &currency,
-                  const std::string &address);
-
+                  const std::string &dataDir,
+                  const std::string &daemonHost,
+                  uint16_t daemonPort);
     ~BoltRpcServer();
 
-    void start(const std::string &bindIp, uint16_t bindPort, size_t threadCount = 1);
+    // ── Lifecycle ──────────────────────────────────────────────────────────
+    bool start();
     void stop();
+    bool isRunning() const;
 
-    // Connect to a sidechain validator for proxied RPC calls
-    void setSidechainConnection(const std::string &host, uint16_t port);
+    // ── Wallet access (for CLI / GUI to call directly) ─────────────────────
+    WalletManager &wallet() { return *m_walletManager; }
+    const WalletManager &wallet() const { return *m_walletManager; }
 
-    // Store daemon address so getSyncStatus can query it directly
-    void setDaemonConnection(const std::string &host, uint16_t port);
-
-    // Called by SyncMonitor when new outputs are discovered
-    void onNewOutputs(const std::vector<BoltCore::OutputInfo> &outputs, uint32_t newHeight);
-
-    uint32_t getNodeHeight() const;
-
-    // Wire up state persistence so save() and auto-save can write wallet state
-    void setStateManager(StateManager *stateManager,
-                         std::vector<BoltCore::OutputInfo> *outputs,
-                         std::atomic<uint32_t> *syncedHeight);
-
-    // Set the encryption password for the current session
-    void setPassword(const std::string &password);
-
-    // Public save method for auto-save timer — persists outputs AND keys (encrypted if password set)
-    bool saveWalletState();
-
-    // Access the underlying HTTP server for SSE/WebSocket setup
-    void setSseBroadcaster(BoltHttp::SseBroadcaster *broadcaster);
-    BoltHttp::Server *server() { return m_server.get(); }
-
-    void setSyncedHeight(uint32_t height) { m_syncedHeight.store(height, std::memory_order_relaxed); }
-
-    // Start incremental sync after wallet import (if not started at boot)
-    using OutputCallback = std::function<void(const std::vector<BoltCore::OutputInfo> &, uint32_t)>;
-    void startSync(const std::string &dataDir,
-                   const crypto::SecretKey &viewKey,
-                   const crypto::PublicKey &spendPub,
-                   const crypto::SecretKey *spendKey);
-    void setDataDir(const std::string &dataDir) { m_dataDir = dataDir; }
-
-    // SPV
-    void enableLightMode(const std::string& headersFile = "",
-                         const std::string& bootstrapUrl = "",
-                         const std::string& remoteHost = "seed1.conceal.network",
-                         uint16_t remotePort = 16000);
-    
-    bool isLightMode() const { return m_lightMode; }
-    uint32_t getNodeHeightLight() const;
+    // ── CORS ───────────────────────────────────────────────────────────────
+    void setCorsDomain(const std::string &domain);
 
   private:
-    void handleRequest(const BoltHttp::Request &request, BoltHttp::Response &response);
-    std::string handleJsonRpc(const std::string &body);
-    std::string sidechainRpcCall(const std::string &method, const std::string &params);
-    void submitTransaction(const BoltCore::TransferResult &result);
-    void startAutoSave();
+    // ── HTTP server ────────────────────────────────────────────────────────
+    void httpListenLoop();
+    void handleRequest(const std::string &requestBody, std::string &responseBody);
+    void handleJsonRpc(const std::string &requestBody, std::string &responseBody);
 
-    // System
-    std::string methodGetVersion(const common::JsonValue &params);
+    // ── Method registration ────────────────────────────────────────────────
+    void registerMethods();
+    RpcMethod findMethod(const std::string &name) const;
 
-    // Wallet lifecycle
-    std::string methodImportWallet(const common::JsonValue &params);
-    std::string methodGenerateWallet(const common::JsonValue &params);
-    std::string methodUnlock(const common::JsonValue &params);
-    std::string methodLock(const common::JsonValue &params);
-    std::string methodChangePassword(const common::JsonValue &params);
-    std::string methodGetViewKey(const common::JsonValue &params);
-    std::string methodGetSpendKey(const common::JsonValue &params);
-    std::string methodExportWallet(const common::JsonValue &params);
-    std::string methodGetWalletHeight(const common::JsonValue &params);
+    // ── RPC methods ────────────────────────────────────────────────────────
+    common::JsonValue rpc_getStatus(const common::JsonValue &params);
+    common::JsonValue rpc_getBalance(const common::JsonValue &params);
+    common::JsonValue rpc_getAddress(const common::JsonValue &params);
+    common::JsonValue rpc_getOutputs(const common::JsonValue &params);
+    common::JsonValue rpc_getTransactions(const common::JsonValue &params);
+    common::JsonValue rpc_createWallet(const common::JsonValue &params);
+    common::JsonValue rpc_importWallet(const common::JsonValue &params);
+    common::JsonValue rpc_unlockWallet(const common::JsonValue &params);
+    common::JsonValue rpc_lockWallet(const common::JsonValue &params);
+    common::JsonValue rpc_sendTransaction(const common::JsonValue &params);
+    common::JsonValue rpc_sendDeposit(const common::JsonValue &params);
+    common::JsonValue rpc_sendWithdrawal(const common::JsonValue &params);
+    common::JsonValue rpc_syncNow(const common::JsonValue &params);
+    common::JsonValue rpc_exportKeys(const common::JsonValue &params);
+    common::JsonValue rpc_exportState(const common::JsonValue &params);
 
-    // Mainchain
-    std::string methodGetBalance(const common::JsonValue &params);
-    std::string methodGetAddress(const common::JsonValue &params);
-    std::string methodGetStatus(const common::JsonValue &params);
-    std::string methodGetSyncStatus(const common::JsonValue &params);
-    std::string methodTransfer(const common::JsonValue &params);
-    std::string methodGetTransactions(const common::JsonValue &params);
-    std::string methodCreateDeposit(const common::JsonValue &params);
-    std::string methodWithdrawDeposit(const common::JsonValue &params);
-    std::string methodGetDeposits(const common::JsonValue &params);
-    std::string methodEstimateFusion(const common::JsonValue &params);
-    std::string methodSendFusionTransaction(const common::JsonValue &params);
-    std::string methodReset(const common::JsonValue &params);
-    std::string methodSave(const common::JsonValue &params);
-    std::string methodGetNetworkHeight(const common::JsonValue &params);
+    // ── Helpers ────────────────────────────────────────────────────────────
+    common::JsonValue makeResult(const common::JsonValue &data) const;
+    common::JsonValue makeError(int code, const std::string &message) const;
 
-    // Sidechain
-    std::string methodGetSidechainStatus(const common::JsonValue &params);
-    std::string methodGetSidechainTokens(const common::JsonValue &params);
-    std::string methodSidechainTransfer(const common::JsonValue &params);
-    std::string methodSidechainCreateToken(const common::JsonValue &params);
-    std::string methodGetTokenBalance(const common::JsonValue &params);
-
-    // DEX
-    std::string methodDexGetOrderBook(const common::JsonValue &params);
-    std::string methodDexPlaceOrder(const common::JsonValue &params);
-    std::string methodDexCancelOrder(const common::JsonValue &params);
-    std::string methodDexGetMyOrders(const common::JsonValue &params);
-    std::string methodDexGetTradeHistory(const common::JsonValue &params);
-    std::string methodDexGetEscrowBalance(const common::JsonValue &params);
-
-    // Bridge
-    std::string methodBridgeGetStatus(const common::JsonValue &params);
-    std::string methodBridgeLock(const common::JsonValue &params);
-    std::string methodBridgeUnlock(const common::JsonValue &params);
-
-    logging::LoggerRef m_logger;
-    BoltCore::Wallet &m_wallet;
+    // ── Members ────────────────────────────────────────────────────────────
+    uint16_t m_port;
     cn::INode &m_node;
     const cn::Currency &m_currency;
-    std::string m_address;
-    std::atomic<uint32_t> m_syncedHeight{0};
-    std::mutex m_walletMutex;
-    std::string m_sidechainHost;
-    uint16_t m_sidechainPort = 8080;
-    bool m_sidechainConnected = false;
-    std::string m_daemonHost;
-    uint16_t m_daemonPort = 16000;
-    platform_system::Dispatcher &m_dispatcher;
-    std::unique_ptr<BoltHttp::Server> m_server;
-
-    // Light mode members
-    bool m_lightMode = false;
-    SPV::SPVWallet *m_spvWallet;
-    std::string m_headersFile;
-    std::string m_bootstrapUrl;
-    std::string m_remoteHost;
-    uint16_t m_remotePort;
-
-    // State persistence
-    StateManager *m_stateManager = nullptr;
-    std::vector<BoltCore::OutputInfo> *m_outputs = nullptr;
-    std::atomic<uint32_t> *m_externalSyncedHeight = nullptr;
-
-    // Encryption — derived key stays in memory for auto-save; raw password for re-derivation on save
-    std::string m_password;   // User passphrase (zeroed on lock/shutdown)
-    std::string m_derivedKey; // 32-byte ChaCha8 key derived from password (zeroed on lock/shutdown)
-
-    // Auto-save timer
-    std::thread m_autoSaveThread;
-    std::atomic<bool> m_autoSaveRunning{false};
-
-    // Locked state (keys zeroed out but RPC stays alive)
-    bool m_locked = false;
-    crypto::SecretKey m_savedViewKey;
-    crypto::SecretKey m_savedSpendKey;
-
-    // SSE support
-    BoltHttp::SseBroadcaster *m_sseBroadcaster = nullptr;
-
-    // Sync monitor (may be started after boot via importWallet RPC)
-    std::unique_ptr<SyncMonitor> m_syncMonitor;
     std::string m_dataDir;
-    crypto::SecretKey m_syncViewKey;
-    crypto::PublicKey m_syncSpendPub;
-    bool m_hasSpendKeyForSync = false;
-    crypto::SecretKey m_syncSpendKey;
+    std::string m_corsDomain;
+    std::string m_daemonHost;
+    uint16_t m_daemonPort;
+
+    std::unique_ptr<WalletManager> m_walletManager;
+    std::unordered_map<std::string, RpcMethod> m_methods;
+    std::atomic<bool> m_running{false};
+    int m_serverSocket = -1;
+
+    static constexpr int JSON_RPC_PARSE_ERROR = -32700;
+    static constexpr int JSON_RPC_METHOD_NOT_FOUND = -32601;
+    static constexpr int JSON_RPC_INVALID_PARAMS = -32602;
+    static constexpr int JSON_RPC_INTERNAL_ERROR = -32603;
+    static constexpr int WALLET_LOCKED = -1;
+    static constexpr int WALLET_NOT_FOUND = -2;
+    static constexpr int WALLET_ALREADY_EXISTS = -3;
+    static constexpr int INVALID_PASSWORD = -4;
+    static constexpr int SYNC_IN_PROGRESS = -5;
   };
 
 } // namespace BoltRPC

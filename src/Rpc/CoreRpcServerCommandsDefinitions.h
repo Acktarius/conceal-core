@@ -1179,4 +1179,94 @@ struct COMMAND_RPC_EXPORT_HEADERS
     }
   };
 };
+
+struct COMMAND_RPC_GET_SPV_OUTPUTS
+{
+  struct request
+  {
+    std::string view_key;
+    std::string spend_key;
+    uint32_t from_height = 0;
+    uint32_t to_height = 0;
+    uint32_t max_outputs = 10000;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(view_key)
+      KV_MEMBER(spend_key)
+      KV_MEMBER(from_height)
+      KV_MEMBER(to_height)
+      KV_MEMBER(max_outputs)
+    }
+  };
+
+  struct response
+  {
+    struct OutputEntry
+    {
+      uint32_t block_height;
+      std::string tx_hash;
+      uint64_t amount;
+      uint32_t output_index;
+      std::string output_public_key;
+      std::string tx_public_key;
+      uint64_t timestamp;
+      bool is_deposit;
+      uint32_t term;
+
+      void serialize(ISerializer &s)
+      {
+        KV_MEMBER(block_height)
+        KV_MEMBER(tx_hash)
+        KV_MEMBER(amount)
+        KV_MEMBER(output_index)
+        KV_MEMBER(output_public_key)
+        KV_MEMBER(tx_public_key)
+        KV_MEMBER(timestamp)
+        KV_MEMBER(is_deposit)
+        KV_MEMBER(term)
+      }
+    };
+
+    std::vector<OutputEntry> outputs;
+    uint32_t next_from_height;
+    bool has_more;
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(outputs)
+      KV_MEMBER(next_from_height)
+      KV_MEMBER(has_more)
+      KV_MEMBER(status)
+    }
+  };
+};
+
+struct COMMAND_RPC_GET_WALLET_SNAPSHOT
+{
+  struct request
+  {
+    std::vector<std::string> tx_pub_keys; // hex-encoded tx public keys the wallet knows about
+    uint32_t wallet_height;               // wallet's last synced height (for new key discovery)
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(tx_pub_keys)
+      KV_MEMBER(wallet_height)
+    }
+  };
+
+  struct response
+  {
+    std::string snapshot; // JSON containing outputs, spent key images, new tx pub keys, current height
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(snapshot)
+      KV_MEMBER(status)
+    }
+  };
+};
 }

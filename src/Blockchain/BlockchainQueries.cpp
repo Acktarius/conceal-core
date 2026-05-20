@@ -13,21 +13,17 @@
 
 namespace cn
 {
-  //  Chain state queries (height, tail, block lookup)
+  // Chain state queries (height, tail, block lookup)
   uint32_t Blockchain::getCurrentBlockchainHeight()
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-    if (m_useMdbx && m_mdbxStorage)
-      return static_cast<uint32_t>(m_blockHashes.size());
-    return static_cast<uint32_t>(m_blocks.size());
+    return static_cast<uint32_t>(m_blockHashes.size());
   }
 
   crypto::Hash Blockchain::getTailId()
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-    if (m_useMdbx && m_mdbxStorage)
-      return m_blockHashes.empty() ? NULL_HASH : m_blockHashes.back();
-    return m_blocks.empty() ? NULL_HASH : m_blockIndex.getTailId();
+    return m_blockHashes.empty() ? NULL_HASH : m_blockHashes.back();
   }
 
   crypto::Hash Blockchain::getTailId(uint32_t &height)
@@ -41,13 +37,8 @@ namespace cn
   crypto::Hash Blockchain::getBlockIdByHeight(uint32_t height)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-    if (m_useMdbx)
-    {
-      assert(height < m_blockHashes.size());
-      return m_blockHashes[height];
-    }
-    assert(height < m_blockIndex.size());
-    return m_blockIndex.getBlockId(height);
+    assert(height < m_blockHashes.size());
+    return m_blockHashes[height];
   }
 
   bool Blockchain::getBlockByHash(const crypto::Hash &blockHash, Block &b)
@@ -55,21 +46,10 @@ namespace cn
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
     // Try main chain
-    uint32_t height = 0;
-    bool found = false;
-
-    if (m_useMdbx)
+    auto it = m_hashToHeight.find(blockHash);
+    if (it != m_hashToHeight.end())
     {
-      auto it = m_hashToHeight.find(blockHash);
-      if (it != m_hashToHeight.end())
-      {
-        b = blocksAt(it->second).bl;
-        return true;
-      }
-    }
-    else if (m_blockIndex.getBlockHeight(blockHash, height))
-    {
-      b = blocksAt(height).bl;
+      b = blocksAt(it->second).bl;
       return true;
     }
 
@@ -86,41 +66,29 @@ namespace cn
   bool Blockchain::getBlockHeight(const crypto::Hash &blockId, uint32_t &blockHeight)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lock(m_blockchain_lock);
-    if (m_useMdbx)
+    auto it = m_hashToHeight.find(blockId);
+    if (it != m_hashToHeight.end())
     {
-      auto it = m_hashToHeight.find(blockId);
-      if (it != m_hashToHeight.end())
-      {
-        blockHeight = it->second;
-        return true;
-      }
-      return false;
+      blockHeight = it->second;
+      return true;
     }
-    return m_blockIndex.getBlockHeight(blockId, blockHeight);
+    return false;
   }
 
   bool Blockchain::haveBlock(const crypto::Hash &id)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-    if (m_useMdbx)
-    {
-      if (m_hashToHeight.count(id))
-        return true;
-      return m_alternative_chains.count(id) > 0;
-    }
-    if (m_blockIndex.hasBlock(id))
+    if (m_hashToHeight.count(id))
       return true;
     return m_alternative_chains.count(id) > 0;
   }
 
   bool Blockchain::isBlockInMainChain(const crypto::Hash &blockId) const
   {
-    if (m_useMdbx)
-      return m_hashToHeight.count(blockId) > 0;
-    return m_blockIndex.hasBlock(blockId);
+    return m_hashToHeight.count(blockId) > 0;
   }
 
-  //  Block metadata queries (timestamp, coins, difficulty at height)
+  // Block metadata queries (timestamp, coins, difficulty at height)
   uint64_t Blockchain::getBlockTimestamp(uint32_t height)
   {
     assert(height < blocksSize());
@@ -139,20 +107,13 @@ namespace cn
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-    if (m_useMdbx && m_mdbxStorage)
-    {
-      cn::BinaryArray ba;
-      if (!m_mdbxStorage->getBlockEntry(static_cast<uint32_t>(height), ba))
-        return 0;
-      BlockEntry entry;
-      if (!cn::fromBinaryArray(entry, ba))
-        return 0;
-      return entry.already_generated_coins;
-    }
-
-    if (blocksEmpty() || height >= blocksSize())
+    cn::BinaryArray ba;
+    if (!m_mdbxStorage->getBlockEntry(static_cast<uint32_t>(height), ba))
       return 0;
-    return blocksAt(height).already_generated_coins;
+    BlockEntry entry;
+    if (!cn::fromBinaryArray(entry, ba))
+      return 0;
+    return entry.already_generated_coins;
   }
 
   uint8_t Blockchain::get_block_major_version_for_height(uint64_t height) const
@@ -170,7 +131,7 @@ namespace cn
     return BLOCK_MAJOR_VERSION_1;
   }
 
-  //  Transaction queries
+  // Transaction queries
   bool Blockchain::haveTransaction(const crypto::Hash &id)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
@@ -238,14 +199,14 @@ namespace cn
     return true;
   }
 
-  //  Spent key image queries
+  // Spent key image queries
   bool Blockchain::have_tx_keyimg_as_spent(const crypto::KeyImage &key_im)
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
     return m_spent_keys.find(key_im) != m_spent_keys.end();
   }
 
-  //  Multisignature output queries
+  // Multisignature output queries
   bool Blockchain::get_out_by_msig_gindex(uint64_t amount, uint64_t gindex, MultisignatureOutput &out)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -278,26 +239,15 @@ namespace cn
     return true;
   }
 
-  //  Block metadata by hash (coins generated, block size)
+  // Block metadata by hash (coins generated, block size)
   bool Blockchain::getAlreadyGeneratedCoins(const crypto::Hash &hash, uint64_t &generatedCoins)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-    uint32_t height = 0;
-    bool found = false;
-
-    if (m_useMdbx)
+    auto it = m_hashToHeight.find(hash);
+    if (it != m_hashToHeight.end())
     {
-      auto it = m_hashToHeight.find(hash);
-      if (it != m_hashToHeight.end())
-      {
-        generatedCoins = getBlockHeader(it->second).alreadyGeneratedCoins;
-        return true;
-      }
-    }
-    else if (m_blockIndex.getBlockHeight(hash, height))
-    {
-      generatedCoins = getBlockHeader(height).alreadyGeneratedCoins;
+      generatedCoins = getBlockHeader(it->second).alreadyGeneratedCoins;
       return true;
     }
 
@@ -315,20 +265,10 @@ namespace cn
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-    uint32_t height = 0;
-
-    if (m_useMdbx)
+    auto it = m_hashToHeight.find(hash);
+    if (it != m_hashToHeight.end())
     {
-      auto it = m_hashToHeight.find(hash);
-      if (it != m_hashToHeight.end())
-      {
-        size = getBlockHeader(it->second).blockCumulativeSize;
-        return true;
-      }
-    }
-    else if (m_blockIndex.getBlockHeight(hash, height))
-    {
-      size = getBlockHeader(height).blockCumulativeSize;
+      size = getBlockHeader(it->second).blockCumulativeSize;
       return true;
     }
 
@@ -341,7 +281,7 @@ namespace cn
     return false;
   }
 
-  //  Index queries (payment ID, timestamp, generated transactions)
+  // Index queries (payment ID, timestamp, generated transactions)
   bool Blockchain::getGeneratedTransactionsNumber(uint32_t height, uint64_t &generatedTransactions)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -363,7 +303,7 @@ namespace cn
     return m_paymentIdIndex.find(paymentId, transactionHashes);
   }
 
-  //  Random output selection (ring signature mixins)
+  // Random output selection (ring signature mixins)
   size_t Blockchain::find_end_of_allowed_index(
       const std::vector<std::pair<TransactionIndex, uint16_t>> &amount_outs)
   {
@@ -448,7 +388,7 @@ namespace cn
     return true;
   }
 
-  //  Checkpoint zone
+  // Checkpoint zone
   bool Blockchain::isInCheckpointZone(const uint32_t height) const
   {
     return m_checkpoints.is_in_checkpoint_zone(height);

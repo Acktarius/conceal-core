@@ -23,7 +23,7 @@ namespace Sidechain
   }
 
   SidechainStorage::SidechainStorage(const std::string &dataDir)
-      : m_storage(ensureDataDir(dataDir), false, 0)
+      : m_storage(ensureDataDir(dataDir))
   {
     if (topBlockHeight() == 0)
     {
@@ -41,32 +41,35 @@ namespace Sidechain
     flush();
   }
 
+  // ── Block storage ─────────────────────────────────────────────────────
+
   bool SidechainStorage::addBlock(const Block &block, const crypto::Hash &hash)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     cn::BinaryArray ba = cn::toBinaryArray(block);
     uint64_t height = block.header.height;
-    m_storage.pushBlockEntry(static_cast<uint32_t>(height), ba);
-    m_storage.addBlock(cn::Block(), hash, static_cast<uint32_t>(height));
-    m_storage.setTopBlockHeight(static_cast<uint32_t>(height));
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
+    m_storage.pushBlockEntry(static_cast<uint32_t>(height), vec);
+    m_hashToHeight[hash] = height;
     m_storage.flush();
     return true;
   }
 
   bool SidechainStorage::getBlock(uint64_t height, Block &block) const
   {
-    cn::BinaryArray ba;
-    if (!m_storage.getBlockEntry(static_cast<uint32_t>(height), ba))
+    std::vector<uint8_t> vec;
+    if (!m_storage.getBlockEntry(static_cast<uint32_t>(height), vec))
       return false;
+    cn::BinaryArray ba(vec.begin(), vec.end());
     return cn::fromBinaryArray(block, ba);
   }
 
   bool SidechainStorage::getBlock(const crypto::Hash &hash, Block &block) const
   {
-    uint32_t height = m_storage.getBlockHeight(hash);
-    if (height == 0)
+    auto it = m_hashToHeight.find(hash);
+    if (it == m_hashToHeight.end())
       return false;
-    return getBlock(height, block);
+    return getBlock(it->second, block);
   }
 
   uint64_t SidechainStorage::topBlockHeight() const
@@ -76,10 +79,13 @@ namespace Sidechain
 
   crypto::Hash SidechainStorage::getBlockHash(uint64_t height) const
   {
-    return m_storage.getBlockHash(static_cast<uint32_t>(height));
+    Block block;
+    if (!getBlock(height, block))
+      return crypto::Hash{};
+    return block.header.blockHash;
   }
 
-  // Fingerprint generation
+  // ── Fingerprint generation ────────────────────────────────────────────
   std::string SidechainStorage::generateFingerprint(
       const std::string &sourceChain,
       const std::string &sourceAsset,
@@ -91,19 +97,35 @@ namespace Sidechain
     return common::podToHex(hash);
   }
 
-  // Token operations
+  // ── Internal KV helpers ───────────────────────────────────────────────
+
+  bool SidechainStorage::getMeta(const std::string &key, std::vector<uint8_t> &value) const
+  {
+    return m_storage.get(key, value);
+  }
+
+  void SidechainStorage::putMeta(const std::string &key, const std::vector<uint8_t> &value)
+  {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_storage.put(key, value);
+    m_storage.flush();
+  }
+
+  // ── Token operations ──────────────────────────────────────────────────
+
   bool SidechainStorage::addToken(const TokenInfo &token)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     cn::BinaryArray ba = cn::toBinaryArray(token);
     std::string key = "token_" + std::to_string(token.id);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::cout << "addToken: key=" << key << " id=" << token.id
               << " name=" << token.name << " symbol=" << token.symbol
               << " fingerprint=" << token.fingerprint
               << " model=" << static_cast<int>(token.backingModel)
               << " lockedCCX=" << token.lockedCCXAmount
-              << " size=" << ba.size() << std::endl;
-    m_storage.putMeta(key, ba);
+              << " size=" << vec.size() << std::endl;
+    m_storage.put(key, vec);
 
     // Index by fingerprint if set
     if (!token.fingerprint.empty())
@@ -112,7 +134,7 @@ namespace Sidechain
       std::vector<uint8_t> fpValue(sizeof(uint64_t));
       uint64_t id = token.id;
       memcpy(fpValue.data(), &id, sizeof(uint64_t));
-      m_storage.putMeta(fpKey, fpValue);
+      m_storage.put(fpKey, fpValue);
     }
 
     m_storage.flush();
@@ -128,16 +150,17 @@ namespace Sidechain
   {
     std::string key = "token_" + std::to_string(tokenId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return false;
-    return cn::fromBinaryArray(token, value);
+    cn::BinaryArray ba(value.begin(), value.end());
+    return cn::fromBinaryArray(token, ba);
   }
 
   bool SidechainStorage::getTokenByFingerprint(const std::string &fingerprint, TokenInfo &token) const
   {
     std::string fpKey = "token_fp_" + fingerprint;
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(fpKey, value) || value.size() < sizeof(uint64_t))
+    if (!m_storage.get(fpKey, value) || value.size() < sizeof(uint64_t))
       return false;
     uint64_t tokenId;
     memcpy(&tokenId, value.data(), sizeof(uint64_t));
@@ -166,12 +189,13 @@ namespace Sidechain
     return id;
   }
 
-  // Rate limiting
+  // ── Rate limiting ─────────────────────────────────────────────────────
+
   bool SidechainStorage::canCreateToken(const crypto::PublicKey &address, uint64_t currentHeight) const
   {
     std::string key = "create_limit_" + common::podToHex(address);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value) || value.size() < sizeof(uint64_t))
+    if (!m_storage.get(key, value) || value.size() < sizeof(uint64_t))
       return true;
 
     uint64_t lastCreateHeight;
@@ -186,11 +210,12 @@ namespace Sidechain
     std::string key = "create_limit_" + common::podToHex(address);
     std::vector<uint8_t> value(sizeof(uint64_t));
     memcpy(value.data(), &currentHeight, sizeof(uint64_t));
-    m_storage.putMeta(key, value);
+    m_storage.put(key, value);
     m_storage.flush();
   }
 
-  // Asset registry operations
+  // ── Asset registry operations ─────────────────────────────────────────
+
   bool SidechainStorage::registerAsset(const std::string &sourceChain,
                                        const std::string &sourceAsset,
                                        const crypto::PublicKey &bridgeOperator,
@@ -202,11 +227,11 @@ namespace Sidechain
     std::string fingerprint = generateFingerprint(sourceChain, sourceAsset, bridgeOperator);
     std::string equivalenceClass = sourceChain + ":" + sourceAsset;
 
-    // Register by compound key: sourceChain + sourceAsset + bridgeOperator
+    // Register by compound key
     std::string sourceKey = "asset_src_" + sourceChain + "_" + sourceAsset + "_" + common::podToHex(bridgeOperator);
     std::vector<uint8_t> sourceValue(sizeof(uint64_t));
     memcpy(sourceValue.data(), &tokenId, sizeof(uint64_t));
-    m_storage.putMeta(sourceKey, sourceValue);
+    m_storage.put(sourceKey, sourceValue);
 
     // Register by token ID
     std::string tokenKey = "asset_tok_" + std::to_string(tokenId);
@@ -219,7 +244,8 @@ namespace Sidechain
     entry.equivalenceClass = equivalenceClass;
     entry.verified = verified;
     cn::BinaryArray ba = cn::toBinaryArray(entry);
-    m_storage.putMeta(tokenKey, ba);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
+    m_storage.put(tokenKey, vec);
 
     // Update the token's fingerprint
     TokenInfo token;
@@ -243,7 +269,7 @@ namespace Sidechain
   {
     std::string key = "asset_src_" + sourceChain + "_" + sourceAsset + "_" + common::podToHex(bridgeOperator);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value) || value.size() < sizeof(uint64_t))
+    if (!m_storage.get(key, value) || value.size() < sizeof(uint64_t))
       return false;
     memcpy(&tokenId, value.data(), sizeof(uint64_t));
     return true;
@@ -254,9 +280,10 @@ namespace Sidechain
   {
     std::string key = "asset_tok_" + std::to_string(tokenId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return false;
-    return cn::fromBinaryArray(entry, value);
+    cn::BinaryArray ba(value.begin(), value.end());
+    return cn::fromBinaryArray(entry, ba);
   }
 
   std::vector<AssetRegistryEntry> SidechainStorage::getAllAssets() const
@@ -272,7 +299,8 @@ namespace Sidechain
     return result;
   }
 
-  // Equivalence group operations
+  // ── Equivalence group operations ──────────────────────────────────────
+
   std::string SidechainStorage::getEquivalenceClass(const std::string &sourceChain,
                                                     const std::string &sourceAsset) const
   {
@@ -284,10 +312,9 @@ namespace Sidechain
     std::vector<uint64_t> result;
     std::string key = "equiv_" + equivalenceClass;
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return result;
 
-    // Format: count (4 bytes) followed by token IDs (8 bytes each)
     if (value.size() < sizeof(uint32_t))
       return result;
 
@@ -312,7 +339,6 @@ namespace Sidechain
 
     auto existing = getTokensByEquivalenceClass(equivalenceClass);
 
-    // Check if already in group
     for (uint64_t existingId : existing)
     {
       if (existingId == tokenId)
@@ -329,12 +355,13 @@ namespace Sidechain
       value.insert(value.end(), (uint8_t *)&id, (uint8_t *)&id + sizeof(id));
     }
 
-    m_storage.putMeta(key, value);
+    m_storage.put(key, value);
     m_storage.flush();
     return true;
   }
 
-  // Bridge operations
+  // ── Bridge operations ─────────────────────────────────────────────────
+
   bool SidechainStorage::addBridgeLock(const crypto::PublicKey &userAddress,
                                        uint64_t tokenId,
                                        uint64_t amount,
@@ -353,8 +380,9 @@ namespace Sidechain
     entry.unlocked = false;
 
     cn::BinaryArray ba = cn::toBinaryArray(entry);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::string key = "bridge_lock_" + std::to_string(entry.id);
-    m_storage.putMeta(key, ba);
+    m_storage.put(key, vec);
     m_storage.flush();
     return true;
   }
@@ -363,9 +391,10 @@ namespace Sidechain
   {
     std::string key = "bridge_lock_" + std::to_string(lockId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return false;
-    return cn::fromBinaryArray(lock, value);
+    cn::BinaryArray ba(value.begin(), value.end());
+    return cn::fromBinaryArray(lock, ba);
   }
 
   bool SidechainStorage::markBridgeLockUnlocked(uint64_t lockId)
@@ -376,8 +405,9 @@ namespace Sidechain
       return false;
     entry.unlocked = true;
     cn::BinaryArray ba = cn::toBinaryArray(entry);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::string key = "bridge_lock_" + std::to_string(lockId);
-    m_storage.putMeta(key, ba);
+    m_storage.put(key, vec);
     m_storage.flush();
     return true;
   }
@@ -423,13 +453,15 @@ namespace Sidechain
     return id;
   }
 
-  // Vesting operations
+  // ── Vesting operations ────────────────────────────────────────────────
+
   bool SidechainStorage::addVestingSchedule(const VestingSchedule &schedule)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     cn::BinaryArray ba = cn::toBinaryArray(schedule);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::string key = "vesting_" + std::to_string(schedule.scheduleId);
-    m_storage.putMeta(key, ba);
+    m_storage.put(key, vec);
     m_storage.flush();
     return true;
   }
@@ -438,9 +470,10 @@ namespace Sidechain
   {
     std::string key = "vesting_" + std::to_string(scheduleId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return false;
-    return cn::fromBinaryArray(schedule, value);
+    cn::BinaryArray ba(value.begin(), value.end());
+    return cn::fromBinaryArray(schedule, ba);
   }
 
   bool SidechainStorage::updateVestingSchedule(const VestingSchedule &schedule)
@@ -485,13 +518,15 @@ namespace Sidechain
     return id;
   }
 
-  // Reward pool operations
+  // ── Reward pool operations ────────────────────────────────────────────
+
   bool SidechainStorage::addRewardPool(const RewardPool &pool)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     cn::BinaryArray ba = cn::toBinaryArray(pool);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::string key = "reward_pool_" + std::to_string(pool.poolId);
-    m_storage.putMeta(key, ba);
+    m_storage.put(key, vec);
     m_storage.flush();
     return true;
   }
@@ -500,9 +535,10 @@ namespace Sidechain
   {
     std::string key = "reward_pool_" + std::to_string(poolId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return false;
-    return cn::fromBinaryArray(pool, value);
+    cn::BinaryArray ba(value.begin(), value.end());
+    return cn::fromBinaryArray(pool, ba);
   }
 
   bool SidechainStorage::updateRewardPool(const RewardPool &pool)
@@ -547,13 +583,15 @@ namespace Sidechain
     return id;
   }
 
-  // Stake operations
+  // ── Stake operations ──────────────────────────────────────────────────
+
   bool SidechainStorage::addStakeEntry(const StakeEntry &entry)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     cn::BinaryArray ba = cn::toBinaryArray(entry);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::string key = "stake_" + std::to_string(entry.entryId);
-    m_storage.putMeta(key, ba);
+    m_storage.put(key, vec);
     m_storage.flush();
     return true;
   }
@@ -562,9 +600,10 @@ namespace Sidechain
   {
     std::string key = "stake_" + std::to_string(entryId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value))
+    if (!m_storage.get(key, value))
       return false;
-    return cn::fromBinaryArray(entry, value);
+    cn::BinaryArray ba(value.begin(), value.end());
+    return cn::fromBinaryArray(entry, ba);
   }
 
   bool SidechainStorage::updateStakeEntry(const StakeEntry &entry)
@@ -609,7 +648,8 @@ namespace Sidechain
     return id;
   }
 
-  // Per-block processing
+  // ── Per-block processing ──────────────────────────────────────────────
+
   void SidechainStorage::processVestingReleases(uint64_t currentBlock)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -698,15 +738,12 @@ namespace Sidechain
         continue;
       }
 
-      // Calculate elapsed time since last accrual
-      uint64_t elapsed = 10; // Default for first accrual
+      uint64_t elapsed = 10;
       if (pool.lastAccrualTimestamp > 0 && now > pool.lastAccrualTimestamp)
         elapsed = now - pool.lastAccrualTimestamp;
 
       pool.lastAccrualTimestamp = now;
 
-      // Calculate rewards per second based on annual rate
-      // Annual rate in basis points, 31,536,000 seconds per year
       uint64_t annualRate = pool.rewardRateBasisPoints;
       uint64_t rewardsPerSecond = (pool.totalStaked * annualRate) / 10000 / 31536000;
 
@@ -732,7 +769,6 @@ namespace Sidechain
         }
         else if (rewardsForElapsed > pool.remainingRewards && pool.remainingRewards > 0)
         {
-          // Distribute remaining rewards proportionally
           auto stakes = getStakesByPool(poolId);
           uint64_t remaining = pool.remainingRewards;
           for (auto &stake : stakes)
@@ -756,12 +792,13 @@ namespace Sidechain
     m_storage.flush();
   }
 
-  // Account operations
+  // ── Account operations ────────────────────────────────────────────────
+
   bool SidechainStorage::getBalance(const crypto::PublicKey &address, uint64_t tokenId, uint64_t &balance) const
   {
     std::string key = "bal_" + common::podToHex(address) + "_" + std::to_string(tokenId);
     std::vector<uint8_t> value;
-    if (!m_storage.getMeta(key, value) || value.size() < sizeof(uint64_t))
+    if (!m_storage.get(key, value) || value.size() < sizeof(uint64_t))
     {
       balance = 0;
       return true;
@@ -776,10 +813,12 @@ namespace Sidechain
     std::string key = "bal_" + common::podToHex(address) + "_" + std::to_string(tokenId);
     std::vector<uint8_t> value(sizeof(uint64_t));
     memcpy(value.data(), &balance, sizeof(uint64_t));
-    m_storage.putMeta(key, value);
+    m_storage.put(key, value);
     m_storage.flush();
     return true;
   }
+
+  // ── Transaction execution ─────────────────────────────────────────────
 
   bool SidechainStorage::applyTransaction(const Transaction &tx)
   {
@@ -855,7 +894,6 @@ namespace Sidechain
         backingModel = static_cast<uint8_t>(std::stoi(extraStr.substr(secondColon + 1)));
       }
 
-      // Validate backing requirements
       if (backingModel == static_cast<uint8_t>(TokenBackingModel::Backed) ||
           backingModel == static_cast<uint8_t>(TokenBackingModel::Hybrid))
       {
@@ -882,8 +920,6 @@ namespace Sidechain
       if (tx.txHash != crypto::Hash())
         newToken.backingTxHash = tx.txHash;
 
-      // Parse royalty fields from extra
-      // The last parsed colon depends on what fields were provided
       size_t lastParsedColon = std::string::npos;
       if (sixthColon != std::string::npos)
         lastParsedColon = sixthColon;
@@ -953,12 +989,10 @@ namespace Sidechain
       std::string extraStr(tx.extra.begin(), tx.extra.end());
       bool isNewAsset = (extraStr.find(":new_asset") != std::string::npos);
 
-      // Use a local token ID that can be overridden for auto-creation
       uint64_t mintTokenId = tx.tokenId;
 
       if (isNewAsset && mintTokenId == 0)
       {
-        // Auto-create canonical CCX-backed token
         TokenInfo newToken;
         newToken.id = nextTokenId();
         newToken.name = "CCX (Bridged)";
@@ -970,12 +1004,10 @@ namespace Sidechain
         newToken.backingRatio = 100;
         newToken.lockedCCXAmount = 0;
 
-        // Generate fingerprint: conceal:native:bridgeOperatorPubKey
         newToken.fingerprint = generateFingerprint("conceal", "native", tx.from);
 
         addToken(newToken);
 
-        // Register in asset registry with bridge operator key
         registerAsset("conceal", "native", tx.from, newToken.id, true);
 
         mintTokenId = newToken.id;
@@ -1140,7 +1172,6 @@ namespace Sidechain
 
     case TransactionType::RevokeVesting:
     {
-      // Parse schedule ID from extra
       std::string extraStr(tx.extra.begin(), tx.extra.end());
       uint64_t scheduleId = std::stoull(extraStr);
 
@@ -1163,7 +1194,6 @@ namespace Sidechain
         return false;
       }
 
-      // Return unvested tokens to creator
       uint64_t unvested = schedule.totalAllocated - schedule.releasedAmount;
       getBalance(tx.from, schedule.tokenId, fromBalance);
       setBalance(tx.from, schedule.tokenId, fromBalance + unvested);
@@ -1194,7 +1224,6 @@ namespace Sidechain
       uint64_t rewardRate = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
       uint64_t endBlock = std::stoull(extraStr.substr(secondColon + 1, thirdColon - secondColon - 1));
 
-      // Check creator has enough tokens for the reward pool
       getBalance(tx.from, tx.tokenId, fromBalance);
       if (fromBalance < rewardAmount + tx.fee)
       {
@@ -1319,7 +1348,6 @@ namespace Sidechain
         return false;
       }
 
-      // Return staked tokens and pending rewards
       uint64_t returnAmount = entry.amount + entry.pendingRewards;
       getBalance(tx.from, entry.tokenId, fromBalance);
       setBalance(tx.from, entry.tokenId, fromBalance + returnAmount);
@@ -1328,7 +1356,6 @@ namespace Sidechain
         pool.totalStaked -= entry.amount;
       updateRewardPool(pool);
 
-      // Remove entry by zeroing it
       entry.amount = 0;
       entry.pendingRewards = 0;
       updateStakeEntry(entry);
@@ -1370,8 +1397,6 @@ namespace Sidechain
 
     case TransactionType::AmmCreatePool:
     {
-      // Parse extra: tokenIdB:amountA:amountB:feeBasisPoints
-      // tokenIdA comes from tx.tokenId, amountA from tx.amount
       std::string extraStr(tx.extra.begin(), tx.extra.end());
 
       size_t firstColon = extraStr.find(':');
@@ -1389,7 +1414,6 @@ namespace Sidechain
       uint64_t amountB = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
       uint16_t feeBasisPoints = static_cast<uint16_t>(std::stoi(extraStr.substr(secondColon + 1, thirdColon - secondColon - 1)));
 
-      // Verify creator has sufficient balances
       getBalance(tx.from, tx.tokenId, fromBalance);
       uint64_t balanceB = 0;
       getBalance(tx.from, tokenIdB, balanceB);
@@ -1400,11 +1424,9 @@ namespace Sidechain
         return false;
       }
 
-      // Deduct from creator
       setBalance(tx.from, tx.tokenId, fromBalance - amountA);
       setBalance(tx.from, tokenIdB, balanceB - amountB);
 
-      // Find next pool ID
       uint64_t poolId = 1;
       std::vector<uint8_t> poolData;
       while (getMeta("amm_pool_" + std::to_string(poolId), poolData))
@@ -1412,7 +1434,6 @@ namespace Sidechain
         ++poolId;
       }
 
-      // Create the pool
       AmmPool pool;
       pool.poolId = poolId;
       pool.creator = tx.from;
@@ -1425,9 +1446,9 @@ namespace Sidechain
       pool.active = true;
 
       cn::BinaryArray ba = cn::toBinaryArray(pool);
-      putMeta("amm_pool_" + std::to_string(poolId), ba);
+      std::vector<uint8_t> vec(ba.begin(), ba.end());
+      putMeta("amm_pool_" + std::to_string(poolId), vec);
 
-      // Give LP tokens to creator
       AmmPosition pos;
       pos.positionId = 1;
       pos.owner = tx.from;
@@ -1436,7 +1457,8 @@ namespace Sidechain
       pos.lastFeeCheckpoint = 0;
 
       cn::BinaryArray posBa = cn::toBinaryArray(pos);
-      putMeta("amm_pos_1", posBa);
+      std::vector<uint8_t> posVec(posBa.begin(), posBa.end());
+      putMeta("amm_pos_1", posVec);
 
       std::cout << "applyTransaction AmmCreatePool: pool created id=" << poolId << std::endl;
       break;
@@ -1459,7 +1481,6 @@ namespace Sidechain
       uint64_t amountA = tx.amount;
       uint64_t amountB = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
 
-      // Load pool
       AmmPool pool;
       std::vector<uint8_t> poolData;
       if (!getMeta("amm_pool_" + std::to_string(poolId), poolData))
@@ -1467,7 +1488,8 @@ namespace Sidechain
         std::cout << "applyTransaction AmmAddLiquidity: pool not found" << std::endl;
         return false;
       }
-      cn::fromBinaryArray(pool, poolData);
+      cn::BinaryArray poolBa(poolData.begin(), poolData.end());
+      cn::fromBinaryArray(pool, poolBa);
 
       if (!pool.active)
       {
@@ -1475,7 +1497,6 @@ namespace Sidechain
         return false;
       }
 
-      // Verify balance
       getBalance(tx.from, tx.tokenId, fromBalance);
       uint64_t balanceB = 0;
       getBalance(tx.from, pool.tokenIdB, balanceB);
@@ -1486,11 +1507,9 @@ namespace Sidechain
         return false;
       }
 
-      // Deduct from provider
       setBalance(tx.from, tx.tokenId, fromBalance - amountA);
       setBalance(tx.from, pool.tokenIdB, balanceB - amountB);
 
-      // Calculate LP tokens
       uint64_t liquidityMinted = 0;
       if (pool.totalLiquidity == 0)
         liquidityMinted = static_cast<uint64_t>(std::sqrt(amountA * amountB));
@@ -1501,15 +1520,14 @@ namespace Sidechain
         liquidityMinted = std::min(shareA, shareB);
       }
 
-      // Update pool
       pool.reserveA += amountA;
       pool.reserveB += amountB;
       pool.totalLiquidity += liquidityMinted;
 
       cn::BinaryArray updatedBa = cn::toBinaryArray(pool);
-      putMeta("amm_pool_" + std::to_string(poolId), updatedBa);
+      std::vector<uint8_t> updatedVec(updatedBa.begin(), updatedBa.end());
+      putMeta("amm_pool_" + std::to_string(poolId), updatedVec);
 
-      // Find or create position
       uint64_t posId = 1;
       std::vector<uint8_t> posData;
       AmmPosition pos;
@@ -1517,7 +1535,8 @@ namespace Sidechain
 
       while (getMeta("amm_pos_" + std::to_string(posId), posData))
       {
-        cn::fromBinaryArray(pos, posData);
+        cn::BinaryArray posBa(posData.begin(), posData.end());
+        cn::fromBinaryArray(pos, posBa);
         if (pos.poolId == poolId && pos.owner == tx.from)
         {
           pos.liquidity += liquidityMinted;
@@ -1538,7 +1557,8 @@ namespace Sidechain
       }
 
       cn::BinaryArray posBa = cn::toBinaryArray(pos);
-      putMeta("amm_pos_" + std::to_string(pos.positionId), posBa);
+      std::vector<uint8_t> posVec(posBa.begin(), posBa.end());
+      putMeta("amm_pos_" + std::to_string(pos.positionId), posVec);
 
       std::cout << "applyTransaction AmmAddLiquidity: pool=" << poolId
                 << " amountA=" << amountA << " amountB=" << amountB << std::endl;
@@ -1550,7 +1570,6 @@ namespace Sidechain
       std::string extraStr(tx.extra.begin(), tx.extra.end());
       uint64_t positionId = std::stoull(extraStr);
 
-      // Load position
       AmmPosition pos;
       std::vector<uint8_t> posData;
       if (!getMeta("amm_pos_" + std::to_string(positionId), posData))
@@ -1558,7 +1577,8 @@ namespace Sidechain
         std::cout << "applyTransaction AmmRemoveLiquidity: position not found" << std::endl;
         return false;
       }
-      cn::fromBinaryArray(pos, posData);
+      cn::BinaryArray posBa(posData.begin(), posData.end());
+      cn::fromBinaryArray(pos, posBa);
 
       if (pos.owner != tx.from)
       {
@@ -1572,7 +1592,6 @@ namespace Sidechain
         return false;
       }
 
-      // Load pool
       AmmPool pool;
       std::vector<uint8_t> poolData;
       if (!getMeta("amm_pool_" + std::to_string(pos.poolId), poolData))
@@ -1580,31 +1599,30 @@ namespace Sidechain
         std::cout << "applyTransaction AmmRemoveLiquidity: pool not found" << std::endl;
         return false;
       }
-      cn::fromBinaryArray(pool, poolData);
+      cn::BinaryArray poolBa(poolData.begin(), poolData.end());
+      cn::fromBinaryArray(pool, poolBa);
 
-      // Calculate share
       uint64_t shareA = (pos.liquidity * pool.reserveA) / pool.totalLiquidity;
       uint64_t shareB = (pos.liquidity * pool.reserveB) / pool.totalLiquidity;
 
-      // Update pool
       pool.reserveA -= shareA;
       pool.reserveB -= shareB;
       pool.totalLiquidity -= pos.liquidity;
 
       cn::BinaryArray updatedBa = cn::toBinaryArray(pool);
-      putMeta("amm_pool_" + std::to_string(pos.poolId), updatedBa);
+      std::vector<uint8_t> updatedVec(updatedBa.begin(), updatedBa.end());
+      putMeta("amm_pool_" + std::to_string(pos.poolId), updatedVec);
 
-      // Return tokens
       getBalance(tx.from, pool.tokenIdA, fromBalance);
       uint64_t balanceB = 0;
       getBalance(tx.from, pool.tokenIdB, balanceB);
       setBalance(tx.from, pool.tokenIdA, fromBalance + shareA);
       setBalance(tx.from, pool.tokenIdB, balanceB + shareB);
 
-      // Zero position
       pos.liquidity = 0;
-      cn::BinaryArray posBa = cn::toBinaryArray(pos);
-      putMeta("amm_pos_" + std::to_string(positionId), posBa);
+      cn::BinaryArray posBa2 = cn::toBinaryArray(pos);
+      std::vector<uint8_t> posVec2(posBa2.begin(), posBa2.end());
+      putMeta("amm_pos_" + std::to_string(positionId), posVec2);
 
       std::cout << "applyTransaction AmmRemoveLiquidity: position=" << positionId
                 << " shareA=" << shareA << " shareB=" << shareB << std::endl;
@@ -1627,7 +1645,6 @@ namespace Sidechain
       uint64_t poolId = std::stoull(extraStr.substr(0, firstColon));
       uint64_t minAmountOut = std::stoull(extraStr.substr(firstColon + 1, secondColon - firstColon - 1));
 
-      // Load pool
       AmmPool pool;
       std::vector<uint8_t> poolData;
       if (!getMeta("amm_pool_" + std::to_string(poolId), poolData))
@@ -1635,7 +1652,8 @@ namespace Sidechain
         std::cout << "applyTransaction AmmSwap: pool not found" << std::endl;
         return false;
       }
-      cn::fromBinaryArray(pool, poolData);
+      cn::BinaryArray poolBa(poolData.begin(), poolData.end());
+      cn::fromBinaryArray(pool, poolBa);
 
       if (!pool.active)
       {
@@ -1643,7 +1661,6 @@ namespace Sidechain
         return false;
       }
 
-      // Determine input/output tokens
       uint64_t tokenIdIn = tx.tokenId;
       uint64_t tokenIdOut;
       uint64_t reserveIn, reserveOut;
@@ -1666,7 +1683,6 @@ namespace Sidechain
         return false;
       }
 
-      // Calculate output
       uint64_t amountInAfterFee = tx.amount * (10000 - pool.feeBasisPoints) / 10000;
       uint64_t k = reserveIn * reserveOut;
       uint64_t newReserveIn = reserveIn + amountInAfterFee;
@@ -1679,7 +1695,6 @@ namespace Sidechain
         return false;
       }
 
-      // Verify balance
       getBalance(tx.from, tokenIdIn, fromBalance);
       if (fromBalance < tx.amount)
       {
@@ -1687,14 +1702,12 @@ namespace Sidechain
         return false;
       }
 
-      // Execute swap
       setBalance(tx.from, tokenIdIn, fromBalance - tx.amount);
 
       uint64_t outBalance = 0;
       getBalance(tx.to, tokenIdOut, outBalance);
       setBalance(tx.to, tokenIdOut, outBalance + amountOut);
 
-      // Update pool reserves
       if (tokenIdIn == pool.tokenIdA)
       {
         pool.reserveA += tx.amount;
@@ -1707,7 +1720,8 @@ namespace Sidechain
       }
 
       cn::BinaryArray updatedBa = cn::toBinaryArray(pool);
-      putMeta("amm_pool_" + std::to_string(poolId), updatedBa);
+      std::vector<uint8_t> updatedVec(updatedBa.begin(), updatedBa.end());
+      putMeta("amm_pool_" + std::to_string(poolId), updatedVec);
 
       std::cout << "applyTransaction AmmSwap: pool=" << poolId
                 << " in=" << tx.amount << " out=" << amountOut << std::endl;
@@ -1730,13 +1744,15 @@ namespace Sidechain
     return true;
   }
 
-  // Validator operations
+  // ── Validator operations ───────────────────────────────────────────────
+
   bool SidechainStorage::addValidator(const ValidatorInfo &validator)
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     cn::BinaryArray ba = cn::toBinaryArray(validator);
+    std::vector<uint8_t> vec(ba.begin(), ba.end());
     std::string key = "validator_" + std::to_string(validator.id);
-    m_storage.putMeta(key, ba);
+    m_storage.put(key, vec);
     m_storage.flush();
     return true;
   }
@@ -1749,10 +1765,11 @@ namespace Sidechain
     {
       std::string key = "validator_" + std::to_string(id);
       std::vector<uint8_t> value;
-      if (!m_storage.getMeta(key, value))
+      if (!m_storage.get(key, value))
         break;
+      cn::BinaryArray ba(value.begin(), value.end());
       ValidatorInfo validator;
-      if (cn::fromBinaryArray(validator, value) && validator.active)
+      if (cn::fromBinaryArray(validator, ba) && validator.active)
         result.push_back(validator);
       ++id;
     }
@@ -1764,15 +1781,4 @@ namespace Sidechain
     m_storage.flush();
   }
 
-  bool SidechainStorage::getMeta(const std::string &key, std::vector<uint8_t> &value) const
-  {
-    return m_storage.getMeta(key, value);
-  }
-
-  void SidechainStorage::putMeta(const std::string &key, const std::vector<uint8_t> &value)
-  {
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    m_storage.putMeta(key, value);
-    m_storage.flush();
-  }
-}
+} // namespace Sidechain

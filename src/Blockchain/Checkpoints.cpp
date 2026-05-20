@@ -10,6 +10,7 @@
 #include "Common/DnsTools.h"
 #include "Common/StringTools.h"
 #include "CryptoNoteConfig.h"
+#include "CheckpointsList.h"
 
 #include <fstream>
 #include <sstream>

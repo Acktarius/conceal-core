@@ -16,6 +16,7 @@
 #include "Serialization/SerializationTools.h"
 #include "Storage/MDBXBlockchainStorage.h"
 #include "version.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 
 #include <boost/filesystem.hpp>
 
@@ -70,7 +71,7 @@ DaemonCommandsHandler::DaemonCommandsHandler(cn::core &core, cn::NodeServer &srv
   m_consoleHandler.setHandler("set_log", boost::bind(&DaemonCommandsHandler::set_log, this, boost::arg<1>()),
                               "set_log <level> - Change current log level, <level> is a number 0-4");
   m_consoleHandler.setHandler("export_snapshot", boost::bind(&DaemonCommandsHandler::export_snapshot, this, boost::arg<1>()),
-                              "Export blockchain snapshot to file, export_snapshot <file_path>");
+                              "Export full blockchain snapshot to file, export_snapshot <file_path>");
   m_consoleHandler.setHandler("export_headers", boost::bind(&DaemonCommandsHandler::export_headers, this, boost::arg<1>()),
                               "Export all block headers to a binary file for light client bootstrap, export_headers <file_path>");
 }
@@ -506,11 +507,11 @@ bool DaemonCommandsHandler::rollback_chain(const std::vector<std::string> &args)
   return true;
 }
 
-// ── Snapshot export ───────────────────────────────────────────────────
+// ── Snapshot export (console command) ─────────────────────────────────
 
 bool DaemonCommandsHandler::export_snapshot(const std::vector<std::string> &args)
 {
-  logger(logging::INFO) << "Exporting blockchain snapshot...";
+  logger(logging::INFO) << "Exporting full blockchain snapshot...";
 
   std::string outputFile;
   if (args.empty())
@@ -548,50 +549,55 @@ bool DaemonCommandsHandler::export_snapshot(const std::vector<std::string> &args
     return true;
   }
 
-  const uint32_t magic = 0x43434E58;
-  const uint32_t version = 1;
+  // Magic + version header
+  const uint32_t magic = 0x43434E58; // "CCNX"
+  const uint32_t version = 2;        // v2: full block entries
   file.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
   file.write(reinterpret_cast<const char *>(&version), sizeof(version));
   file.write(reinterpret_cast<const char *>(&topHeight), sizeof(topHeight));
 
-  for (uint32_t h = 1; h <= topHeight; ++h)
+  // Write each block: [32-byte hash][4-byte entry_size][serialized BlockEntry]
+  for (uint32_t h = 0; h <= topHeight; ++h)
   {
-    if (h % 100000 == 0)
+    if (h % 10000 == 0)
       logger(logging::INFO) << "Exporting block " << h << "/" << topHeight;
 
-    cn::BlockHeaderPOD hdr;
-    if (!storage.getBlockHeader(h, hdr))
+    cn::BinaryArray ba;
+    if (!storage.getBlockEntry(h, ba))
     {
-      logger(logging::WARNING) << "No header for block " << h << ", skipping";
-      continue;
+      logger(logging::ERROR) << "Failed to read block entry at height " << h;
+      file.close();
+      return true;
     }
 
-    crypto::Hash blockHash = storage.getBlockHash(h);
-    file.write(reinterpret_cast<const char *>(&hdr), sizeof(cn::BlockHeaderPOD));
-    file.write(reinterpret_cast<const char *>(blockHash.data), sizeof(crypto::Hash));
-  }
+    // Derive block hash from the entry
+    cn::Blockchain::BlockEntry entry;
+    if (!cn::fromBinaryArray(entry, ba))
+    {
+      logger(logging::ERROR) << "Failed to deserialize block entry at height " << h;
+      file.close();
+      return true;
+    }
+    crypto::Hash blockHash = cn::get_block_hash(entry.bl);
 
-  auto checkpoints = storage.getCheckpoints();
-  uint32_t checkpointCount = static_cast<uint32_t>(checkpoints.size());
-  file.write(reinterpret_cast<const char *>(&checkpointCount), sizeof(checkpointCount));
-  for (const auto &cp : checkpoints)
-  {
-    uint32_t height = cp.first;
-    crypto::Hash hash = cp.second;
-    file.write(reinterpret_cast<const char *>(&height), sizeof(height));
-    file.write(reinterpret_cast<const char *>(hash.data), sizeof(crypto::Hash));
+    // Write hash + size + data
+    file.write(reinterpret_cast<const char *>(blockHash.data), sizeof(crypto::Hash));
+    uint32_t entrySize = static_cast<uint32_t>(ba.size());
+    file.write(reinterpret_cast<const char *>(&entrySize), sizeof(entrySize));
+    file.write(reinterpret_cast<const char *>(ba.data()), ba.size());
   }
 
   file.close();
 
-  uint64_t fileSize = topHeight * (sizeof(cn::BlockHeaderPOD) + sizeof(crypto::Hash));
   logger(logging::INFO, logging::BRIGHT_GREEN)
       << "Snapshot exported: " << outputFile
-      << " (" << (fileSize / 1024 / 1024) << " MB approx, "
-      << checkpointCount << " checkpoints)";
+      << " (" << (topHeight + 1) << " blocks)";
 
   return true;
 }
+
+// ── Headers export (light client bootstrap) ───────────────────────────
+
 #pragma pack(push, 1)
 struct ExportedHeader
 {

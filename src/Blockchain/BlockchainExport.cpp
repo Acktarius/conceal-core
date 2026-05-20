@@ -32,9 +32,7 @@ namespace cn
     for (size_t i = start_index; i < blocksSize() && i != end_index; ++i)
     {
       cn::BlockHeaderPOD hdr = getBlockHeader(i);
-      crypto::Hash blockHash = m_useMdbx
-                                   ? m_blockHashes[i]
-                                   : get_block_hash(blocksAt(i).bl);
+      crypto::Hash blockHash = m_blockHashes[i];
 
       ss << "height " << i
          << ", timestamp " << hdr.timestamp
@@ -58,29 +56,16 @@ namespace cn
     if (!print_all)
     {
       uint32_t height = getCurrentBlockchainHeight() - 1;
-      crypto::Hash id = m_useMdbx
-                            ? m_blockHashes[height]
-                            : m_blockIndex.getBlockId(height);
+      crypto::Hash id = m_blockHashes[height];
       logger(logging::INFO) << "Current blockchain index: id: " << common::podToHex(id)
                             << " height: " << height;
       return;
     }
 
     logger(logging::INFO) << "Blockchain indexes:";
-    if (m_useMdbx)
-    {
-      size_t height = 0;
-      for (const auto &id : m_blockHashes)
-        logger(logging::INFO) << "id: " << common::podToHex(id) << " height: " << height++;
-    }
-    else
-    {
-      std::vector<crypto::Hash> blockIds =
-          m_blockIndex.getBlockIds(0, std::numeric_limits<uint32_t>::max());
-      size_t height = 0;
-      for (const auto &id : blockIds)
-        logger(logging::INFO) << "id: " << common::podToHex(id) << " height: " << height++;
-    }
+    size_t height = 0;
+    for (const auto &id : m_blockHashes)
+      logger(logging::INFO) << "id: " << common::podToHex(id) << " height: " << height++;
   }
 
   void Blockchain::print_blockchain_outs(const std::string &file)
@@ -182,9 +167,7 @@ namespace cn
             << "Rebuilding indices for Height " << b << " of " << blocksSize();
 
       cn::BlockHeaderPOD hdr = getBlockHeader(b);
-      crypto::Hash hash = m_useMdbx
-                              ? m_blockHashes[b]
-                              : get_block_hash(blocksAt(b).bl);
+      crypto::Hash hash = m_blockHashes[b];
 
       m_timestampIndex.add(hdr.timestamp, hash);
 

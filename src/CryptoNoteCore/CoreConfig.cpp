@@ -10,29 +10,33 @@
 #include "Common/Util.h"
 #include "Common/CommandLine.h"
 
-namespace cn {
-
-CoreConfig::CoreConfig() {
-  configFolder = tools::getDefaultDataDirectory();
-}
-
-void CoreConfig::init(const boost::program_options::variables_map &options)
+namespace cn
 {
-  testnet = options[command_line::arg_testnet_on.name].as<bool>();
-  useMdbx = options.count("use-mdbx") ? options["use-mdbx"].as<bool>() : false;
-  if (options.count(command_line::arg_data_dir.name) != 0 &&
-      !options[command_line::arg_data_dir.name].defaulted())
-  {
-    configFolder = command_line::get_arg(options, command_line::arg_data_dir);
-    configFolderDefaulted = options[command_line::arg_data_dir.name].defaulted();
-  }
-  else
-  {
-    configFolder = tools::getDefaultDataDirectory(testnet);
-    configFolderDefaulted = true;
-  }
-}
 
-void CoreConfig::initOptions(const boost::program_options::options_description& desc) {
-}
-} //namespace cn
+  CoreConfig::CoreConfig()
+  {
+    configFolder = tools::getDefaultDataDirectory();
+  }
+
+  void CoreConfig::init(const boost::program_options::variables_map &options)
+  {
+    testnet = options[command_line::arg_testnet_on.name].as<bool>();
+    enableWalletIndexes = options.count("enable-wallet-indexes") ? options["enable-wallet-indexes"].as<bool>() : false;
+
+    if (options.count(command_line::arg_data_dir.name) != 0 &&
+        !options[command_line::arg_data_dir.name].defaulted())
+    {
+      configFolder = command_line::get_arg(options, command_line::arg_data_dir);
+      configFolderDefaulted = options[command_line::arg_data_dir.name].defaulted();
+    }
+    else
+    {
+      configFolder = tools::getDefaultDataDirectory(testnet);
+      configFolderDefaulted = true;
+    }
+  }
+
+  void CoreConfig::initOptions(const boost::program_options::options_description &desc)
+  {
+  }
+} // namespace cn

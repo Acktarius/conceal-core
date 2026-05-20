@@ -11,161 +11,91 @@
 #include <mdbx.h>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace CryptoNote
 {
+
   class MDBXBlockchainStorage : public IBlockchainStorage
   {
   public:
-    explicit MDBXBlockchainStorage(const std::string &dataDir, bool bulkSyncMode = false, uint64_t sizeLimitBytes = 0);
+    explicit MDBXBlockchainStorage(const std::string &dataDir, bool enableWalletIndexes = false);
     ~MDBXBlockchainStorage() override;
 
-    // ──────────────────────────────────────────────
-    // Block existence and retrieval
-    // ──────────────────────────────────────────────
-    bool blockExists(const crypto::Hash &hash) const override;
-    bool getBlock(const crypto::Hash &hash, cn::Block &block) const override;
-    uint32_t getBlockHeight(const crypto::Hash &hash) const override;
-    crypto::Hash getBlockHash(uint32_t height) const override;
+    // Lifecycle
+    void flush() override;
+    void close() override;
 
-    // ──────────────────────────────────────────────
-    // Atomic block write
-    // ──────────────────────────────────────────────
+    // Atomic block write (single transaction, immediate commit)
     void pushCompleteBlock(uint32_t height,
                            const crypto::Hash &hash,
                            const cn::BinaryArray &serializedEntry,
                            const cn::BlockHeaderPOD &hdr) override;
 
-    // ──────────────────────────────────────────────
-    // Legacy single-operation writes (reorg support)
-    // ──────────────────────────────────────────────
-    void addBlock(const cn::Block &block, const crypto::Hash &hash, uint32_t height) override;
-    void removeBlock(const crypto::Hash &hash) override;
-
-    // ──────────────────────────────────────────────
-    // Atomic block removal
-    // ──────────────────────────────────────────────
+    // Atomic block removal (single transaction, immediate commit)
     void removeCompleteBlock(uint32_t height, const crypto::Hash &hash) override;
 
-    // ──────────────────────────────────────────────
-    // Header management
-    // ──────────────────────────────────────────────
-    void pushBlockHeader(uint32_t height, const cn::BlockHeaderPOD &hdr) override;
+    // Block reads
+    bool getBlockEntry(uint32_t height, cn::BinaryArray &serializedEntry) const override;
     bool getBlockHeader(uint32_t height, cn::BlockHeaderPOD &hdr) const override;
     void getBlockHeadersRange(uint32_t startHeight, uint32_t count,
                               std::vector<cn::BlockHeaderPOD> &out) const override;
-    void removeBlockHeader(uint32_t height);
 
-    // ──────────────────────────────────────────────
-    // Block entry management
-    // ──────────────────────────────────────────────
-    void pushBlockEntry(uint32_t height, const cn::BinaryArray &serializedEntry) override;
-    bool getBlockEntry(uint32_t height, cn::BinaryArray &serializedEntry) const override;
-    void popBlockEntry(uint32_t height) override;
+    // Height tracking (derived from 'heights' database)
+    uint32_t topBlockHeight() const override;
 
-    // ──────────────────────────────────────────────
-    // Transaction storage
-    // ──────────────────────────────────────────────
-    void pushTransaction(const crypto::Hash &txHash, const cn::BinaryArray &serializedTx) override;
-    bool getTransaction(const crypto::Hash &txHash, cn::Transaction &tx) const override;
-    bool transactionExists(const crypto::Hash &txHash) const override;
-    void removeTransaction(const crypto::Hash &txHash) override;
-
-    // ──────────────────────────────────────────────
     // Transaction pool persistence
-    // ──────────────────────────────────────────────
     void storePoolState(const std::vector<cn::BinaryArray> &serializedTxs,
                         const std::vector<crypto::KeyImage> &spentKeyImages) override;
     std::vector<cn::BinaryArray> loadPoolTransactions() const override;
     std::vector<crypto::KeyImage> loadPoolSpentKeyImages() const override;
 
-    // ──────────────────────────────────────────────
-    // Spent key images (double-spend protection)
-    // ──────────────────────────────────────────────
-    bool isSpentKeyImage(const crypto::KeyImage &keyImage) const override;
-    void markKeyImageSpent(const crypto::KeyImage &keyImage) override;
-    void markKeyImagesSpent(const std::vector<crypto::KeyImage> &keyImages) override;
-    bool areAllKeyImagesUnspent(const std::vector<crypto::KeyImage> &keyImages) const override;
+    // Wallet instant import - indexing (called during block processing)
+    void indexOutputByTxPubKey(const crypto::PublicKey &tx_pub_key,
+                               uint32_t height,
+                               uint32_t tx_index,
+                               uint16_t output_index,
+                               const crypto::Hash &tx_hash,
+                               uint64_t amount,
+                               const crypto::PublicKey &output_key) override;
 
-    // ──────────────────────────────────────────────
-    // Timestamp index
-    // ──────────────────────────────────────────────
-    void addTimestampIndex(uint64_t timestamp, uint32_t height) override;
-    uint32_t getBlockHeightByTimestamp(uint64_t timestamp) const override;
-    void removeTimestampIndex(uint64_t timestamp, uint32_t height) override;
+    void indexSpentKeyImage(const crypto::KeyImage &key_image,
+                            const crypto::PublicKey &tx_pub_key,
+                            uint32_t spent_height) override;
 
-    // ──────────────────────────────────────────────
-    // Global state
-    // ──────────────────────────────────────────────
-    uint32_t topBlockHeight() const override;
-    void setTopBlockHeight(uint32_t height) override;
+    // Wallet instant import - querying (called from RPC)
+    bool getOutputsByTxPubKeys(const std::vector<crypto::PublicKey> &tx_pub_keys,
+                               std::vector<WalletOutputInfo> &outputs,
+                               std::unordered_set<std::string> &spent_key_images) const override;
 
-    // ──────────────────────────────────────────────
-    // Cumulative difficulty
-    // ──────────────────────────────────────────────
-    void setCumulativeDifficulty(uint32_t height, uint64_t cumulativeDifficulty) override;
-    uint64_t getCumulativeDifficulty(uint32_t height) const override;
-    void removeCumulativeDifficulty(uint32_t height) override;
-    uint64_t getCurrentCumulativeDifficulty() const override;
+    std::vector<crypto::PublicKey> getNewTxPubKeys(uint32_t startHeight,
+                                                   uint32_t endHeight) const override;
 
-    // ──────────────────────────────────────────────
-    // Persistence & lifecycle
-    // ──────────────────────────────────────────────
-    void flush() override;
-    void close() override;
+    // Spent key image check (for wallet tools)
+    bool isSpentKeyImage(const crypto::KeyImage &keyImage) const;
 
-    // ──────────────────────────────────────────────
-    // Generic metadata store
-    // ──────────────────────────────────────────────
-    void putMeta(const std::string &key, const std::vector<uint8_t> &value) override;
-    bool getMeta(const std::string &key, std::vector<uint8_t> &value) const override;
-    void removeMeta(const std::string &key) override;
-
-    // ──────────────────────────────────────────────
-    // Initialisation flag
-    // ──────────────────────────────────────────────
-    void setInitialized() override;
-    bool isInitialized() const override;
-
-    // ──────────────────────────────────────────────
-    // Checkpoint storage
-    // ──────────────────────────────────────────────
-    void storeCheckpoint(uint32_t height, const crypto::Hash &hash) override;
-    std::vector<std::pair<uint32_t, crypto::Hash>> getCheckpoints() const override;
-    void removeCheckpointsAbove(uint32_t height) override;
-
-    // ──────────────────────────────────────────────
-    // Error handling & diagnostics
-    // ──────────────────────────────────────────────
-    void abortWriteTxn();
+    // Diagnostics
     std::string printDatabaseStats() const;
 
-    // ──────────────────────────────────────────────
-    // Migration
-    // ──────────────────────────────────────────────
-    void migrateToPaddedKeys() override;
+    // Used in migration tool
+    MDBX_env *getEnv() const { return m_env; }
+    MDBX_dbi getDbiBlockEntries() const { return m_dbiBlockEntries; }
+    MDBX_dbi getDbiBlockHeaders() const { return m_dbiBlockHeaders; }
+    MDBX_dbi getDbiHeights() const { return m_dbiHeights; }
 
   private:
     // Environment & database setup
     void openEnvironment(const std::string &path);
     void openDatabases(MDBX_txn *txn);
 
-    // Write transaction management
-    void commitWriteTransaction(bool force = false);
-    void ensureWriteTxn();
-    void setTopBlockHeightInternal(uint32_t height);
-
-    // Zero-padded key helpers
+    // Key helpers
     static std::string blockEntryKey(uint32_t height);
     static std::string blockHeaderKey(uint32_t height);
-    static std::string checkpointKey(uint32_t height);
-    static std::string timestampKey(uint64_t timestamp, uint32_t height);
-    static std::string difficultyKey(uint32_t height);
+    static std::string makeOutputDetailsKey(uint32_t height, uint32_t tx_idx, uint16_t out_idx);
+    static std::string makeKeyImageOwnerKey(const crypto::KeyImage &ki);
 
     static constexpr int kHeightKeyWidth = 8;
-    static constexpr int kTimestampKeyWidth = 20; // Supports timestamps up to ~10^20 (year 5138)
-    static constexpr int kDifficultyKeyWidth = 8;
 
     // Safe MDBX_val constructors
     static MDBX_val to_val(const void *data, size_t len);
@@ -175,31 +105,23 @@ namespace CryptoNote
 
     // MDBX handles
     MDBX_env *m_env = nullptr;
-    MDBX_dbi m_dbiHeights;
-    MDBX_dbi m_dbiBlockHeights;
-    MDBX_dbi m_dbiMeta;
-    MDBX_dbi m_dbiBlockEntries;
-    MDBX_dbi m_dbiBlockHeaders;
-    MDBX_dbi m_dbiCheckpoints;
-    MDBX_dbi m_dbiTransactions;   // tx_hash → serialized transaction
-    MDBX_dbi m_dbiSpentKeyImages; // key_image → (empty value, presence = spent)
-    MDBX_dbi m_dbiTimestampIndex; // "ts_<padded_timestamp>_<padded_height>" → height
-    MDBX_dbi m_dbiDifficulty;     // "diff_<padded_height>" → uint64_t
+    MDBX_dbi m_dbiBlockEntries; // "be_XXXXXXXX" → serialized BlockEntry
+    MDBX_dbi m_dbiBlockHeaders; // "hdr_XXXXXXXX" → BlockHeaderPOD
+    MDBX_dbi m_dbiHeights;      // uint32_t height → crypto::Hash
+    MDBX_dbi m_dbiPoolState;    // "pool_tx_N" / "pool_ki_N" → binary blobs
 
-    // Thread safety & write batching
+    // Wallet instant import indexes
+    bool m_enableWalletIndexes = false;
+    MDBX_dbi m_dbiTxPubKeyOutputs; // "txpk_<hex>" → list of OutputRef
+    MDBX_dbi m_dbiOutputDetails;   // "od_<height><txidx><outidx>" → WalletOutputInfo
+    MDBX_dbi m_dbiKeyImageOwner;   // "kio_<hex>" → KeyImageOwner
+    MDBX_dbi m_dbiTxPubKeySeen;    // "txpkseen_<hex>" → TxPubKeySeen
+
+    // Thread safety
     mutable std::mutex m_txMutex;
-    MDBX_txn *m_writeTxn = nullptr;
-    size_t m_opsSinceLastCommit = 0;
-
-    static constexpr size_t kCommitBatchSize = 1000;
-    static constexpr size_t kCommitBatchSizeBulk = 50000;
-
-    // In-memory cache
-    uint32_t m_cachedTopHeight = 0;
 
     // Configuration
     std::string m_dataDir;
-    bool m_bulkSyncMode = false;
-    uint64_t m_sizeLimitBytes = 0;
   };
+
 } // namespace CryptoNote

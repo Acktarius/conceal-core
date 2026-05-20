@@ -55,11 +55,7 @@ namespace cn
   std::vector<crypto::Hash> Blockchain::doBuildSparseChain(const crypto::Hash &startBlockId) const
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-
-    if (m_useMdbx)
-      return doBuildSparseChainMdbx(startBlockId);
-
-    return doBuildSparseChainLegacy(startBlockId);
+    return doBuildSparseChainMdbx(startBlockId);
   }
 
   std::vector<crypto::Hash> Blockchain::doBuildSparseChainUnlocked(const crypto::Hash &startBlockId) const
@@ -155,45 +151,6 @@ namespace cn
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  //  Sparse chain — legacy path
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  std::vector<crypto::Hash> Blockchain::doBuildSparseChainLegacy(const crypto::Hash &startBlockId) const
-  {
-    assert(m_blockIndex.size() != 0);
-
-    if (m_blockIndex.hasBlock(startBlockId))
-      return m_blockIndex.buildSparseChain(startBlockId);
-
-    assert(m_alternative_chains.count(startBlockId) > 0);
-
-    // Walk up alternative chain
-    std::vector<crypto::Hash> alternativeChain;
-    crypto::Hash blockchainAncestor;
-    for (auto it = m_alternative_chains.find(startBlockId);
-         it != m_alternative_chains.end();
-         it = m_alternative_chains.find(blockchainAncestor))
-    {
-      alternativeChain.emplace_back(it->first);
-      blockchainAncestor = it->second.bl.previousBlockHash;
-    }
-
-    // Take powers of 2 from alternative chain
-    std::vector<crypto::Hash> sparseChain;
-    for (size_t i = 1; i <= alternativeChain.size(); i *= 2)
-      sparseChain.emplace_back(alternativeChain[i - 1]);
-
-    assert(!sparseChain.empty());
-    assert(m_blockIndex.hasBlock(blockchainAncestor));
-
-    std::vector<crypto::Hash> sparseMainChain = m_blockIndex.buildSparseChain(blockchainAncestor);
-    sparseChain.reserve(sparseChain.size() + sparseMainChain.size());
-    std::copy(sparseMainChain.begin(), sparseMainChain.end(), std::back_inserter(sparseChain));
-
-    return sparseChain;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Sparse chain cache management
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -277,18 +234,13 @@ namespace cn
   {
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
 
-    if (m_useMdbx)
-    {
-      if (m_blockHashes.empty() || startHeight >= m_blockHashes.size())
-        return {};
+    if (m_blockHashes.empty() || startHeight >= m_blockHashes.size())
+      return {};
 
-      uint32_t end = std::min(startHeight + maxCount,
-                              static_cast<uint32_t>(m_blockHashes.size()));
-      return std::vector<crypto::Hash>(m_blockHashes.begin() + startHeight,
-                                       m_blockHashes.begin() + end);
-    }
-
-    return m_blockIndex.getBlockIds(startHeight, maxCount);
+    uint32_t end = std::min(startHeight + maxCount,
+                            static_cast<uint32_t>(m_blockHashes.size()));
+    return std::vector<crypto::Hash>(m_blockHashes.begin() + startHeight,
+                                     m_blockHashes.begin() + end);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -298,13 +250,7 @@ namespace cn
   uint32_t Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids)
   {
     assert(!qblock_ids.empty());
-
     std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-    uint32_t blockIndex = 0;
-
-    if (!m_useMdbx && m_blockIndex.findSupplement(qblock_ids, blockIndex))
-      return blockIndex;
-
     return findBlockchainSupplementInternal(qblock_ids);
   }
 
@@ -334,25 +280,13 @@ namespace cn
 
     for (const auto &blockId : qblock_ids)
     {
-      uint32_t height = 0;
-      bool found = false;
-
-      if (m_useMdbx)
+      auto it = m_hashToHeight.find(blockId);
+      if (it != m_hashToHeight.end())
       {
-        auto it = m_hashToHeight.find(blockId);
-        if (it != m_hashToHeight.end())
-        {
-          height = it->second;
-          found = true;
-        }
+        uint32_t height = it->second;
+        if (height + 1 > bestMatch && height < currentHeight)
+          bestMatch = height + 1;
       }
-      else
-      {
-        found = m_blockIndex.getBlockHeight(blockId, height);
-      }
-
-      if (found && height + 1 > bestMatch && height < currentHeight)
-        bestMatch = height + 1;
     }
 
     return bestMatch;
@@ -366,34 +300,18 @@ namespace cn
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-    if (m_useMdbx)
+    assert(startOffset < m_blockHashes.size());
+
+    for (size_t i = startOffset; i < m_blockHashes.size(); ++i)
     {
-      assert(startOffset < m_blockHashes.size());
-
-      for (size_t i = startOffset; i < m_blockHashes.size(); ++i)
+      cn::BlockHeaderPOD hdr = getBlockHeader(static_cast<uint32_t>(i));
+      if (hdr.timestamp >= timestamp - m_currency.blockFutureTimeLimit())
       {
-        cn::BlockHeaderPOD hdr = getBlockHeader(static_cast<uint32_t>(i));
-        if (hdr.timestamp >= timestamp - m_currency.blockFutureTimeLimit())
-        {
-          height = static_cast<uint32_t>(i);
-          return true;
-        }
+        height = static_cast<uint32_t>(i);
+        return true;
       }
-      return false;
     }
-
-    assert(startOffset < blocksSize());
-    auto bound = std::lower_bound(
-        m_blocks.begin() + startOffset, m_blocks.end(),
-        timestamp - m_currency.blockFutureTimeLimit(),
-        [](const BlockEntry &b, uint64_t ts)
-        { return b.bl.timestamp < ts; });
-
-    if (bound == m_blocks.end())
-      return false;
-
-    height = static_cast<uint32_t>(std::distance(m_blocks.begin(), bound));
-    return true;
+    return false;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -483,8 +401,6 @@ namespace cn
           if (add_result)
           {
             sendMessage(BlockchainMessage(NewBlockMessage(id)));
-            if (m_blockchainAutosaveEnabled && height % 720 == 0)
-              storeCache();
           }
         }
       }

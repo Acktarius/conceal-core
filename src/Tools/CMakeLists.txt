@@ -2,37 +2,35 @@
 # ColdSync - standalone wallet pre-syncer
 # MigrationTool - blockchain migration utility
 # Optimizer - fusion transaction optimizer
+# HealthCheck - daemon health monitoring utility
 
 # Optimizer
 add_executable(Optimizer Optimizer.cpp)
-target_link_libraries(Optimizer BoltHttp Rpc Http Blockchain CryptoNoteCore Storage Logging Serialization crypto System Common
+target_link_libraries(Optimizer BoltHttp Rpc HTTP Blockchain CryptoNoteCore Storage Logging Serialization crypto System Common
     ${Boost_LIBRARIES}
 )
 add_dependencies(Optimizer version)
 set_property(TARGET Optimizer PROPERTY OUTPUT_NAME "conceal-optimizer")
 
-# ColdSync
+# ColdSync — uses StateManager + SyncManager from BoltRpcLib
 add_executable(ColdSync ColdSync.cpp)
 target_link_libraries(ColdSync
-    -Wl,--start-group
     BoltRpcLib
     BoltCore
     BoltSync
-    Wallet
+    BoltHttp
     NodeRpcProxy
-    Transfers
     Rpc
-    Http
+    HTTP
     CryptoNoteCore
     Storage
     System
     Logging
     crypto
-    ${Boost_LIBRARIES}
     Serialization
     Mnemonics
     Common
-    -Wl,--end-group
+    ${Boost_LIBRARIES}
 )
 add_dependencies(ColdSync version)
 set_property(TARGET ColdSync PROPERTY OUTPUT_NAME "conceal-coldsync")
@@ -43,8 +41,12 @@ endif()
 
 # MigrationTool
 add_executable(MigrationTool MigrationTool.cpp)
-target_link_libraries(MigrationTool CryptoNoteCore Storage P2P Rpc System Http Logging Common crypto Serialization
+target_link_libraries(MigrationTool CryptoNoteCore Storage P2P Rpc System HTTP Logging Common crypto Serialization
   ${Boost_LIBRARIES}
 )
 add_dependencies(MigrationTool version)
 set_property(TARGET MigrationTool PROPERTY OUTPUT_NAME "conceald-migrate")
+
+# HealthCheck — standalone daemon health monitor
+add_executable(HealthCheck HealthCheck.cpp)
+set_property(TARGET HealthCheck PROPERTY OUTPUT_NAME "conceal-health")

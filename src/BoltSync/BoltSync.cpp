@@ -8,6 +8,7 @@
 #include "Common/Util.h"
 
 #include <thread>
+#include <fstream>
 
 namespace BoltSync
 {
@@ -18,36 +19,58 @@ namespace BoltSync
 
   Scanner::~Scanner() {}
 
+  // ── Progress file helpers ──────────────────────────────────────────────
+
+  namespace
+  {
+    std::string progressFilePath(const std::string &dataDir)
+    {
+      return PathHelpers::appendPath(dataDir, "bolt_sync_progress.dat");
+    }
+
+    uint32_t loadProgress(const std::string &dataDir)
+    {
+      std::ifstream file(progressFilePath(dataDir), std::ios::binary);
+      if (!file)
+        return 0;
+      uint32_t height = 0;
+      file.read(reinterpret_cast<char *>(&height), sizeof(height));
+      return file ? height : 0;
+    }
+
+    void saveProgress(const std::string &dataDir, uint32_t height)
+    {
+      std::ofstream file(progressFilePath(dataDir), std::ios::binary | std::ios::trunc);
+      if (file)
+        file.write(reinterpret_cast<const char *>(&height), sizeof(height));
+    }
+
+    void clearProgress(const std::string &dataDir)
+    {
+      std::remove(progressFilePath(dataDir).c_str());
+    }
+  }
+
   bool Scanner::scan(const ScanConfig &config, ScanState &state)
   {
     std::string dbPath = PathHelpers::appendPath(config.dataDir, "mdbx_blocks");
-    CryptoNote::MDBXBlockchainStorage storage(dbPath, 0);
+    CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
 
     uint32_t topHeight = storage.topBlockHeight();
     if (topHeight == 0)
       return false;
 
-    // Check for resume
-    uint32_t lastScannedHeight = 0;
-    {
-      std::vector<uint8_t> resumeBuf;
-      if (storage.getMeta("wallet_init_progress", resumeBuf) && resumeBuf.size() >= sizeof(uint32_t))
-      {
-        memcpy(&lastScannedHeight, resumeBuf.data(), sizeof(lastScannedHeight));
-        if (lastScannedHeight >= topHeight)
-          lastScannedHeight = 0;
-      }
-    }
+    // Check for resume from progress file
+    uint32_t lastScannedHeight = loadProgress(config.dataDir);
+    if (lastScannedHeight >= topHeight)
+      lastScannedHeight = 0;
 
     state.blocksProcessed = lastScannedHeight;
     state.lastCheckpointHeight = lastScannedHeight;
 
     auto saveCheckpoint = [&](uint32_t height)
     {
-      std::vector<uint8_t> buf(sizeof(height));
-      memcpy(buf.data(), &height, sizeof(height));
-      storage.putMeta("wallet_init_progress", buf);
-      storage.flush();
+      saveProgress(config.dataDir, height);
       state.lastCheckpointHeight.store(height, std::memory_order_relaxed);
     };
 
@@ -91,9 +114,9 @@ namespace BoltSync
             for (uint32_t h = start; h <= end; ++h)
             {
                 scanSingleBlock(h, ctx);
-                uint32_t reportInterval = (end - start) / 100; // every 1%
+                uint32_t reportInterval = (end - start) / 100;
                 if (reportInterval < 1000)
-                    reportInterval = 1000; // minimum every 1000 blocks
+                    reportInterval = 1000;
                 if (h % reportInterval == 0 || h == end)
                 {
                     ctx.saveCheckpoint(h);
@@ -102,7 +125,6 @@ namespace BoltSync
             } });
     }
 
-    // Wait for all scan threads to complete
     for (auto &t : threads)
     {
       if (t.joinable())
@@ -111,16 +133,13 @@ namespace BoltSync
 
     state.progressDone = true;
     progress.stop();
-
-    // CRITICAL: Wait for ProgressWriter threads to fully exit before continuing
     progress.waitForThreads();
 
-    // Second pass: mark outputs as spent by scanning KeyInput keyImages.
+    // Second pass: mark outputs as spent
     markSpentOutputs(storage, scanTopHeight, state.results);
 
     // Clear checkpoint on success
-    storage.putMeta("wallet_init_progress", std::vector<uint8_t>());
-    storage.flush();
+    clearProgress(config.dataDir);
 
     return true;
   }

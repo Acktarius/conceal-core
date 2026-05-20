@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "Blockchain.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 
 namespace cn
 {
@@ -42,24 +43,17 @@ namespace cn
       queue.push(message);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Diagnostics
-  // ═══════════════════════════════════════════════════════════════════════════
-
   std::string Blockchain::printDatabaseStats() const
   {
-    if (m_useMdbx && m_mdbxStorage)
+    if (m_mdbxStorage)
       return m_mdbxStorage->printDatabaseStats();
-    return "MDBX not enabled";
+    return "MDBX not available";
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Checkpoint callback
-  // ═══════════════════════════════════════════════════════════════════════════
-
   void Blockchain::setCheckpointGeneratedCallback(CheckpointGeneratedCallback callback)
   {
     m_checkpointGeneratedCallback = std::move(callback);
   }
-
 } // namespace cn

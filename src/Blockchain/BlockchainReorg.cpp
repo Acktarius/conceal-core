@@ -102,20 +102,15 @@ namespace cn
   bool Blockchain::findPreviousBlockHeight(const crypto::Hash &prevHash,
                                            uint32_t &height, bool &inMainChain)
   {
-    if (m_useMdbx)
+    auto it = m_hashToHeight.find(prevHash);
+    if (it != m_hashToHeight.end())
     {
-      auto it = m_hashToHeight.find(prevHash);
-      if (it != m_hashToHeight.end())
-      {
-        height = it->second;
-        inMainChain = true;
-        return true;
-      }
-      return false;
+      height = it->second;
+      inMainChain = true;
+      return true;
     }
-
-    inMainChain = m_blockIndex.getBlockHeight(prevHash, height);
-    return inMainChain;
+    inMainChain = false;
+    return false;
   }
 
   //  Alternative block handling

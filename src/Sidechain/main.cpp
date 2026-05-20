@@ -369,7 +369,8 @@ int main(int argc, char *argv[])
       daemonDispatcher.reset(new platform_system::Dispatcher());
       nodePtr.reset(new cn::NodeRpcProxy(*daemonDispatcher, cfg.daemonHost, cfg.daemonPort, consoleLogger));
       initObsPtr.reset(new NodeInitObserver());
-      nodePtr->init([&obs = *initObsPtr](std::error_code ec)
+      auto &obs = *initObsPtr;
+      nodePtr->init([&obs](std::error_code ec)
                     { obs.initCompleted(ec); });
       initObsPtr->waitForInitEnd();
       daemonConnected = true;

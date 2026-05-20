@@ -1,56 +1,92 @@
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
-// Distributed under the MIT/X11 software license
+//
+// Distributed under the MIT/X11 software license.
 
 #pragma once
 
+#include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
-#include "BoltCore/BoltCore.h"
+
+#include "SyncManager.h"
+
+#include "crypto/crypto.h"
+#include "CryptoNoteCore/CryptoNoteBasic.h"
+
+namespace cn
+{
+  class INode;
+}
 
 namespace BoltRPC
 {
-  static const uint32_t MAGIC = 0x424F4C54;           // "BOLT"
-  static const uint32_t VERSION = 3;                  // v3: adds encrypted key blob support
-  static const uint32_t ENCRYPTED_MAGIC = 0x424F4C55; // "BOLU" — encrypted state file
 
-  // Persists wallet scan state and keys between restarts.
-  // Format: binary dump of OutputInfo array with header + optional encrypted key blob.
+  // ── Data structures ────────────────────────────────────────────────────────
+
+  struct TransactionRecord
+  {
+    crypto::Hash txHash;
+    uint32_t blockHeight;
+    uint64_t timestamp;
+    uint64_t fee;
+    uint64_t totalSent;
+    uint64_t totalReceived;
+    std::vector<crypto::PublicKey> extraKeys; // tx_pub_keys involved
+    std::string paymentId;
+
+    enum Type
+    {
+      INCOMING,
+      OUTGOING,
+      SELF,
+      DEPOSIT,
+      WITHDRAWAL
+    };
+    Type type = INCOMING;
+    bool confirmed = false;
+  };
+
+  struct WalletState
+  {
+    uint32_t lastHeight = 0;
+    uint64_t balance = 0;
+    uint64_t unlockedBalance = 0;
+    std::vector<OutputInfo> ownedOutputs;
+    std::vector<crypto::KeyImage> spentKeyImages;
+    std::vector<TransactionRecord> transactions;
+  };
+
+  // ── StateManager ────────────────────────────────────────────────────────────
+
   class StateManager
   {
   public:
-    explicit StateManager(const std::string &filePath);
+    StateManager(const std::string &dataDir);
+    ~StateManager();
 
-    // Save outputs, scan height, and wallet keys. If password is non-empty, the key blob is encrypted.
-    bool save(const std::vector<BoltCore::OutputInfo> &outputs,
-              uint32_t lastScannedHeight,
-              const std::string &viewKeyHex = "",
-              const std::string &spendKeyHex = "",
-              const std::string &password = "");
+    // ── Load / Save ────────────────────────────────────────────────────────
+    bool load(WalletState &state);
+    bool save(const WalletState &state);
 
-    // Load outputs and scan height
-    bool load(std::vector<BoltCore::OutputInfo> &outputs,
-              uint32_t &lastScannedHeight);
+    // ── Incremental updates ────────────────────────────────────────────────
+    void addOutput(const OutputInfo &output);
+    void markSpent(const crypto::KeyImage &keyImage);
+    void addTransaction(const TransactionRecord &tx);
+    void setHeight(uint32_t height);
+    void setBalance(uint64_t balance, uint64_t unlocked);
 
-    // Load stored keys (for unlock without re-entering hex). Password required if file is encrypted.
-    bool loadKeys(std::string &viewKeyHex, std::string &spendKeyHex,
-                  const std::string &password = "");
+    // ── Atomic batch update ────────────────────────────────────────────────
+    void commit(const WalletState &state);
 
-    // Check if the state file requires a password to unlock keys
-    bool isEncrypted() const;
-
+    // ── File info ──────────────────────────────────────────────────────────
+    std::string filePath() const;
     bool exists() const;
-
-    const std::string &getFilePath() const { return m_filePath; }
+    size_t fileSize() const;
 
   private:
-    std::string m_filePath;
-
-    // Derives a 32-byte AES key from a password using SHA-256
-    std::string deriveKey(const std::string &password) const;
-
-    // Encrypts or decrypts data using AES-256 in a simple XOR-based stream
-    // (For production, replace with proper AES-CBC or ChaCha20-Poly1305)
-    std::string cryptData(const std::string &data, const std::string &key) const;
+    std::string m_dataDir;
+    mutable std::mutex m_mutex;
   };
 
 } // namespace BoltRPC

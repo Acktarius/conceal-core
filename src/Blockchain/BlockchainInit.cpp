@@ -1,20 +1,38 @@
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+//
+// Distributed under the MIT/X11 software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 #include "Blockchain/Blockchain.h"
-#include "Blockchain/BlockCacheSerializer.h"
 
 #include "Common/Math.h"
 #include "Common/PathHelpers.h"
 
 #include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteCore/TransactionApiExtra.h"
 
 namespace cn
 {
-  // ─── MDBX Helpers ───────────────────────────────────────────────────────
+  // Helper: extract tx public key from extra field
+  namespace
+  {
 
+    crypto::PublicKey getTxPublicKeyFromExtra(const std::vector<uint8_t> &extra)
+    {
+      crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(extra);
+      if (tx_pub_key == cn::NULL_PUBLIC_KEY)
+        return cn::NULL_PUBLIC_KEY;
+      return tx_pub_key;
+    }
+
+  } // anonymous namespace
+
+  // MDBX Storage Initialisation
   bool Blockchain::initMdbxStorage(const std::string &config_folder)
   {
     logger(logging::INFO) << "Initializing MDBX storage backend...";
-    m_mdbxStorage.reset(new ::CryptoNote::MDBXBlockchainStorage(
-        PathHelpers::appendPath(config_folder, "mdbx_blocks")));
+    m_mdbxStorage.reset(new CryptoNote::MDBXBlockchainStorage(
+        PathHelpers::appendPath(config_folder, "mdbx_blocks"), m_enableWalletIndexes));
 
     m_cacheIndex = 0;
     m_cachedEntries.clear();
@@ -23,284 +41,111 @@ namespace cn
     return true;
   }
 
-  bool Blockchain::loadMdbxFastPath()
-  {
-    // Try to load all in-memory structures from serialised meta blobs.
-    // Returns true if everything loaded, false if a full rebuild is needed.
+  void Blockchain::setEnableWalletIndexes(bool enable) { m_enableWalletIndexes = enable; }
 
-    uint32_t topHeight = 0;
-    std::vector<uint8_t> metaBuf;
-
-    // Load block hashes
-    if (m_mdbxStorage->getMeta("idx_hashes", metaBuf) && !metaBuf.empty())
-    {
-      size_t count = metaBuf.size() / sizeof(crypto::Hash);
-      m_blockHashes.resize(count);
-      memcpy(m_blockHashes.data(), metaBuf.data(), metaBuf.size());
-    }
-
-    // Load hash → height map
-    if (m_mdbxStorage->getMeta("idx_hash2height", metaBuf))
-    {
-      const uint8_t *ptr = metaBuf.data();
-      const uint8_t *end = ptr + metaBuf.size();
-      while (ptr + sizeof(crypto::Hash) + sizeof(uint32_t) <= end)
-      {
-        crypto::Hash h;
-        memcpy(h.data, ptr, sizeof(h));
-        ptr += sizeof(h);
-        uint32_t height;
-        memcpy(&height, ptr, sizeof(height));
-        ptr += sizeof(height);
-        m_hashToHeight[h] = height;
-      }
-    }
-
-    // Load transaction map
-    if (m_mdbxStorage->getMeta("idx_txmap", metaBuf))
-    {
-      const uint8_t *ptr = metaBuf.data();
-      const uint8_t *end = ptr + metaBuf.size();
-      while (ptr + sizeof(crypto::Hash) + sizeof(uint64_t) <= end)
-      {
-        crypto::Hash h;
-        memcpy(h.data, ptr, sizeof(h));
-        ptr += sizeof(h);
-        uint64_t packed;
-        memcpy(&packed, ptr, sizeof(packed));
-        ptr += sizeof(packed);
-        TransactionIndex idx;
-        idx.block = static_cast<uint32_t>(packed >> 16);
-        idx.transaction = static_cast<uint16_t>(packed & 0xFFFF);
-        m_transactionMap[h] = idx;
-      }
-    }
-
-    // Load spent keys from meta blob
-    if (m_mdbxStorage->getMeta("idx_spentkeys", metaBuf))
-    {
-      const uint8_t *ptr = metaBuf.data();
-      const uint8_t *end = ptr + metaBuf.size();
-      while (ptr + sizeof(crypto::KeyImage) + sizeof(uint32_t) <= end)
-      {
-        crypto::KeyImage ki;
-        memcpy(ki.data, ptr, sizeof(ki));
-        ptr += sizeof(ki);
-        uint32_t height;
-        memcpy(&height, ptr, sizeof(height));
-        ptr += sizeof(height);
-        m_spent_keys[ki] = height;
-      }
-    }
-
-    // Load top height and validate
-    if (m_mdbxStorage->getMeta("idx_topheight", metaBuf) && metaBuf.size() == sizeof(uint32_t))
-    {
-      memcpy(&topHeight, metaBuf.data(), sizeof(topHeight));
-    }
-
-    bool hashesLoaded = !m_blockHashes.empty();
-    bool topHeightMatches = (topHeight == m_mdbxStorage->topBlockHeight());
-
-    if (!hashesLoaded || !topHeightMatches)
-      return false; // Fast path not available — need full rebuild
-
-    // Load outputs index
-    if (m_mdbxStorage->getMeta("idx_outputs", metaBuf))
-    {
-      const uint8_t *ptr = metaBuf.data();
-      const uint8_t *end = ptr + metaBuf.size();
-      while (ptr + sizeof(uint64_t) + sizeof(uint32_t) <= end)
-      {
-        uint64_t amount;
-        memcpy(&amount, ptr, sizeof(amount));
-        ptr += sizeof(amount);
-        uint32_t count;
-        memcpy(&count, ptr, sizeof(count));
-        ptr += sizeof(count);
-        std::vector<std::pair<TransactionIndex, uint16_t>> vec;
-        for (uint32_t i = 0; i < count && ptr + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) <= end; ++i)
-        {
-          TransactionIndex txIdx;
-          memcpy(&txIdx.block, ptr, sizeof(txIdx.block));
-          ptr += sizeof(txIdx.block);
-          memcpy(&txIdx.transaction, ptr, sizeof(txIdx.transaction));
-          ptr += sizeof(txIdx.transaction);
-          uint16_t outIdx;
-          memcpy(&outIdx, ptr, sizeof(outIdx));
-          ptr += sizeof(outIdx);
-          vec.push_back({txIdx, outIdx});
-        }
-        m_outputs[amount] = std::move(vec);
-      }
-    }
-
-    // Load multisig outputs index
-    if (m_mdbxStorage->getMeta("idx_msig", metaBuf))
-    {
-      const uint8_t *ptr = metaBuf.data();
-      const uint8_t *end = ptr + metaBuf.size();
-      while (ptr + sizeof(uint64_t) + sizeof(uint32_t) <= end)
-      {
-        uint64_t amount;
-        memcpy(&amount, ptr, sizeof(amount));
-        ptr += sizeof(amount);
-        uint32_t count;
-        memcpy(&count, ptr, sizeof(count));
-        ptr += sizeof(count);
-        std::vector<MultisignatureOutputUsage> vec;
-        for (uint32_t i = 0; i < count && ptr + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) + 1 <= end; ++i)
-        {
-          MultisignatureOutputUsage usage;
-          memcpy(&usage.transactionIndex.block, ptr, sizeof(usage.transactionIndex.block));
-          ptr += sizeof(usage.transactionIndex.block);
-          memcpy(&usage.transactionIndex.transaction, ptr, sizeof(usage.transactionIndex.transaction));
-          ptr += sizeof(usage.transactionIndex.transaction);
-          memcpy(&usage.outputIndex, ptr, sizeof(usage.outputIndex));
-          ptr += sizeof(usage.outputIndex);
-          usage.isUsed = (*ptr++ != 0);
-          vec.push_back(usage);
-        }
-        m_multisignatureOutputs[amount] = std::move(vec);
-      }
-    }
-
-    // Load deposit index from meta blob (uses DepositIndex's own serialize method)
-    m_depositIndex = DepositIndex();
-    if (m_mdbxStorage->getMeta("idx_deposits", metaBuf) && !metaBuf.empty())
-    {
-      cn::BinaryArray ba(metaBuf.begin(), metaBuf.end());
-      if (!cn::fromBinaryArray(m_depositIndex, ba))
-      {
-        // Deserialization failed — rebuild from blocks
-        for (uint32_t h = 0; h <= topHeight; ++h)
-        {
-          if (h % 10000 == 0)
-            logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding deposit index for Height " << h << " of " << topHeight;
-
-          cn::BinaryArray blockBa;
-          if (m_mdbxStorage->getBlockEntry(h, blockBa))
-          {
-            BlockEntry entry;
-            if (cn::fromBinaryArray(entry, blockBa))
-            {
-              uint64_t interest = 0;
-              for (const auto &tx : entry.transactions)
-                interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
-              pushToDepositIndex(entry, interest);
-            }
-          }
-        }
-      }
-    }
-    else
-    {
-      // No deposit meta blob — rebuild from blocks
-      for (uint32_t h = 0; h <= topHeight; ++h)
-      {
-        if (h % 10000 == 0)
-          logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding deposit index for Height " << h << " of " << topHeight;
-
-        cn::BinaryArray blockBa;
-        if (m_mdbxStorage->getBlockEntry(h, blockBa))
-        {
-          BlockEntry entry;
-          if (cn::fromBinaryArray(entry, blockBa))
-          {
-            uint64_t interest = 0;
-            for (const auto &tx : entry.transactions)
-              interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
-            pushToDepositIndex(entry, interest);
-          }
-        }
-      }
-    }
-
-    // Push all block hashes into the legacy block index for compatibility
-    for (const auto &h : m_blockHashes)
-      m_blockIndex.push(h);
-
-    logger(logging::INFO) << "Fast index loaded: " << m_blockHashes.size() << " blocks";
-    return true;
-  }
-
+  // Full Index Rebuild
   void Blockchain::rebuildMdbxIndex()
   {
-    // Full rebuild: scan every block from MDBX and rebuild all in-memory structures.
-    // Spent key images are verified against the native MDBX spent DB, not rebuilt from scratch.
+    // Single-pass scan of block_entries to rebuild all in-memory structures.
+    // MDBX is the single source of truth — no meta blobs, no fast path.
+    // Wallet import indexes (tx_pubkey_outputs, output_details, key_image_owner,
+    // tx_pubkey_seen) are assumed to already exist in MDBX from when blocks
+    // were originally written. We only rebuild in-memory structures here.
 
-    logger(logging::INFO) << "Fast index not available, doing full rebuild...";
+    logger(logging::INFO) << "Rebuilding in-memory index from MDBX...";
 
     m_blockHashes.clear();
     m_hashToHeight.clear();
-    m_blockIndex.clear();
     m_transactionMap.clear();
     m_spent_keys.clear();
     m_outputs.clear();
     m_multisignatureOutputs.clear();
     m_depositIndex = DepositIndex();
+    m_timestampIndex.clear();
+    m_generatedTransactionsIndex.clear();
+    m_paymentIdIndex.clear();
 
     uint32_t topHeight = m_mdbxStorage->topBlockHeight();
+
     for (uint32_t h = 0; h <= topHeight; ++h)
     {
       cn::BinaryArray ba;
-      if (m_mdbxStorage->getBlockEntry(h, ba))
+      if (!m_mdbxStorage->getBlockEntry(h, ba))
+        continue;
+
+      if (h % 10000 == 0)
+        logger(logging::INFO, logging::BRIGHT_WHITE)
+            << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
+
+      BlockEntry entry;
+      if (!cn::fromBinaryArray(entry, ba))
+        continue;
+
+      crypto::Hash blockHash = get_block_hash(entry.bl);
+
+      // Chain index
+      m_blockHashes.push_back(blockHash);
+      m_hashToHeight[blockHash] = h;
+
+      // Timestamp index
+      m_timestampIndex.add(entry.bl.timestamp, blockHash);
+
+      // Generated transactions index
+      m_generatedTransactionsIndex.add(entry.bl);
+
+      // Process transactions
+      for (uint32_t t = 0; t < entry.transactions.size(); ++t)
       {
-        if (h % 10000 == 0)
-          logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding MDBX index for Height " << h << " of " << topHeight;
+        const auto &tx_entry = entry.transactions[t];
+        crypto::Hash txHash = getObjectHash(tx_entry.tx);
+        TransactionIndex txIdx = {h, static_cast<uint16_t>(t)};
+        m_transactionMap.insert(std::make_pair(txHash, txIdx));
 
-        BlockEntry entry;
-        if (cn::fromBinaryArray(entry, ba))
+        // Payment ID index
+        m_paymentIdIndex.add(tx_entry.tx);
+
+        // Spent key images
+        for (const auto &input : tx_entry.tx.inputs)
         {
-          crypto::Hash blockHash = get_block_hash(entry.bl);
-          m_blockHashes.push_back(blockHash);
-          m_hashToHeight[blockHash] = h;
-          m_blockIndex.push(blockHash);
-
-          for (uint32_t t = 0; t < entry.transactions.size(); ++t)
+          if (input.type() == typeid(KeyInput))
           {
-            crypto::Hash txHash = getObjectHash(entry.transactions[t].tx);
-            TransactionIndex txIdx = {h, static_cast<uint16_t>(t)};
-            m_transactionMap.insert(std::make_pair(txHash, txIdx));
-
-            // Spent key images are verified via the native MDBX DB at runtime.
-            // We still populate m_spent_keys for the in-memory fast path.
-            for (auto &input : entry.transactions[t].tx.inputs)
-            {
-              if (input.type() == typeid(KeyInput))
-                m_spent_keys.insert(std::make_pair(
-                    boost::get<KeyInput>(input).keyImage, h));
-              else if (input.type() == typeid(MultisignatureInput))
-              {
-                const auto &msInput = boost::get<MultisignatureInput>(input);
-                m_multisignatureOutputs[msInput.amount][msInput.outputIndex].isUsed = true;
-              }
-            }
-
-            for (uint32_t o = 0; o < entry.transactions[t].tx.outputs.size(); ++o)
-            {
-              const auto &out = entry.transactions[t].tx.outputs[o];
-              if (out.target.type() == typeid(KeyOutput))
-                m_outputs[out.amount].push_back(std::make_pair<>(txIdx, o));
-              else if (out.target.type() == typeid(MultisignatureOutput))
-              {
-                MultisignatureOutputUsage usage = {txIdx, static_cast<uint16_t>(o), false};
-                m_multisignatureOutputs[out.amount].push_back(usage);
-              }
-            }
+            const auto &ki = boost::get<KeyInput>(input);
+            m_spent_keys.insert(std::make_pair(ki.keyImage, h));
           }
+          else if (input.type() == typeid(MultisignatureInput))
+          {
+            const auto &msInput = boost::get<MultisignatureInput>(input);
+            m_multisignatureOutputs[msInput.amount][msInput.outputIndex].isUsed = true;
+          }
+        }
 
-          uint64_t interest = 0;
-          for (const auto &tx : entry.transactions)
-            interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
-          pushToDepositIndex(entry, interest);
+        // Outputs index
+        for (uint32_t o = 0; o < tx_entry.tx.outputs.size(); ++o)
+        {
+          const auto &out = tx_entry.tx.outputs[o];
+          if (out.target.type() == typeid(KeyOutput))
+          {
+            m_outputs[out.amount].push_back(std::make_pair<>(txIdx, o));
+          }
+          else if (out.target.type() == typeid(MultisignatureOutput))
+          {
+            MultisignatureOutputUsage usage = {txIdx, static_cast<uint16_t>(o), false};
+            m_multisignatureOutputs[out.amount].push_back(usage);
+          }
         }
       }
+
+      // Deposit index
+      uint64_t interest = 0;
+      for (const auto &tx : entry.transactions)
+        interest += m_currency.calculateTotalTransactionInterest(tx.tx, h);
+      pushToDepositIndex(entry, interest);
     }
 
     logger(logging::INFO) << "Loaded " << m_blockHashes.size() << " blocks from MDBX (full rebuild)";
   }
 
+  // MDBX Init
   bool Blockchain::initMdbx(bool load_existing)
   {
     auto mdbxStart = std::chrono::steady_clock::now();
@@ -312,19 +157,17 @@ namespace cn
       // Clear all in-memory caches
       m_blockHashes.clear();
       m_hashToHeight.clear();
-      m_blockIndex.clear();
       m_transactionMap.clear();
       m_spent_keys.clear();
       m_outputs.clear();
       m_multisignatureOutputs.clear();
       m_depositIndex = DepositIndex();
+      m_timestampIndex.clear();
+      m_generatedTransactionsIndex.clear();
+      m_paymentIdIndex.clear();
 
-      // Try fast path first (serialised meta blobs)
-      if (!loadMdbxFastPath())
-      {
-        // Fast path failed — do a full rebuild from block entries
-        rebuildMdbxIndex();
-      }
+      // Always rebuild from MDBX — single source of truth
+      rebuildMdbxIndex();
     }
 
     auto mdbxEnd = std::chrono::steady_clock::now();
@@ -333,92 +176,7 @@ namespace cn
     return true;
   }
 
-  // ─── Legacy (SwappedVector) Helpers ─────────────────────────────────────
-
-  bool Blockchain::initLegacyStorage(const std::string &config_folder)
-  {
-    if (!m_blocks.open(PathHelpers::appendPath(config_folder, m_currency.blocksFileName()),
-                       PathHelpers::appendPath(config_folder, m_currency.blockIndexesFileName()), 1024))
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to open blockchain storage files";
-      return false;
-    }
-    return true;
-  }
-
-  bool Blockchain::loadLegacyCache(bool load_existing)
-  {
-    if (!load_existing || blocksEmpty())
-    {
-      blocksClear();
-      return true;
-    }
-
-    logger(logging::INFO) << "Loading blockchain";
-    BlockCacheSerializer loader(*this, get_block_hash(blocksBack().bl), logger.getLogger());
-    const std::string &blocksCacheFileName = m_currency.blocksCacheFileName();
-
-    try
-    {
-      loader.load(PathHelpers::appendPath(m_config_folder, blocksCacheFileName));
-
-      if (!loader.loaded())
-      {
-        std::string blockCacheBkpFileName = blocksCacheFileName + ".bkp";
-        loader.load(PathHelpers::appendPath(m_config_folder, blockCacheBkpFileName));
-
-        if (!loader.loaded())
-        {
-          logger(logging::WARNING, logging::BRIGHT_YELLOW) << "No actual blockchain cache found, rebuilding internal structures";
-          if (!rebuildCache())
-          {
-            logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to rebuild cache";
-            return false;
-          }
-        }
-      }
-
-      // Sanity check: verify a known block's emission at height 24732
-      uint64_t checkBlockHeight = 24732;
-      uint64_t checkMinimum = 13000000000000;
-      if (!m_testnet && blocksSize() > checkBlockHeight &&
-          blocksAt(checkBlockHeight).already_generated_coins < checkMinimum)
-      {
-        logger(logging::WARNING, logging::BRIGHT_YELLOW) << "Invalid blocks cache, rebuilding internal structures";
-        if (!rebuildBlocks())
-        {
-          logger(logging::WARNING, logging::BRIGHT_YELLOW) << "Impossible to rebuild";
-          return false;
-        }
-      }
-
-      if (m_blockchainIndexesEnabled)
-        loadBlockchainIndices();
-    }
-    catch (const std::exception &)
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "Error loading blockchain cache";
-      logger(logging::WARNING, logging::BRIGHT_YELLOW) << "Attempting to rebuild cache after load error";
-      try
-      {
-        if (!rebuildCache())
-        {
-          logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to rebuild cache";
-          return false;
-        }
-      }
-      catch (const std::exception &)
-      {
-        logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to rebuild cache";
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  // ─── Genesis & Validation Helpers ───────────────────────────────────────
-
+  // Genesis & Validation Helpers
   bool Blockchain::ensureGenesisBlock()
   {
     if (!blocksEmpty())
@@ -447,16 +205,8 @@ namespace cn
 
   bool Blockchain::validateGenesisBlock()
   {
-    // MDBX validates genesis through its own mechanisms
-    if (m_useMdbx)
-      return true;
-
-    crypto::Hash firstBlockHash = get_block_hash(blocksAt(0).bl);
-    if (!(firstBlockHash == m_currency.genesisBlockHash()))
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to init: genesis block mismatch.";
-      return false;
-    }
+    // MDBX validates genesis through its own mechanisms — block_entries
+    // must exist and be deserializable, which is checked during init.
     return true;
   }
 
@@ -482,26 +232,11 @@ namespace cn
 
   void Blockchain::logInitSummary()
   {
-    if (m_useMdbx)
-    {
-      logger(logging::INFO, logging::BRIGHT_GREEN)
-          << "Blockchain initialized. Local Height: " << blocksSize() - 1 << " [MDBX backend is active]";
-    }
-    else
-    {
-      uint64_t timestamp_diff = time(nullptr) - blocksBack().bl.timestamp;
-      if (!blocksBack().bl.timestamp)
-        timestamp_diff = time(nullptr) - 1341378000;
-
-      logger(logging::INFO, logging::BRIGHT_GREEN)
-          << "Blockchain initialized. last block: " << blocksSize() - 1 << ", "
-          << common::timeIntervalToString(timestamp_diff)
-          << " time ago, current difficulty: " << getDifficultyForNextBlock();
-    }
+    logger(logging::INFO, logging::BRIGHT_GREEN)
+        << "Blockchain initialized. Local Height: " << blocksSize() - 1 << " [MDBX backend]";
   }
 
-  // ─── Main Init ──────────────────────────────────────────────────────────
-
+  // Main Init
   bool Blockchain::init(const std::string &config_folder, bool load_existing, bool testnet)
   {
     try
@@ -518,37 +253,28 @@ namespace cn
 
       m_config_folder = config_folder;
 
-      // ── Storage backend ──────────────────────────────────────────────
-      if (m_useMdbx)
-      {
-        if (!initMdbxStorage(config_folder))
-          return false;
-        if (!initMdbx(load_existing))
-          return false;
-      }
-      else
-      {
-        if (!initLegacyStorage(config_folder))
-          return false;
-        if (!loadLegacyCache(load_existing))
-          return false;
-      }
+      // Storage backend
+      if (!initMdbxStorage(config_folder))
+        return false;
+      if (!initMdbx(load_existing))
+        return false;
 
-      // ── Genesis ──────────────────────────────────────────────────────
+      // Genesis
       if (!ensureGenesisBlock())
         return false;
 
       if (!validateGenesisBlock())
         return false;
 
-      // ── Checkpoints ──────────────────────────────────────────────────
+      // Checkpoints
       try
       {
         uint32_t lastValidCheckpointHeight = 0;
         if (!checkCheckpoints(lastValidCheckpointHeight))
         {
-          logger(logging::WARNING, logging::BRIGHT_YELLOW) << "Invalid checkpoint. Rollback blockchain to last valid checkpoint at height "
-                                                           << lastValidCheckpointHeight;
+          logger(logging::WARNING, logging::BRIGHT_YELLOW)
+              << "Invalid checkpoint. Rollback blockchain to last valid checkpoint at height "
+              << lastValidCheckpointHeight;
           rollbackBlockchainTo(lastValidCheckpointHeight);
         }
       }
@@ -558,11 +284,11 @@ namespace cn
         return false;
       }
 
-      // ── Upgrade detectors ────────────────────────────────────────────
+      // Upgrade detectors
       if (!initUpgradeDetectors())
         return false;
 
-      // ── Final setup ──────────────────────────────────────────────────
+      // Final setup
       update_next_comulative_size_limit();
       logInitSummary();
 
@@ -575,8 +301,7 @@ namespace cn
     }
   }
 
-  // ─── Deinit ─────────────────────────────────────────────────────────────
-
+  // Deinit
   bool Blockchain::deinit()
   {
     bool cacheStored = false, indicesStored = true;
@@ -585,8 +310,8 @@ namespace cn
     {
       logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving blockchain state before shutdown...";
 
-      // Full save on shutdown (writes all meta blobs)
-      cacheStored = m_useMdbx ? storeMdbxCache(true) : storeCache();
+      // Flush MDBX to disk
+      cacheStored = storeMdbxCache();
 
       if (m_blockchainIndexesEnabled)
       {
@@ -611,8 +336,7 @@ namespace cn
     return cacheStored && indicesStored;
   }
 
-  // ─── Cache Rebuild ──────────────────────────────────────────────────────
-
+  // Cache Rebuild
   bool Blockchain::rebuildCache()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -621,16 +345,8 @@ namespace cn
     std::chrono::steady_clock::time_point timePoint = std::chrono::steady_clock::now();
     try
     {
-      if (m_useMdbx)
-      {
-        m_blockHashes.clear();
-        m_hashToHeight.clear();
-      }
-      else
-      {
-        m_blockIndex.clear();
-      }
-
+      m_blockHashes.clear();
+      m_hashToHeight.clear();
       m_transactionMap.clear();
       m_spent_keys.clear();
       m_outputs.clear();
@@ -639,20 +355,14 @@ namespace cn
       for (uint32_t b = 0; b < blocksSize(); ++b)
       {
         if (b % 1000 == 0)
-          logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding Cache for Height " << b << " of " << blocksSize();
+          logger(logging::INFO, logging::BRIGHT_WHITE)
+              << "Rebuilding Cache for Height " << b << " of " << blocksSize();
 
         const BlockEntry &block = blocksAt(b);
         crypto::Hash blockHash = get_block_hash(block.bl);
 
-        if (m_useMdbx)
-        {
-          m_blockHashes.push_back(blockHash);
-          m_hashToHeight[blockHash] = b;
-        }
-        else
-        {
-          m_blockIndex.push(blockHash);
-        }
+        m_blockHashes.push_back(blockHash);
+        m_hashToHeight[blockHash] = b;
 
         uint64_t interest = 0;
         for (uint32_t t = 0; t < block.transactions.size(); ++t)
@@ -708,248 +418,29 @@ namespace cn
     }
   }
 
-  // ─── Block Rebuild (Legacy Only) ────────────────────────────────────────
-
-  bool Blockchain::rebuildBlocks()
-  {
-    if (m_useMdbx)
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "rebuildBlocks not supported with MDBX backend";
-      return false;
-    }
-
-    logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding cache";
-
-    try
-    {
-      std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
-      uint64_t alreadyGeneratedCoinsPrev = 0;
-      for (uint32_t b = 0; b < blocksSize(); ++b)
-      {
-        if (b % 10000 == 0)
-          logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding blocks for Height " << b << " of " << blocksSize();
-
-        auto block = BlockEntry(blocksAt(b));
-        uint64_t interest = 0, fee = 0;
-        for (const auto &transaction : block.transactions)
-        {
-          uint64_t inAmount = m_currency.getTransactionAllInputsAmount(transaction.tx, block.height);
-          uint64_t outAmount = getOutputAmount(transaction.tx);
-          fee += inAmount < outAmount ? cn::parameters::MINIMUM_FEE : inAmount - outAmount;
-          interest += m_currency.calculateTotalTransactionInterest(transaction.tx, b);
-        }
-
-        std::vector<size_t> lastBlocksSizes;
-        get_last_n_blocks_sizes(lastBlocksSizes, m_currency.rewardBlocksWindow());
-        size_t blocksSizeMedian = common::medianValue(lastBlocksSizes);
-
-        uint64_t reward;
-        int64_t emissionChange;
-        if (!m_currency.getBlockReward(blocksSizeMedian, block.block_cumulative_size, alreadyGeneratedCoinsPrev, fee, b, reward, emissionChange))
-        {
-          logger(logging::ERROR, logging::BRIGHT_RED) << "An error occurred";
-          return false;
-        }
-        uint64_t alreadyGeneratedCoins = alreadyGeneratedCoinsPrev + emissionChange + interest;
-        block.already_generated_coins = alreadyGeneratedCoins;
-        m_blocks.replace(b, block);
-        alreadyGeneratedCoinsPrev = alreadyGeneratedCoins;
-      }
-
-      std::chrono::duration<double> duration = std::chrono::steady_clock::now() - startTime;
-      logger(logging::INFO, logging::BRIGHT_WHITE) << "Rebuilding blocks took: " << duration.count();
-      storeCache();
-      m_blocks.close();
-      return m_blocks.open(PathHelpers::appendPath(m_config_folder, m_currency.blocksFileName()),
-                           PathHelpers::appendPath(m_config_folder, m_currency.blockIndexesFileName()), 1024);
-    }
-    catch (const std::exception &)
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "Error rebuilding blocks";
-      try
-      {
-        m_blocks.close();
-        m_blocks.open(PathHelpers::appendPath(m_config_folder, m_currency.blocksFileName()),
-                      PathHelpers::appendPath(m_config_folder, m_currency.blockIndexesFileName()), 1024);
-      }
-      catch (...)
-      {
-        logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to reopen blockchain files after error";
-      }
-      return false;
-    }
-  }
-
-  // ─── Store Cache ────────────────────────────────────────────────────────
-
+  // Store Cache
   bool Blockchain::storeCache()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
-
-    if (m_useMdbx)
-      return storeMdbxCache(false); // autosave: flush only
-
-    return storeLegacyCache();
+    return storeMdbxCache();
   }
 
-  bool Blockchain::storeMdbxCache(bool fullSave)
+  bool Blockchain::storeMdbxCache()
   {
+    // With immediate-commit MDBX, all data is already durable on disk.
+    // Flush ensures any environment-level buffers are synced.
     if (!m_mdbxStorage)
       return false;
 
-    if (!fullSave)
-    {
-      // Autosave: just flush pending writes to disk — no meta blob serialization
-      m_mdbxStorage->flush();
-      return true;
-    }
-
-    // Full save (shutdown): write all index blobs + native DB sync + flush
-    logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving MDBX index...";
-
-    std::vector<uint8_t> buf;
-
-    // Block hashes
-    logger(logging::INFO) << "  Saving block hashes (" << m_blockHashes.size() << " entries)...";
-    m_mdbxStorage->putMeta("idx_hashes",
-                           std::vector<uint8_t>((uint8_t *)m_blockHashes.data(),
-                                                (uint8_t *)m_blockHashes.data() + m_blockHashes.size() * sizeof(crypto::Hash)));
-
-    // Hash → height map
-    logger(logging::INFO) << "  Saving hash map (" << m_hashToHeight.size() << " entries)...";
-    buf.clear();
-    for (const auto &p : m_hashToHeight)
-    {
-      buf.insert(buf.end(), (uint8_t *)p.first.data, (uint8_t *)p.first.data + sizeof(crypto::Hash));
-      uint32_t h = p.second;
-      buf.insert(buf.end(), (uint8_t *)&h, (uint8_t *)&h + sizeof(h));
-    }
-    m_mdbxStorage->putMeta("idx_hash2height", buf);
-
-    // Transaction map
-    logger(logging::INFO) << "  Saving transaction map (" << m_transactionMap.size() << " entries)...";
-    buf.clear();
-    for (const auto &kv : m_transactionMap)
-    {
-      buf.insert(buf.end(), (uint8_t *)kv.first.data, (uint8_t *)kv.first.data + sizeof(crypto::Hash));
-      uint64_t packed = (static_cast<uint64_t>(kv.second.block) << 16) | kv.second.transaction;
-      buf.insert(buf.end(), (uint8_t *)&packed, (uint8_t *)&packed + sizeof(packed));
-    }
-    m_mdbxStorage->putMeta("idx_txmap", buf);
-
-    // Spent keys — both meta blob (fast cache) and native DB (ground truth)
-    logger(logging::INFO) << "  Saving spent keys (" << m_spent_keys.size() << " entries)...";
-    buf.clear();
-    std::vector<crypto::KeyImage> keyImages;
-    keyImages.reserve(m_spent_keys.size());
-    for (const auto &p : m_spent_keys)
-    {
-      buf.insert(buf.end(), (uint8_t *)p.first.data, (uint8_t *)p.first.data + sizeof(crypto::KeyImage));
-      uint32_t h = p.second;
-      buf.insert(buf.end(), (uint8_t *)&h, (uint8_t *)&h + sizeof(h));
-      keyImages.push_back(p.first);
-    }
-    m_mdbxStorage->putMeta("idx_spentkeys", buf);
-    m_mdbxStorage->markKeyImagesSpent(keyImages);
-
-    // Top height
-    uint32_t topHeight = m_mdbxStorage->topBlockHeight();
-    m_mdbxStorage->putMeta("idx_topheight",
-                           std::vector<uint8_t>((uint8_t *)&topHeight, (uint8_t *)&topHeight + sizeof(topHeight)));
-
-    // Outputs index
-    logger(logging::INFO) << "  Saving outputs index (" << m_outputs.size() << " amounts)...";
-    buf.clear();
-    for (const auto &p : m_outputs)
-    {
-      uint64_t amount = p.first;
-      buf.insert(buf.end(), (uint8_t *)&amount, (uint8_t *)&amount + sizeof(amount));
-      uint32_t count = static_cast<uint32_t>(p.second.size());
-      buf.insert(buf.end(), (uint8_t *)&count, (uint8_t *)&count + sizeof(count));
-      for (const auto &pair : p.second)
-      {
-        uint32_t block = pair.first.block;
-        uint16_t tx = pair.first.transaction;
-        uint16_t outIdx = pair.second;
-        buf.insert(buf.end(), (uint8_t *)&block, (uint8_t *)&block + sizeof(block));
-        buf.insert(buf.end(), (uint8_t *)&tx, (uint8_t *)&tx + sizeof(tx));
-        buf.insert(buf.end(), (uint8_t *)&outIdx, (uint8_t *)&outIdx + sizeof(outIdx));
-      }
-    }
-    m_mdbxStorage->putMeta("idx_outputs", buf);
-
-    // Multisig outputs index
-    logger(logging::INFO) << "  Saving multisig outputs index (" << m_multisignatureOutputs.size() << " amounts)...";
-    buf.clear();
-    for (const auto &p : m_multisignatureOutputs)
-    {
-      uint64_t amount = p.first;
-      buf.insert(buf.end(), (uint8_t *)&amount, (uint8_t *)&amount + sizeof(amount));
-      uint32_t count = static_cast<uint32_t>(p.second.size());
-      buf.insert(buf.end(), (uint8_t *)&count, (uint8_t *)&count + sizeof(count));
-      for (const auto &usage : p.second)
-      {
-        uint32_t block = usage.transactionIndex.block;
-        uint16_t tx = usage.transactionIndex.transaction;
-        uint16_t outIdx = usage.outputIndex;
-        uint8_t used = usage.isUsed ? 1 : 0;
-        buf.insert(buf.end(), (uint8_t *)&block, (uint8_t *)&block + sizeof(block));
-        buf.insert(buf.end(), (uint8_t *)&tx, (uint8_t *)&tx + sizeof(tx));
-        buf.insert(buf.end(), (uint8_t *)&outIdx, (uint8_t *)&outIdx + sizeof(outIdx));
-        buf.push_back(used);
-      }
-    }
-    m_mdbxStorage->putMeta("idx_msig", buf);
-
-    // Deposit index
-    logger(logging::INFO) << "  Saving deposit index (" << m_depositIndex.size() << " entries)...";
-    {
-      cn::BinaryArray temp;
-      cn::toBinaryArray(m_depositIndex, temp);
-      m_mdbxStorage->putMeta("idx_deposits", std::vector<uint8_t>(temp.begin(), temp.end()));
-    }
-
-    auto flushStart = std::chrono::steady_clock::now();
     m_mdbxStorage->flush();
-    auto flushMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - flushStart)
-                       .count();
-    logger(logging::INFO, logging::BRIGHT_GREEN) << "MDBX index saved successfully (" << flushMs << "ms).";
     return true;
   }
 
-  bool Blockchain::storeLegacyCache()
-  {
-    logger(logging::INFO, logging::BRIGHT_WHITE) << "Saving blockchain...";
-    BlockCacheSerializer ser(*this, getTailId(), logger.getLogger());
-    const std::string &blocksCacheFileName = m_currency.blocksCacheFileName();
-    std::string blockCacheBkpFileName = blocksCacheFileName + ".bkp";
-
-    try
-    {
-      std::rename(blocksCacheFileName.c_str(), blockCacheBkpFileName.c_str());
-      if (!ser.save(PathHelpers::appendPath(m_config_folder, blocksCacheFileName)))
-      {
-        logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to save blockchain cache";
-        return false;
-      }
-      logger(logging::INFO, logging::BRIGHT_GREEN) << "The Blockchain was successfully saved.";
-      return true;
-    }
-    catch (const std::exception &)
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "Failed to save blockchain cache";
-      return false;
-    }
-  }
-
-  // ─── Reset ──────────────────────────────────────────────────────────────
-
+  // Reset
   bool Blockchain::resetAndSetGenesisBlock(const Block &b)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     blocksClear();
-    m_blockIndex.clear();
     m_transactionMap.clear();
     m_spent_keys.clear();
     m_alternative_chains.clear();
@@ -959,13 +450,10 @@ namespace cn
     m_generatedTransactionsIndex.clear();
     m_orthanBlocksIndex.clear();
 
-    if (m_useMdbx)
-    {
-      m_blockHashes.clear();
-      m_hashToHeight.clear();
-      m_cachedEntries.clear();
-      m_cacheIndex = 0;
-    }
+    m_blockHashes.clear();
+    m_hashToHeight.clear();
+    m_cachedEntries.clear();
+    m_cacheIndex = 0;
 
     block_verification_context bvc = boost::value_initialized<block_verification_context>();
     addNewBlock(b, bvc);

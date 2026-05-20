@@ -313,6 +313,8 @@ bool RpcServer::processJsonRpcRequest(const HttpRequest& request, HttpResponse& 
         {"get_merkle_proof", {makeMemberMethod(&RpcServer::on_get_merkle_proof), false}},
         {"get_outputs_for_address", {makeMemberMethod(&RpcServer::on_get_outputs_for_address), false}},
         {"export_headers", {makeMemberMethod(&RpcServer::on_export_headers), false}},
+        {"get_spv_outputs", {makeMemberMethod(&RpcServer::on_get_spv_outputs), false}},
+        {"get_wallet_snapshot", {makeMemberMethod(&RpcServer::on_get_wallet_snapshot), false}},
     };
 
     auto it = jsonRpcHandlers.find(jsonRequest.getMethod());
@@ -1976,5 +1978,294 @@ bool RpcServer::on_export_headers(const COMMAND_RPC_EXPORT_HEADERS::request &req
   }
   res.status = CORE_RPC_STATUS_OK;
   return true;
+}
+
+bool RpcServer::on_get_spv_outputs(const COMMAND_RPC_GET_SPV_OUTPUTS::request &req,
+                                   COMMAND_RPC_GET_SPV_OUTPUTS::response &res)
+{
+  uint32_t current_height = m_core.get_current_blockchain_height();
+  if (current_height == 0)
+  {
+    throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Blockchain not initialized");
+  }
+
+  if (req.from_height >= current_height)
+  {
+    throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_WRONG_PARAM,
+                                "from_height exceeds current blockchain height");
+  }
+
+  uint32_t to_height = std::min(req.to_height, current_height - 1);
+  if (req.from_height > to_height)
+  {
+    res.outputs.clear();
+    res.status = CORE_RPC_STATUS_OK;
+    return true;
+  }
+
+  // Parse private view key from hex
+  crypto::SecretKey view_secret_key;
+  crypto::PublicKey view_public_key;
+  if (!common::podFromHex(req.view_key, view_secret_key))
+  {
+    throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid view_key hex");
+  }
+
+  // Parse spend public key if provided
+  crypto::PublicKey spend_public_key;
+  bool has_spend_key = !req.spend_key.empty();
+  if (has_spend_key)
+  {
+    if (!common::podFromHex(req.spend_key, spend_public_key))
+    {
+      throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid spend_key hex");
+    }
+  }
+  else
+  {
+    spend_public_key = crypto::PublicKey();
+  }
+
+  // Set max outputs limit
+  uint32_t max_outputs = req.max_outputs;
+  if (max_outputs == 0 || max_outputs > 50000)
+  {
+    max_outputs = 10000;
+  }
+
+  res.outputs.reserve(std::min(max_outputs, 10000u));
+  uint32_t outputs_found = 0;
+
+  for (uint32_t height = req.from_height; height <= to_height && outputs_found < max_outputs; ++height)
+  {
+    crypto::Hash block_hash = m_core.getBlockIdByHeight(height);
+    if (block_hash == cn::NULL_HASH)
+      continue;
+
+    Block blk;
+    if (!m_core.getBlockByHash(block_hash, blk))
+      continue;
+
+    uint64_t block_timestamp = blk.timestamp;
+
+    // Helper to check if an output belongs to our wallet
+    auto check_output = [&](const TransactionPrefix &tx, const crypto::Hash &tx_hash,
+                            uint32_t block_height, uint64_t timestamp)
+    {
+      crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(tx.extra);
+      if (tx_pub_key == cn::NULL_PUBLIC_KEY)
+        return;
+
+      crypto::KeyDerivation derivation;
+      if (!crypto::generate_key_derivation(tx_pub_key, view_secret_key, derivation))
+        return;
+
+      size_t key_index = 0;
+      for (size_t i = 0; i < tx.outputs.size(); ++i)
+      {
+        const auto &output = tx.outputs[i];
+
+        if (output.target.type() == typeid(KeyOutput))
+        {
+          const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
+
+          crypto::PublicKey derived_key;
+          if (crypto::derive_public_key(derivation, key_index, spend_public_key, derived_key) &&
+              memcmp(&derived_key, &key_out.key, sizeof(crypto::PublicKey)) == 0)
+          {
+            COMMAND_RPC_GET_SPV_OUTPUTS::response::OutputEntry entry;
+            entry.block_height = block_height;
+            entry.tx_hash = common::podToHex(tx_hash);
+            entry.amount = output.amount;
+            entry.output_index = static_cast<uint32_t>(i);
+            entry.output_public_key = common::podToHex(key_out.key);
+            entry.tx_public_key = common::podToHex(tx_pub_key);
+            entry.timestamp = timestamp;
+
+            res.outputs.push_back(entry);
+            outputs_found++;
+
+            if (outputs_found >= max_outputs)
+              return;
+          }
+          ++key_index;
+        }
+        else if (output.target.type() == typeid(MultisignatureOutput))
+        {
+          const MultisignatureOutput &msig_out = boost::get<MultisignatureOutput>(output.target);
+          for (size_t ki = 0; ki < msig_out.keys.size(); ++ki)
+          {
+            crypto::PublicKey recovered_spend;
+            if (crypto::underive_public_key(derivation, i, msig_out.keys[ki], recovered_spend) &&
+                memcmp(&recovered_spend, &spend_public_key, sizeof(crypto::PublicKey)) == 0)
+            {
+              COMMAND_RPC_GET_SPV_OUTPUTS::response::OutputEntry entry;
+              entry.block_height = block_height;
+              entry.tx_hash = common::podToHex(tx_hash);
+              entry.amount = output.amount;
+              entry.output_index = static_cast<uint32_t>(i);
+              entry.output_public_key = common::podToHex(msig_out.keys[ki]);
+              entry.tx_public_key = common::podToHex(tx_pub_key);
+              entry.timestamp = timestamp;
+              entry.is_deposit = (msig_out.term > 0);
+              entry.term = msig_out.term;
+
+              res.outputs.push_back(entry);
+              outputs_found++;
+              break;
+            }
+          }
+          key_index += msig_out.keys.size();
+        }
+      }
+    };
+
+    // Process coinbase transaction
+    check_output(blk.baseTransaction, getObjectHash(blk.baseTransaction), height, block_timestamp);
+    if (outputs_found >= max_outputs)
+      break;
+
+    // Process regular transactions
+    if (!blk.transactionHashes.empty())
+    {
+      std::list<crypto::Hash> missed_txs;
+      std::list<Transaction> txs;
+      m_core.getTransactions(blk.transactionHashes, txs, missed_txs);
+
+      auto tx_hash_it = blk.transactionHashes.begin();
+      for (const auto &tx : txs)
+      {
+        if (outputs_found >= max_outputs)
+          break;
+        check_output(tx, *tx_hash_it, height, block_timestamp);
+        ++tx_hash_it;
+      }
+    }
+  }
+
+  res.next_from_height = to_height + 1;
+  res.has_more = (outputs_found >= max_outputs && to_height < current_height - 1);
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_get_wallet_snapshot(const COMMAND_RPC_GET_WALLET_SNAPSHOT::request &req,
+                                       COMMAND_RPC_GET_WALLET_SNAPSHOT::response &res)
+{
+  try
+  {
+    // ── Parse tx_pub_keys from hex ──────────────────────────────────────
+    std::vector<crypto::PublicKey> tx_pub_keys;
+    tx_pub_keys.reserve(req.tx_pub_keys.size());
+    for (const auto &hex : req.tx_pub_keys)
+    {
+      crypto::PublicKey pk;
+      if (common::podFromHex(hex, pk))
+        tx_pub_keys.push_back(pk);
+    }
+
+    if (!!m_core.getMdbxStorage())
+    {
+      // Fallback: no MDBX indexes available — return empty snapshot
+      std::ostringstream json;
+      json << "{"
+           << "\"current_height\":" << m_core.get_current_blockchain_height() << ","
+           << "\"wallet_height\":" << m_core.get_current_blockchain_height() << ","
+           << "\"output_count\":0,"
+           << "\"spent_key_image_count\":0,"
+           << "\"new_tx_pub_key_count\":0,"
+           << "\"outputs\":[],"
+           << "\"spent_key_images\":[],"
+           << "\"new_tx_pub_keys\":[]"
+           << "}";
+      res.snapshot = json.str();
+      res.status = CORE_RPC_STATUS_OK;
+      return true;
+    }
+
+    auto storage = m_core.getMdbxStorage();
+
+    // ── Fast path: query pre-computed indexes ───────────────────────────
+    std::vector<CryptoNote::WalletOutputInfo> outputs;
+    std::unordered_set<std::string> spent_key_images;
+
+    if (!storage->getOutputsByTxPubKeys(tx_pub_keys, outputs, spent_key_images))
+    {
+      res.status = "Failed to get outputs from index";
+      return false;
+    }
+
+    // ── Get new tx_pub_keys since wallet's last scan ────────────────────
+    uint32_t current_height = m_core.get_current_blockchain_height();
+    uint32_t from_height = req.wallet_height > 0 ? req.wallet_height + 1 : 0;
+    std::vector<crypto::PublicKey> new_keys;
+    if (from_height <= current_height)
+      new_keys = storage->getNewTxPubKeys(from_height, current_height);
+
+    // ── Build JSON response manually ────────────────────────────────────
+    std::ostringstream json;
+    json << "{";
+
+    // Metadata
+    json << "\"current_height\":" << current_height << ",";
+    json << "\"wallet_height\":" << current_height << ",";
+    json << "\"output_count\":" << outputs.size() << ",";
+    json << "\"spent_key_image_count\":" << spent_key_images.size() << ",";
+    json << "\"new_tx_pub_key_count\":" << new_keys.size() << ",";
+
+    // Outputs array
+    json << "\"outputs\":[";
+    for (size_t i = 0; i < outputs.size(); ++i)
+    {
+      const auto &out = outputs[i];
+      if (i > 0)
+        json << ",";
+      json << "{"
+           << "\"height\":" << out.block_height << ","
+           << "\"tx_hash\":\"" << common::podToHex(out.tx_hash) << "\","
+           << "\"amount\":" << out.amount << ","
+           << "\"output_index\":" << out.output_index << ","
+           << "\"output_key\":\"" << common::podToHex(out.output_key) << "\","
+           << "\"tx_pubkey\":\"" << common::podToHex(out.tx_public_key) << "\""
+           << "}";
+    }
+    json << "],";
+
+    // Spent key images array (wallet derives these client-side and checks membership)
+    json << "\"spent_key_images\":[";
+    {
+      bool first = true;
+      for (const auto &ki_hex : spent_key_images)
+      {
+        if (!first)
+          json << ",";
+        json << "\"" << ki_hex << "\"";
+        first = false;
+      }
+    }
+    json << "],";
+
+    // New tx_pub_keys the wallet should add to its known set
+    json << "\"new_tx_pub_keys\":[";
+    for (size_t i = 0; i < new_keys.size(); ++i)
+    {
+      if (i > 0)
+        json << ",";
+      json << "\"" << common::podToHex(new_keys[i]) << "\"";
+    }
+    json << "]";
+
+    json << "}";
+
+    res.snapshot = json.str();
+    res.status = CORE_RPC_STATUS_OK;
+    return true;
+  }
+  catch (const std::exception &e)
+  {
+    logger(logging::ERROR) << "on_get_wallet_snapshot error: " << e.what();
+    res.status = std::string("Error: ") + e.what();
+    return false;
+  }
 }
 }

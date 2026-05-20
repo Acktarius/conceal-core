@@ -176,22 +176,14 @@ namespace cn
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-    if (m_useMdbx && m_mdbxStorage)
-    {
-      BlockEntry entry, entry_prev;
-      if (!loadBlockEntry(height, entry))
-        return 0;
-      if (height < 1)
-        return entry.cumulative_difficulty;
-      if (!loadBlockEntry(height - 1, entry_prev))
-        return entry.cumulative_difficulty;
-      return entry.cumulative_difficulty - entry_prev.cumulative_difficulty;
-    }
-
-    const auto &current = blocksAt(height);
+    BlockEntry entry, entry_prev;
+    if (!loadBlockEntry(height, entry))
+      return 0;
     if (height < 1)
-      return current.cumulative_difficulty;
-    return current.cumulative_difficulty - blocksAt(height - 1).cumulative_difficulty;
+      return entry.cumulative_difficulty;
+    if (!loadBlockEntry(height - 1, entry_prev))
+      return entry.cumulative_difficulty;
+    return entry.cumulative_difficulty - entry_prev.cumulative_difficulty;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

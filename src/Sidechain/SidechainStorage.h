@@ -5,20 +5,23 @@
 #pragma once
 
 #include "SidechainTypes.h"
-#include "Storage/MDBXBlockchainStorage.h"
-#include <vector>
+#include "SidechainMdbxStorage.h"
+#include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace Sidechain
 {
-  // Asset registry entry for provenance tracking
+  // ── Asset registry entry for provenance tracking ─────────────────────
+
   struct AssetRegistryEntry
   {
     uint64_t tokenId = 0;
     std::string fingerprint;          // hash(sourceChain:sourceAsset:bridgeOperatorPubKey)
     std::string sourceChain;          // "conceal", "polygon", "ethereum", "bitcoin"
     std::string sourceAsset;          // Contract address or "native"
-    crypto::PublicKey bridgeOperator; // Public key of the bridge operator — cryptographic identity
+    crypto::PublicKey bridgeOperator; // Public key of the bridge operator
     std::string equivalenceClass;     // sourceChain:sourceAsset (for DEX token equivalence)
     bool verified = false;
 
@@ -34,7 +37,8 @@ namespace Sidechain
     }
   };
 
-  // Bridge lock entry tracking main chain deposits
+  // ── Bridge lock entry tracking main chain deposits ───────────────────
+
   struct BridgeLockEntry
   {
     uint64_t id = 0;
@@ -57,20 +61,31 @@ namespace Sidechain
     }
   };
 
+  // ── Storage class ────────────────────────────────────────────────────
+
   class SidechainStorage
   {
   public:
     explicit SidechainStorage(const std::string &dataDir);
     ~SidechainStorage();
 
-    // Block operations
+    // ── Block storage ────────────────────────────────────────────────
+
     bool addBlock(const Block &block, const crypto::Hash &hash);
     bool getBlock(uint64_t height, Block &block) const;
     bool getBlock(const crypto::Hash &hash, Block &block) const;
     uint64_t topBlockHeight() const;
     crypto::Hash getBlockHash(uint64_t height) const;
 
-    // Token operations
+    // ── Fingerprint generation ───────────────────────────────────────
+
+    std::string generateFingerprint(
+        const std::string &sourceChain,
+        const std::string &sourceAsset,
+        const crypto::PublicKey &bridgeOperator) const;
+
+    // ── Token operations ─────────────────────────────────────────────
+
     bool addToken(const TokenInfo &token);
     bool updateToken(const TokenInfo &token);
     bool getToken(uint64_t tokenId, TokenInfo &token) const;
@@ -78,11 +93,13 @@ namespace Sidechain
     std::vector<TokenInfo> getAllTokens() const;
     uint64_t nextTokenId() const;
 
-    // Rate limiting for token creation
+    // ── Rate limiting ────────────────────────────────────────────────
+
     bool canCreateToken(const crypto::PublicKey &address, uint64_t currentHeight) const;
     void recordTokenCreation(const crypto::PublicKey &address, uint64_t currentHeight);
 
-    // Asset registry operations
+    // ── Asset registry ───────────────────────────────────────────────
+
     bool registerAsset(const std::string &sourceChain,
                        const std::string &sourceAsset,
                        const crypto::PublicKey &bridgeOperator,
@@ -92,17 +109,18 @@ namespace Sidechain
                           const std::string &sourceAsset,
                           const crypto::PublicKey &bridgeOperator,
                           uint64_t &tokenId) const;
-    bool getAssetByTokenId(uint64_t tokenId,
-                           AssetRegistryEntry &entry) const;
+    bool getAssetByTokenId(uint64_t tokenId, AssetRegistryEntry &entry) const;
     std::vector<AssetRegistryEntry> getAllAssets() const;
 
-    // Equivalence group operations
+    // ── Equivalence groups ───────────────────────────────────────────
+
     std::string getEquivalenceClass(const std::string &sourceChain,
                                     const std::string &sourceAsset) const;
     std::vector<uint64_t> getTokensByEquivalenceClass(const std::string &equivalenceClass) const;
     bool addToEquivalenceGroup(const std::string &equivalenceClass, uint64_t tokenId);
 
-    // Bridge operations
+    // ── Bridge locks ─────────────────────────────────────────────────
+
     bool addBridgeLock(const crypto::PublicKey &userAddress,
                        uint64_t tokenId,
                        uint64_t amount,
@@ -114,7 +132,8 @@ namespace Sidechain
     uint64_t getTotalLockedForToken(uint64_t tokenId) const;
     uint64_t nextBridgeLockId() const;
 
-    // Vesting operations
+    // ── Vesting ──────────────────────────────────────────────────────
+
     bool addVestingSchedule(const VestingSchedule &schedule);
     bool getVestingSchedule(uint64_t scheduleId, VestingSchedule &schedule) const;
     bool updateVestingSchedule(const VestingSchedule &schedule);
@@ -122,7 +141,8 @@ namespace Sidechain
     std::vector<VestingSchedule> getVestingSchedulesByBeneficiary(const crypto::PublicKey &beneficiary) const;
     uint64_t nextVestingScheduleId() const;
 
-    // Reward pool operations
+    // ── Reward pools ─────────────────────────────────────────────────
+
     bool addRewardPool(const RewardPool &pool);
     bool getRewardPool(uint64_t poolId, RewardPool &pool) const;
     bool updateRewardPool(const RewardPool &pool);
@@ -130,7 +150,8 @@ namespace Sidechain
     std::vector<RewardPool> getRewardPoolsByToken(uint64_t tokenId) const;
     uint64_t nextRewardPoolId() const;
 
-    // Stake operations
+    // ── Stakes ───────────────────────────────────────────────────────
+
     bool addStakeEntry(const StakeEntry &entry);
     bool getStakeEntry(uint64_t entryId, StakeEntry &entry) const;
     bool updateStakeEntry(const StakeEntry &entry);
@@ -138,30 +159,37 @@ namespace Sidechain
     std::vector<StakeEntry> getStakesByPool(uint64_t poolId) const;
     uint64_t nextStakeEntryId() const;
 
-    // Per-block processing
+    // ── Per-block processing ─────────────────────────────────────────
+
     void processVestingReleases(uint64_t currentBlock);
     void processRewardAccrual(uint64_t currentBlock);
 
-    // Account operations
+    // ── Account balances ─────────────────────────────────────────────
+
     bool getBalance(const crypto::PublicKey &address, uint64_t tokenId, uint64_t &balance) const;
     bool setBalance(const crypto::PublicKey &address, uint64_t tokenId, uint64_t balance);
+
+    // ── Transaction execution ────────────────────────────────────────
+
     bool applyTransaction(const Transaction &tx);
 
-    // Validator operations
+    // ── Validators ───────────────────────────────────────────────────
+
     bool addValidator(const ValidatorInfo &validator);
     std::vector<ValidatorInfo> getActiveValidators() const;
 
-    // Meta
+    // ── Meta ─────────────────────────────────────────────────────────
+
     void flush();
     bool getMeta(const std::string &key, std::vector<uint8_t> &value) const;
     void putMeta(const std::string &key, const std::vector<uint8_t> &value);
 
   private:
-    std::string generateFingerprint(const std::string &sourceChain,
-                                    const std::string &sourceAsset,
-                                    const crypto::PublicKey &bridgeOperator) const;
-
-    CryptoNote::MDBXBlockchainStorage m_storage;
+    SidechainMdbxStorage m_storage;
     mutable std::recursive_mutex m_mutex;
+
+    // In-memory hash → height index
+    mutable std::unordered_map<crypto::Hash, uint64_t> m_hashToHeight;
   };
-}
+
+} // namespace Sidechain

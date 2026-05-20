@@ -31,6 +31,9 @@
 #include "crypto/hash.h"
 #include "version.h"
 
+#include "Blockchain/Blockchain.h"
+#include "CryptoNoteCore/TransactionExtra.h"
+
 #if defined(WIN32)
 #include <crtdbg.h>
 #endif
@@ -56,14 +59,12 @@ namespace
       "no-console", "Disable daemon console commands"};
   const command_line::arg_descriptor<bool> arg_print_genesis_tx = {
       "print-genesis-tx", "Prints genesis' block tx hex to insert it to config and exits"};
-  const command_line::arg_descriptor<bool> arg_use_mdbx = {
-      "use-mdbx", "Use MDBX database backend for faster sync", false};
   const command_line::arg_descriptor<bool> arg_export_snapshot = {
-      "export-snapshot", "Export blockchain headers snapshot to file", false};
+      "export-snapshot", "Export full blockchain snapshot for fast bootstrap", false};
   const command_line::arg_descriptor<std::string> arg_import_snapshot = {
-      "import-snapshot", "Import blockchain headers snapshot from file", ""};
-  const command_line::arg_descriptor<uint32_t> arg_rollback_height = {
-      "rollback-height", "Rollback blockchain to this height before starting (MDBX only, debug)", 0};
+      "import-snapshot", "Import full blockchain snapshot and bootstrap database", ""};
+  const command_line::arg_descriptor<bool> arg_enable_wallet_indexes = {
+      "enable-wallet-indexes", "Enable instant wallet sync indexes (archive node)", false};
 }
 
 // ── Genesis tx printing ─────────────────────────────────────────────────
@@ -99,12 +100,22 @@ JsonValue buildLoggerConfiguration(Level level, const std::string &logfile)
   return loggerConfiguration;
 }
 
+// ── Helper: extract tx public key from extra ────────────────────────────
+
+crypto::PublicKey getTxPublicKeyFromExtra(const std::vector<uint8_t> &extra)
+{
+  crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(extra);
+  if (tx_pub_key == cn::NULL_PUBLIC_KEY)
+    return cn::NULL_PUBLIC_KEY;
+  return tx_pub_key;
+}
+
 // ── Snapshot export ─────────────────────────────────────────────────────
 
 bool exportSnapshot(const std::string &dataDir, const std::string &outputFile,
                     logging::LoggerRef &logger)
 {
-  logger(INFO) << "Exporting blockchain snapshot to " << outputFile;
+  logger(INFO) << "Exporting full blockchain snapshot to " << outputFile;
 
   std::string dbPath = dataDir;
   if (!dbPath.empty() && dbPath.back() != '/')
@@ -129,47 +140,48 @@ bool exportSnapshot(const std::string &dataDir, const std::string &outputFile,
     return false;
   }
 
-  const uint32_t magic = 0x43434E58;
-  const uint32_t version = 1;
+  // Magic + version header
+  const uint32_t magic = 0x43434E58; // "CCNX"
+  const uint32_t version = 2;        // v2: full block entries
   file.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
   file.write(reinterpret_cast<const char *>(&version), sizeof(version));
   file.write(reinterpret_cast<const char *>(&topHeight), sizeof(topHeight));
 
-  for (uint32_t h = 1; h <= topHeight; ++h)
+  // Write each block: [32-byte hash][4-byte entry_size][serialized BlockEntry]
+  for (uint32_t h = 0; h <= topHeight; ++h)
   {
-    if (h % 100000 == 0)
+    if (h % 10000 == 0)
       logger(INFO) << "Exporting block " << h << "/" << topHeight;
 
-    cn::BlockHeaderPOD hdr;
-    if (!storage.getBlockHeader(h, hdr))
+    cn::BinaryArray ba;
+    if (!storage.getBlockEntry(h, ba))
     {
-      logger(WARNING) << "No header for block " << h << ", skipping";
-      continue;
+      logger(ERROR) << "Failed to read block entry at height " << h;
+      file.close();
+      return false;
     }
 
-    crypto::Hash blockHash = storage.getBlockHash(h);
-    file.write(reinterpret_cast<const char *>(&hdr), sizeof(cn::BlockHeaderPOD));
-    file.write(reinterpret_cast<const char *>(blockHash.data), sizeof(crypto::Hash));
-  }
+    // Derive block hash from the entry
+    cn::Blockchain::BlockEntry entry;
+    if (!cn::fromBinaryArray(entry, ba))
+    {
+      logger(ERROR) << "Failed to deserialize block entry at height " << h;
+      file.close();
+      return false;
+    }
+    crypto::Hash blockHash = cn::get_block_hash(entry.bl);
 
-  auto checkpoints = storage.getCheckpoints();
-  uint32_t checkpointCount = static_cast<uint32_t>(checkpoints.size());
-  file.write(reinterpret_cast<const char *>(&checkpointCount), sizeof(checkpointCount));
-  for (const auto &cp : checkpoints)
-  {
-    uint32_t height = cp.first;
-    crypto::Hash hash = cp.second;
-    file.write(reinterpret_cast<const char *>(&height), sizeof(height));
-    file.write(reinterpret_cast<const char *>(hash.data), sizeof(crypto::Hash));
+    // Write hash + size + data
+    file.write(reinterpret_cast<const char *>(blockHash.data), sizeof(crypto::Hash));
+    uint32_t entrySize = static_cast<uint32_t>(ba.size());
+    file.write(reinterpret_cast<const char *>(&entrySize), sizeof(entrySize));
+    file.write(reinterpret_cast<const char *>(ba.data()), ba.size());
   }
 
   file.close();
 
-  uint64_t fileSize = topHeight * (sizeof(cn::BlockHeaderPOD) + sizeof(crypto::Hash));
-  logger(INFO, BRIGHT_GREEN) << "Snapshot exported: " << outputFile
-                             << " (" << (fileSize / 1024 / 1024) << " MB approx, "
-                             << checkpointCount << " checkpoints)";
-
+  logger(INFO, BRIGHT_GREEN) << "Snapshot exported successfully: " << outputFile;
+  logger(INFO) << "  Blocks: " << (topHeight + 1);
   return true;
 }
 
@@ -197,13 +209,14 @@ bool importSnapshot(const std::string &dataDir, const std::string &inputFile,
     logger(ERROR) << "Invalid snapshot file (bad magic)";
     return false;
   }
-  if (version != 1)
+  if (version != 2)
   {
-    logger(ERROR) << "Unsupported snapshot version: " << version;
+    logger(ERROR) << "Unsupported snapshot version: " << version
+                  << " (expected version 2 for full block entries)";
     return false;
   }
 
-  logger(INFO) << "Snapshot contains " << topHeight << " blocks";
+  logger(INFO) << "Snapshot contains " << (topHeight + 1) << " blocks (0.." << topHeight << ")";
 
   if (!tools::directoryExists(dataDir))
   {
@@ -219,142 +232,134 @@ bool importSnapshot(const std::string &dataDir, const std::string &inputFile,
     dbPath += '/';
   dbPath += "mdbx_blocks";
 
+  // Remove any existing database
   boost::system::error_code ec;
   boost::filesystem::remove_all(dbPath, ec);
 
-  CryptoNote::MDBXBlockchainStorage storage(dbPath, true, 0);
+  // Create storage with wallet indexes enabled so imported blocks get indexed
+  CryptoNote::MDBXBlockchainStorage storage(dbPath, true);
 
-  for (uint32_t h = 1; h <= topHeight; ++h)
+  for (uint32_t h = 0; h <= topHeight; ++h)
   {
-    if (h % 100000 == 0)
+    if (h % 10000 == 0)
       logger(INFO) << "Importing block " << h << "/" << topHeight;
 
-    cn::BlockHeaderPOD hdr;
     crypto::Hash blockHash;
+    uint32_t entrySize;
 
-    file.read(reinterpret_cast<char *>(&hdr), sizeof(cn::BlockHeaderPOD));
     file.read(reinterpret_cast<char *>(blockHash.data), sizeof(crypto::Hash));
+    file.read(reinterpret_cast<char *>(&entrySize), sizeof(entrySize));
 
     if (!file)
     {
-      logger(ERROR) << "Failed to read block at height " << h << " from snapshot";
+      logger(ERROR) << "Failed to read block header at height " << h << " from snapshot";
       return false;
     }
 
-    storage.pushBlockHeader(h, hdr);
-    storage.addBlock(cn::Block(), blockHash, h);
+    cn::BinaryArray ba(entrySize);
+    file.read(reinterpret_cast<char *>(ba.data()), entrySize);
+
+    if (!file)
+    {
+      logger(ERROR) << "Failed to read block entry at height " << h << " from snapshot";
+      return false;
+    }
+
+    // Deserialize to get the header
+    cn::Blockchain::BlockEntry entry;
+    if (!cn::fromBinaryArray(entry, ba))
+    {
+      logger(ERROR) << "Failed to deserialize block entry at height " << h;
+      return false;
+    }
+
+    // Build header POD
+    cn::BlockHeaderPOD hdr;
+    hdr.majorVersion = entry.bl.majorVersion;
+    hdr.minorVersion = entry.bl.minorVersion;
+    hdr.timestamp = entry.bl.timestamp;
+    hdr.previousBlockHash = entry.bl.previousBlockHash;
+    hdr.nonce = entry.bl.nonce;
+    hdr.blockCumulativeSize = entry.block_cumulative_size;
+    hdr.cumulativeDifficulty = entry.cumulative_difficulty;
+    hdr.alreadyGeneratedCoins = entry.already_generated_coins;
+    hdr.height = entry.height;
+
+    // Write to MDBX — single atomic transaction
+    storage.pushCompleteBlock(h, blockHash, ba, hdr);
+
+    // Wallet instant import indexing
+    try
+    {
+      // Index coinbase transaction (tx_index = 0)
+      crypto::PublicKey coinbasePubKey = getTxPublicKeyFromExtra(entry.bl.baseTransaction.extra);
+      if (coinbasePubKey != cn::NULL_PUBLIC_KEY)
+      {
+        crypto::Hash coinbaseHash = getObjectHash(entry.bl.baseTransaction);
+        for (uint16_t out_idx = 0; out_idx < entry.bl.baseTransaction.outputs.size(); ++out_idx)
+        {
+          const auto &output = entry.bl.baseTransaction.outputs[out_idx];
+          if (output.target.type() == typeid(KeyOutput))
+          {
+            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
+            storage.indexOutputByTxPubKey(
+                coinbasePubKey, h, 0, out_idx,
+                coinbaseHash, output.amount, key_out.key);
+          }
+        }
+      }
+
+      // Index regular transactions (tx_index = 1 + i)
+      for (uint32_t tx_idx = 0; tx_idx < entry.transactions.size() - 1; ++tx_idx)
+      {
+        const auto &tx = entry.transactions[1 + tx_idx].tx;
+        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx.extra);
+        if (txPubKey == cn::NULL_PUBLIC_KEY)
+          continue;
+
+        crypto::Hash txHash = getObjectHash(tx);
+        for (uint16_t out_idx = 0; out_idx < tx.outputs.size(); ++out_idx)
+        {
+          const auto &output = tx.outputs[out_idx];
+          if (output.target.type() == typeid(KeyOutput))
+          {
+            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
+            storage.indexOutputByTxPubKey(
+                txPubKey, h, static_cast<uint32_t>(1 + tx_idx), out_idx,
+                txHash, output.amount, key_out.key);
+          }
+        }
+      }
+
+      // Index spent key images from all transactions
+      for (const auto &tx_entry : entry.transactions)
+      {
+        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx_entry.tx.extra);
+        for (const auto &input : tx_entry.tx.inputs)
+        {
+          if (input.type() == typeid(KeyInput))
+          {
+            const KeyInput &ki = boost::get<KeyInput>(input);
+            storage.indexSpentKeyImage(ki.keyImage, txPubKey, h);
+          }
+        }
+      }
+    }
+    catch (const std::exception &e)
+    {
+      logger(WARNING, BRIGHT_YELLOW)
+          << "Wallet indexing failed for block " << h << ": " << e.what();
+    }
   }
 
-  storage.setTopBlockHeight(topHeight);
-
-  uint32_t checkpointCount;
-  file.read(reinterpret_cast<char *>(&checkpointCount), sizeof(checkpointCount));
-
-  for (uint32_t i = 0; i < checkpointCount; ++i)
-  {
-    uint32_t height;
-    crypto::Hash hash;
-    file.read(reinterpret_cast<char *>(&height), sizeof(height));
-    file.read(reinterpret_cast<char *>(hash.data), sizeof(crypto::Hash));
-    storage.storeCheckpoint(height, hash);
-  }
-
-  storage.setInitialized();
-  storage.flush();
-  storage.close();
   file.close();
 
   logger(INFO, BRIGHT_GREEN) << "Snapshot imported successfully!";
-  logger(INFO) << "  Blocks: " << topHeight;
-  logger(INFO) << "  Checkpoints: " << checkpointCount;
+  logger(INFO) << "  Blocks: " << (topHeight + 1);
   logger(INFO) << "  Database created at: " << dbPath;
   logger(INFO) << "  Start daemon normally to begin syncing remaining blocks.";
 
   return true;
-}
-
-// ── MDBX recovery ───────────────────────────────────────────────────────
-
-void recoverMdbxDatabase(const std::string &configFolder, uint32_t rollbackHeight,
-                         logging::LoggerRef &logger)
-{
-  std::string dbPath = configFolder;
-  if (!dbPath.empty() && dbPath.back() != '/')
-    dbPath += '/';
-  dbPath += "mdbx_blocks";
-
-  if (!boost::filesystem::exists(dbPath))
-    return;
-
-  CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
-  uint32_t topHeight = storage.topBlockHeight();
-
-  // Manual rollback requested via flag
-  if (rollbackHeight > 0 && rollbackHeight < topHeight)
-  {
-    logger(INFO, BRIGHT_YELLOW) << "Manual rollback: removing blocks above height "
-                                << rollbackHeight;
-
-    for (uint32_t h = rollbackHeight + 1; h <= topHeight; ++h)
-    {
-      crypto::Hash blockHash = storage.getBlockHash(h);
-      if (blockHash != NULL_HASH)
-        storage.removeBlock(blockHash);
-      storage.popBlockEntry(h);
-      storage.removeBlockHeader(h);
-    }
-
-    storage.setTopBlockHeight(rollbackHeight);
-    storage.putMeta("idx_hashes", std::vector<uint8_t>());
-    storage.putMeta("idx_topheight", std::vector<uint8_t>());
-    storage.flush();
-
-    logger(INFO, BRIGHT_GREEN) << "Manual rollback complete! Removed "
-                               << (topHeight - rollbackHeight)
-                               << " blocks. Chain height is now " << rollbackHeight;
-    topHeight = rollbackHeight;
-  }
-
-  if (topHeight > 0)
-  {
-    bool needsRecovery = false;
-
-    cn::BinaryArray ba;
-    if (!storage.getBlockEntry(topHeight, ba) || ba.empty())
-    {
-      logger(WARNING, BRIGHT_YELLOW) << "Missing/corrupt block entry at height "
-                                     << topHeight;
-      needsRecovery = true;
-    }
-
-    if (needsRecovery)
-    {
-      uint32_t recoverTo = topHeight > 100 ? topHeight - 100 : 0;
-      logger(INFO, BRIGHT_YELLOW) << "Auto-recovering: removing blocks above height "
-                                  << recoverTo;
-
-      for (uint32_t h = recoverTo + 1; h <= topHeight; ++h)
-      {
-        crypto::Hash blockHash = storage.getBlockHash(h);
-        if (blockHash != NULL_HASH)
-          storage.removeBlock(blockHash);
-        storage.popBlockEntry(h);
-        storage.removeBlockHeader(h);
-      }
-
-      storage.setTopBlockHeight(recoverTo);
-      storage.putMeta("idx_hashes", std::vector<uint8_t>());
-      storage.putMeta("idx_topheight", std::vector<uint8_t>());
-      storage.flush();
-
-      logger(INFO, BRIGHT_GREEN) << "Auto-recovery complete! Removed "
-                                 << (topHeight - recoverTo)
-                                 << " blocks. Will rebuild indexes from height "
-                                 << recoverTo;
-    }
-  }
-
-  storage.close();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -376,8 +381,7 @@ int main(int argc, char *argv[])
     po::options_description desc_cmd_sett("Command line options and settings options");
 
     desc_cmd_sett.add_options()("enable-blockchain-indexes,i", po::bool_switch()->default_value(false),
-                                "Enable blockchain indexes")("enable-autosave,a", po::bool_switch()->default_value(true),
-                                                             "Enable blockchain autosave every 720 blocks");
+                                "Enable blockchain indexes");
 
     command_line::add_arg(desc_cmd_only, command_line::arg_help);
     command_line::add_arg(desc_cmd_only, command_line::arg_version);
@@ -391,11 +395,10 @@ int main(int argc, char *argv[])
     command_line::add_arg(desc_cmd_sett, arg_console);
     command_line::add_arg(desc_cmd_sett, arg_set_view_key);
     command_line::add_arg(desc_cmd_sett, command_line::arg_testnet_on);
-    command_line::add_arg(desc_cmd_sett, arg_use_mdbx);
     command_line::add_arg(desc_cmd_sett, arg_print_genesis_tx);
     command_line::add_arg(desc_cmd_sett, arg_export_snapshot);
     command_line::add_arg(desc_cmd_sett, arg_import_snapshot);
-    command_line::add_arg(desc_cmd_sett, arg_rollback_height);
+    command_line::add_arg(desc_cmd_sett, arg_enable_wallet_indexes);
 
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
@@ -411,7 +414,14 @@ int main(int argc, char *argv[])
                                                {
       po::store(po::parse_command_line(argc, argv, desc_options), vm);
       coreConfig.init(vm);
-      coreConfig.useMdbx = command_line::get_arg(vm, arg_use_mdbx);
+
+#ifdef DEFAULT_LIGHT_NODE
+      coreConfig.enableWalletIndexes = false;
+#else
+      coreConfig.enableWalletIndexes = 
+        command_line::has_arg(vm, arg_enable_wallet_indexes)
+        ? command_line::get_arg(vm, arg_enable_wallet_indexes): true;
+#endif
 
       if (command_line::get_arg(vm, command_line::arg_help))
       {
@@ -510,9 +520,7 @@ int main(int argc, char *argv[])
     cn::Currency currency = currencyBuilder.currency();
 
     cn::core ccore(currency, nullptr, logManager,
-                   vm["enable-blockchain-indexes"].as<bool>(),
-                   vm["enable-autosave"].as<bool>(),
-                   coreConfig.useMdbx);
+                   vm["enable-blockchain-indexes"].as<bool>());
 
     cn::Checkpoints checkpoints(logManager);
     checkpoints.set_testnet(coreConfig.testnet);
@@ -552,13 +560,6 @@ int main(int argc, char *argv[])
     ccore.set_cryptonote_protocol(&cprotocol);
 
     DaemonCommandsHandler dch(ccore, p2psrv, logManager);
-
-    // MDBX recovery before core init
-    if (coreConfig.useMdbx)
-    {
-      uint32_t rollbackHeight = command_line::get_arg(vm, arg_rollback_height);
-      recoverMdbxDatabase(coreConfig.configFolder, rollbackHeight, logger);
-    }
 
     // Initialize P2P
     logger(INFO) << "Initializing p2p server...";

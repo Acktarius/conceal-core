@@ -9,14 +9,13 @@ endif()
 
 file(GLOB_RECURSE MDBX_STORAGE_FILES Storage/*)
 file(GLOB_RECURSE Blockchain_FILES Blockchain/*)
-file(GLOB_RECURSE SPV_FILES SPV/*)
 file(GLOB_RECURSE BlockchainExplorer BlockchainExplorer/*)
 file(GLOB_RECURSE Common Common/*)
 file(GLOB_RECURSE crypto crypto/*)
 file(GLOB_RECURSE CryptoNoteCore CryptoNoteCore/* CryptoNoteConfig.h)
 file(GLOB_RECURSE CryptoNoteProtocol CryptoNoteProtocol/*)
 file(GLOB_RECURSE Daemon Daemon/*)
-file(GLOB_RECURSE Http HTTP/*)
+file(GLOB_RECURSE HTTP HTTP/*)
 file(GLOB_RECURSE InProcessNode InProcessNode/*)
 file(GLOB_RECURSE Logging Logging/*)
 file(GLOB_RECURSE Mnemonics Mnemonics/*)
@@ -45,10 +44,14 @@ else()
   file(GLOB_RECURSE System System/* Platform/Linux/System/*)
 endif()
 
-source_group("" FILES ${Common} ${ConcealWallet} ${crypto} ${CryptoNoteCore} ${CryptoNoteProtocol} ${Daemon} ${JsonRpcServer} ${Http} ${Logging} ${NodeRpcProxy} ${P2p} ${Rpc} ${Serialization} ${System} ${Transfers} ${Wallet} ${WalletLegacy})
+source_group("" FILES ${Common} ${ConcealWallet} ${crypto} ${CryptoNoteCore} ${CryptoNoteProtocol} ${Daemon} ${JsonRpcServer} ${HTTP} ${Logging} ${NodeRpcProxy} ${P2p} ${Rpc} ${Serialization} ${System} ${Transfers} ${Wallet} ${WalletLegacy})
 source_group("Storage" FILES ${MDBX_STORAGE_FILES})
 source_group("Blockchain" FILES ${Blockchain_FILES})
-source_group("SPV" FILES ${SPV_FILES})
+source_group("BoltRPC" FILES ${BOLTRPC_FILES})
+source_group("BoltSync" FILES ${BOLTSYNC_FILES})
+source_group("BoltCore" FILES ${BOLTCORE_FILES})
+source_group("BoltHttp" FILES ${BOLTHTTP_FILES})
+source_group("Sidechain" FILES ${SIDECHAIN_FILES})
 
 # ── Libraries ──────────────────────────────────────────────────────────────
 add_library(Blockchain STATIC ${Blockchain_FILES})
@@ -56,7 +59,7 @@ add_library(BlockchainExplorer STATIC ${BlockchainExplorer})
 add_library(Common STATIC ${Common})
 add_library(crypto STATIC ${crypto})
 add_library(CryptoNoteCore STATIC ${CryptoNoteCore})
-add_library(Http STATIC ${Http})
+add_library(HTTP STATIC ${HTTP})
 add_library(InProcessNode STATIC ${InProcessNode})
 add_library(Logging STATIC ${Logging})
 add_library(Mnemonics STATIC ${Mnemonics})
@@ -76,30 +79,68 @@ add_library(Storage STATIC ${MDBX_STORAGE_FILES})
 add_dependencies(Storage version)
 target_link_libraries(Storage PRIVATE ${MDBX_LIBRARY_TARGET})
 
-# SPV static library
-add_library(SPVLib STATIC ${SPV_FILES})
-target_link_libraries(SPVLib PUBLIC Common CryptoNoteCore Serialization crypto 
-    ${Boost_LIBRARIES}
-    ${CMAKE_THREAD_LIBS_INIT}
-)
-add_dependencies(SPVLib version)
-
 # Sidechain static library
 add_library(SidechainLib STATIC ${SIDECHAIN_FILES})
-target_link_libraries(SidechainLib PUBLIC Blockchain NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(SidechainLib PUBLIC Blockchain NodeRpcProxy System Rpc HTTP BoltSync BoltCore BoltHttp CryptoNoteCore Serialization
+  -Wl,--start-group
+    Common
+    Logging
+    crypto
+  -Wl,--end-group
+  ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 add_dependencies(SidechainLib version)
 
-# BoltRPC static library
+# BoltRPC static library — holds SyncManager, StateManager, WalletManager, BoltRpcServer
 add_library(BoltRpcLib STATIC ${BOLTRPC_FILES})
-target_link_libraries(BoltRpcLib PUBLIC Blockchain Mnemonics NodeRpcProxy System Rpc Http BoltSync BoltCore BoltHttp CryptoNoteCore Serialization Common Logging crypto ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(BoltRpcLib PUBLIC
+    Blockchain
+    BoltSync
+    BoltCore
+    BoltHttp
+    Mnemonics
+    NodeRpcProxy
+    Rpc
+    HTTP
+    System
+    CryptoNoteCore
+    Storage
+    Serialization
+    ${Boost_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+    -Wl,--start-group
+    Common
+    Logging
+    crypto
+    -Wl,--end-group
+)
 add_dependencies(BoltRpcLib version)
 
-# ── Link dependencies for the new Blockchain library ───────────────────────
+# ── Link dependencies for Blockchain library ──────────────────────────────
 target_link_libraries(Blockchain PUBLIC CryptoNoteCore Storage Common crypto Serialization Logging ${Boost_LIBRARIES})
 add_dependencies(Blockchain version)
 
-# ── Executables ────────────────────────────────────────────────────────────
+# ── Bolt library link dependencies ────────────────────────────────────────
+target_link_libraries(BoltSync PUBLIC Blockchain CryptoNoteCore Storage Common crypto Serialization ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(BoltCore PUBLIC Blockchain CryptoNoteCore Common crypto ${Boost_LIBRARIES})
+
+# ── Executables ───────────────────────────────────────────────────────────
+
+# Archive daemon (full node with wallet indexes)
+add_executable(ConcealArchiveNode ${Daemon})
+set_property(TARGET ConcealArchiveNode PROPERTY OUTPUT_NAME "conceald-archive")
+add_dependencies(ConcealArchiveNode version)
+
+# Light daemon (no wallet indexes, lighter storage)
+add_executable(ConcealLightNode ${Daemon})
+target_compile_definitions(ConcealLightNode PRIVATE DEFAULT_LIGHT_NODE=1)
+set_property(TARGET ConcealLightNode PROPERTY OUTPUT_NAME "conceald-light")
+add_dependencies(ConcealLightNode version)
+
+# Keep original Daemon target for backward compatibility (defaults to archive)
 add_executable(Daemon ${Daemon})
+set_property(TARGET Daemon PROPERTY OUTPUT_NAME "conceald")
+add_dependencies(Daemon version)
+
 add_executable(ConcealWallet ${ConcealWallet})
 add_executable(BoltClientWallet ${BOLT_TUI_FILES})
 add_executable(BoltRPC ${BOLTRPC_FILES})
@@ -115,15 +156,26 @@ if (MINGW)
   target_link_libraries(System ws2_32)
 endif ()
 
-# ── Executable link dependencies ───────────────────────────────────────────
-target_link_libraries(Daemon CryptoNoteCore Blockchain Storage P2P Rpc System Http Logging Common crypto libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
-target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc Http CryptoNoteCore Blockchain Storage System Logging Common crypto ${Boost_LIBRARIES} Serialization Mnemonics)
+# ── Executable link dependencies ──────────────────────────────────────────
 
-# ── Bolt library link dependencies ─────────────────────────────────────────
-target_link_libraries(BoltSync PUBLIC Blockchain CryptoNoteCore Storage Common crypto Serialization ${CMAKE_THREAD_LIBS_INIT})
-target_link_libraries(BoltCore PUBLIC Blockchain CryptoNoteCore Common crypto ${Boost_LIBRARIES})
+# Daemon link macro — all three daemon targets use the same libraries
+macro(link_daemon TARGET_NAME)
+  target_link_libraries(${TARGET_NAME}
+    CryptoNoteCore Blockchain Storage P2P Rpc System HTTP Logging Common crypto
+    libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
+  if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
+    target_link_libraries(${TARGET_NAME} -lresolv)
+  endif()
+endmacro()
 
-target_link_libraries(BoltClientWallet BoltSync BoltCore NodeRpcProxy Rpc Http System Blockchain CryptoNoteCore Serialization
+link_daemon(ConcealArchiveNode)
+link_daemon(ConcealLightNode)
+link_daemon(Daemon)
+
+target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc HTTP CryptoNoteCore Blockchain Storage System Logging Common crypto ${Boost_LIBRARIES} Serialization Mnemonics)
+
+# ── BoltClientWallet (TUI) ────────────────────────────────────────────────
+target_link_libraries(BoltClientWallet BoltSync BoltCore NodeRpcProxy Rpc HTTP System Blockchain CryptoNoteCore Serialization
   -Wl,--start-group
       Common 
       Logging 
@@ -133,12 +185,32 @@ target_link_libraries(BoltClientWallet BoltSync BoltCore NodeRpcProxy Rpc Http S
   ${CMAKE_THREAD_LIBS_INIT}
 )
 
-target_link_libraries(BoltRPC  SPVLib BoltSync BoltCore BoltHttp Mnemonics NodeRpcProxy Rpc Http System Blockchain CryptoNoteCore Serialization Logging Common crypto
-  ${Boost_LIBRARIES}
-  ${CMAKE_THREAD_LIBS_INIT}
+# ── BoltRPC (instant-wallet RPC server) ───────────────────────────────────
+target_link_libraries(BoltRPC
+    BoltRpcLib
+    BoltSync
+    BoltCore
+    BoltHttp
+    Mnemonics
+    NodeRpcProxy
+    Rpc
+    HTTP
+    System
+    Blockchain
+    Storage
+    CryptoNoteCore
+    Serialization
+    ${CMAKE_THREAD_LIBS_INIT}
+    -Wl,--start-group
+    Common
+    Logging
+    crypto
+    ${Boost_LIBRARIES}
+    -Wl,--end-group
 )
 
-target_link_libraries(Sidechain BoltSync BoltCore BoltHttp NodeRpcProxy Rpc Http System Blockchain CryptoNoteCore Serialization
+# ── Sidechain ─────────────────────────────────────────────────────────────
+target_link_libraries(Sidechain BoltSync BoltCore BoltHttp NodeRpcProxy Rpc HTTP System Blockchain CryptoNoteCore Serialization
   -Wl,--start-group
       Common
       Logging
@@ -153,22 +225,20 @@ add_subdirectory(Tools)
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
   target_link_libraries(ConcealWallet -lresolv)
-  target_link_libraries(Daemon -lresolv)
   target_link_libraries(BoltClientWallet -lresolv)
   target_link_libraries(BoltRPC -lresolv)
   target_link_libraries(Sidechain -lresolv)
 endif ()
 
-# ── Dependencies ───────────────────────────────────────────────────────────
+# ── Dependencies ──────────────────────────────────────────────────────────
 add_dependencies(Rpc version)
-add_dependencies(Daemon version)
 add_dependencies(ConcealWallet version)
 add_dependencies(P2P version)
 add_dependencies(BoltRPC version)
 add_dependencies(Sidechain version)
 add_dependencies(Storage version)
+add_dependencies(BoltRpcLib version)
 
 set_property(TARGET ConcealWallet PROPERTY OUTPUT_NAME "concealwallet")
-set_property(TARGET Daemon PROPERTY OUTPUT_NAME "conceald")
 set_property(TARGET BoltRPC PROPERTY OUTPUT_NAME "conceal-rpc")
 set_property(TARGET Sidechain PROPERTY OUTPUT_NAME "conceal-side")

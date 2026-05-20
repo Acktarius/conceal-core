@@ -183,7 +183,7 @@ namespace BoltSync
     ctx.blocksProcessed.fetch_add(1, std::memory_order_relaxed);
   }
 
-  void markSpentOutputs(CryptoNote::IBlockchainStorage &storage,
+  void markSpentOutputs(CryptoNote::MDBXBlockchainStorage &storage,
                         uint32_t topHeight,
                         std::vector<FoundOutput> &results)
   {

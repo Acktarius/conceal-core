@@ -13,9 +13,24 @@
 
 namespace cn
 {
-  //  Constructor
-  Blockchain::Blockchain(const Currency &currency, tx_memory_pool &tx_pool, logging::ILogger &logger,
-                         bool blockchainIndexesEnabled, bool blockchainAutosaveEnabled, bool useMdbx)
+  // Wallet Instant Import Helper
+  namespace
+  {
+
+    // Extracts the transaction public key from the tx_extra field.
+    // Returns NULL_PUBLIC_KEY if not found (should not happen for valid transactions).
+    crypto::PublicKey getTxPublicKeyFromExtra(const std::vector<uint8_t> &extra)
+    {
+      crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(extra);
+      if (tx_pub_key == cn::NULL_PUBLIC_KEY)
+        return cn::NULL_PUBLIC_KEY;
+      return tx_pub_key;
+    }
+
+  } // anonymous namespace
+
+  // Constructor
+  Blockchain::Blockchain(const Currency &currency, tx_memory_pool &tx_pool, logging::ILogger &logger, bool blockchainIndexesEnabled)
       : m_currency(currency),
         m_tx_pool(tx_pool),
         m_checkpoints(logger),
@@ -25,64 +40,53 @@ namespace cn
         m_upgradeDetectorV7(currency, this, BLOCK_MAJOR_VERSION_7, logger),
         m_upgradeDetectorV8(currency, this, BLOCK_MAJOR_VERSION_8, logger),
         m_blockchainIndexesEnabled(blockchainIndexesEnabled),
-        m_blockchainAutosaveEnabled(blockchainAutosaveEnabled),
         m_sparseChainCacheValid(false),
         m_cachedSparseChainHeight(0),
         logger(logger, "Blockchain")
   {
-    m_useMdbx = useMdbx;
     m_cachedEntries.reserve(MDBX_CACHE_SIZE);
     m_lastSparseChainUpdate = std::chrono::steady_clock::now();
   }
 
-  //  Block count / empty checks
+  // Block count / empty checks
   size_t Blockchain::blocksSize() const
   {
-    if (m_useMdbx && m_mdbxStorage)
-      return m_blockHashes.size();
-    return m_blocks.size();
+    return m_blockHashes.size();
   }
 
   bool Blockchain::blocksEmpty() const
   {
-    if (m_useMdbx && m_mdbxStorage)
-      return m_blockHashes.empty();
-    return m_blocks.empty();
+    return m_blockHashes.empty();
   }
 
-  //  Block access (with MDBX LRU cache)
+  // Block access (with LRU cache)
   const Blockchain::BlockEntry &Blockchain::blocksAt(size_t i) const
   {
-    if (m_useMdbx && m_mdbxStorage)
+    // Check LRU cache first
+    for (size_t c = 0; c < m_cachedEntries.size(); ++c)
+      if (m_cachedEntries[c].height == i)
+        return m_cachedEntries[c].entry;
+
+    // Load from MDBX
+    cn::BinaryArray ba;
+    if (!m_mdbxStorage->getBlockEntry(static_cast<uint32_t>(i), ba))
+      throw std::runtime_error("blocksAt: block not found at height " + std::to_string(i));
+
+    BlockEntry entry;
+    if (!cn::fromBinaryArray(entry, ba))
+      throw std::runtime_error("blocksAt: failed to deserialise block at height " + std::to_string(i));
+
+    // Insert into circular LRU cache
+    if (m_cachedEntries.size() < MDBX_CACHE_SIZE)
     {
-      // Check LRU cache first
-      for (size_t c = 0; c < m_cachedEntries.size(); ++c)
-        if (m_cachedEntries[c].height == i)
-          return m_cachedEntries[c].entry;
-
-      // Load from MDBX
-      cn::BinaryArray ba;
-      if (!m_mdbxStorage->getBlockEntry(static_cast<uint32_t>(i), ba))
-        throw std::runtime_error("blocksAt: block not found at height " + std::to_string(i));
-
-      BlockEntry entry;
-      if (!cn::fromBinaryArray(entry, ba))
-        throw std::runtime_error("blocksAt: failed to deserialise block at height " + std::to_string(i));
-
-      // Insert into circular LRU cache
-      if (m_cachedEntries.size() < MDBX_CACHE_SIZE)
-      {
-        m_cachedEntries.push_back({i, std::move(entry)});
-        return m_cachedEntries.back().entry;
-      }
-
-      m_cachedEntries[m_cacheIndex] = {i, std::move(entry)};
-      size_t insertedIndex = m_cacheIndex;
-      m_cacheIndex = (m_cacheIndex + 1) % MDBX_CACHE_SIZE;
-      return m_cachedEntries[insertedIndex].entry;
+      m_cachedEntries.push_back({i, std::move(entry)});
+      return m_cachedEntries.back().entry;
     }
 
-    return const_cast<Blocks &>(m_blocks)[i];
+    m_cachedEntries[m_cacheIndex] = {i, std::move(entry)};
+    size_t insertedIndex = m_cacheIndex;
+    m_cacheIndex = (m_cacheIndex + 1) % MDBX_CACHE_SIZE;
+    return m_cachedEntries[insertedIndex].entry;
   }
 
   Blockchain::BlockEntry &Blockchain::blocksAt(size_t i)
@@ -97,35 +101,25 @@ namespace cn
 
   void Blockchain::blocksClear()
   {
-    if (m_useMdbx)
-    {
-      m_cachedEntries.clear();
-      m_cachedEntries.reserve(MDBX_CACHE_SIZE);
-      m_cacheIndex = 0;
-      m_blockHashes.clear();
-      m_hashToHeight.clear();
-      return;
-    }
-    m_blocks.clear();
+    m_cachedEntries.clear();
+    m_cachedEntries.reserve(MDBX_CACHE_SIZE);
+    m_cacheIndex = 0;
+    m_blockHashes.clear();
+    m_hashToHeight.clear();
   }
 
-  //  Block header retrieval
+  // Block header retrieval
   cn::BlockHeaderPOD Blockchain::getBlockHeader(uint32_t height) const
   {
-    if (m_useMdbx && m_mdbxStorage)
+    cn::BlockHeaderPOD hdr;
+    if (m_mdbxStorage->getBlockHeader(height, hdr))
     {
-      cn::BlockHeaderPOD hdr;
-      if (m_mdbxStorage->getBlockHeader(height, hdr))
-      {
-        // Safety: if cumulative difficulty is zero but the block exists,
-        // fall back to the full block entry for correct data
-        if (hdr.cumulativeDifficulty == 0 && height < blocksSize())
-          return headerFromBlockEntry(blocksAt(height));
-        return hdr;
-      }
-      return headerFromBlockEntry(blocksAt(height));
+      // Safety: if cumulative difficulty is zero but the block exists,
+      // fall back to the full block entry for correct data
+      if (hdr.cumulativeDifficulty == 0 && height < blocksSize())
+        return headerFromBlockEntry(blocksAt(height));
+      return hdr;
     }
-
     return headerFromBlockEntry(blocksAt(height));
   }
 
@@ -144,23 +138,19 @@ namespace cn
     return hdr;
   }
 
-  //  Transaction index resolution
+  // Transaction index resolution
   const Blockchain::TransactionEntry &Blockchain::transactionByIndex(TransactionIndex index)
   {
-    if (m_useMdbx && m_mdbxStorage)
-      return blocksAt(index.block).transactions[index.transaction];
-    return m_blocks[index.block].transactions[index.transaction];
+    return blocksAt(index.block).transactions[index.transaction];
   }
 
-  //  Block duplication check (shared by pushBlock)
+  // Block duplication check
   bool Blockchain::blockExistsInMainChain(const crypto::Hash &blockHash) const
   {
-    if (m_useMdbx)
-      return m_hashToHeight.count(blockHash) > 0;
-    return m_blockIndex.hasBlock(blockHash);
+    return m_hashToHeight.count(blockHash) > 0;
   }
 
-  //  pushBlock — full validation path (block + transactions)
+  // pushBlock — full validation path (block + transactions)
   bool Blockchain::pushBlock(const Block &blockData, const crypto::Hash &id,
                              block_verification_context &bvc, uint32_t height)
   {
@@ -197,7 +187,7 @@ namespace cn
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
     crypto::Hash blockHash = id;
 
-    // ── Duplicate check ──────────────────────────────────────────────────
+    // Duplicate check
     if (blockExistsInMainChain(blockHash))
     {
       logger(logging::ERROR, logging::BRIGHT_RED) << "Block " << blockHash << " already exists";
@@ -205,14 +195,14 @@ namespace cn
       return false;
     }
 
-    // ── Version check ────────────────────────────────────────────────────
+    // Version check
     if (!checkBlockVersion(blockData, blockHash))
     {
       bvc.m_verification_failed = true;
       return false;
     }
 
-    // ── Chain continuity ─────────────────────────────────────────────────
+    // Chain continuity
     if (blockData.previousBlockHash != getTailId())
     {
       logger(logging::INFO, logging::BRIGHT_WHITE) << "Wrong previousBlockHash";
@@ -227,7 +217,7 @@ namespace cn
       return false;
     }
 
-    // ── Difficulty & Proof of Work ───────────────────────────────────────
+    // Difficulty & Proof of Work
     difficulty_type currentDifficulty = getDifficultyForNextBlock();
     if (!currentDifficulty)
     {
@@ -251,7 +241,7 @@ namespace cn
       return false;
     }
 
-    // ── Miner transaction pre-validation ─────────────────────────────────
+    // Miner transaction pre-validation
     if (!prevalidate_miner_transaction(blockData, static_cast<uint32_t>(blocksSize())))
     {
       logger(logging::INFO, logging::BRIGHT_WHITE) << "Block " << blockHash << " failed prevalidation";
@@ -259,7 +249,7 @@ namespace cn
       return false;
     }
 
-    // ── Build and validate the BlockEntry ────────────────────────────────
+    // Build and validate the BlockEntry
     BlockEntry block;
     block.bl = blockData;
     block.height = static_cast<uint32_t>(blocksSize());
@@ -289,7 +279,7 @@ namespace cn
       }
     }
 
-    // ── Cumulative size check ────────────────────────────────────────────
+    // Cumulative size check
     if (!checkCumulativeBlockSize(blockHash, cumulative_block_size, block.height))
     {
       bvc.m_verification_failed = true;
@@ -297,7 +287,7 @@ namespace cn
       return false;
     }
 
-    // ── Miner transaction amount validation ──────────────────────────────
+    // Miner transaction amount validation
     int64_t emissionChange = 0;
     uint64_t reward = 0;
     uint64_t already_generated_coins =
@@ -312,7 +302,7 @@ namespace cn
       return false;
     }
 
-    // ── Finalize and push ────────────────────────────────────────────────
+    // Finalize and push
     block.block_cumulative_size = cumulative_block_size;
     block.cumulative_difficulty = currentDifficulty;
     block.already_generated_coins = already_generated_coins + emissionChange + interestSummary;
@@ -321,9 +311,6 @@ namespace cn
 
     pushBlock(block);
     pushToDepositIndex(block, interestSummary);
-
-    if (m_useMdbx)
-      m_mdbxStorage->flush();
 
     logger(logging::DEBUGGING) << "+++++ Block added id:\t" << blockHash
                                << " PoW:\t" << proof_of_work
@@ -336,7 +323,7 @@ namespace cn
     return true;
   }
 
-  //  Single transaction validation during block push
+  // Single transaction validation during block push
   bool Blockchain::validateAndPushTransaction(
       BlockEntry &block, const Transaction &tx, const crypto::Hash &tx_id,
       size_t txIndex, TransactionIndex &transactionIndex,
@@ -379,20 +366,10 @@ namespace cn
     return true;
   }
 
-  //  pushBlock — final BlockEntry push (MDBX atomic or legacy)
+  // pushBlock — final BlockEntry push (MDBX)
   bool Blockchain::pushBlock(const BlockEntry &block)
   {
-    crypto::Hash blockHash = get_block_hash(block.bl);
-
-    if (m_useMdbx)
-      return pushBlockMdbx(block);
-
-    // Legacy backend path
-    m_blocks.push_back(block);
-    m_blockIndex.push(blockHash);
-    m_timestampIndex.add(block.bl.timestamp, blockHash);
-    m_generatedTransactionsIndex.add(block.bl);
-    return true;
+    return pushBlockMdbx(block);
   }
 
   bool Blockchain::pushBlockMdbx(const BlockEntry &block)
@@ -405,8 +382,75 @@ namespace cn
     uint32_t height = block.height;
     cn::BlockHeaderPOD hdr = headerFromBlockEntry(block);
 
-    // Atomic write — all four writes in one MDBX transaction
+    // Atomic write — single transaction, immediate commit
     m_mdbxStorage->pushCompleteBlock(height, blockHash, ba, hdr);
+
+    // Wallet instant import: index outputs by tx_pub_key
+    // Runs AFTER pushCompleteBlock so the block is already durable.
+    // Indexing failure is non-fatal — logged and continued.
+    try
+    {
+      // Index coinbase transaction (tx_index = 0)
+      crypto::PublicKey coinbasePubKey = getTxPublicKeyFromExtra(block.bl.baseTransaction.extra);
+      if (coinbasePubKey != cn::NULL_PUBLIC_KEY)
+      {
+        crypto::Hash coinbaseHash = getObjectHash(block.bl.baseTransaction);
+        for (uint16_t out_idx = 0; out_idx < block.bl.baseTransaction.outputs.size(); ++out_idx)
+        {
+          const auto &output = block.bl.baseTransaction.outputs[out_idx];
+          if (output.target.type() == typeid(KeyOutput))
+          {
+            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
+            m_mdbxStorage->indexOutputByTxPubKey(
+                coinbasePubKey, height, 0, out_idx,
+                coinbaseHash, output.amount, key_out.key);
+          }
+        }
+      }
+
+      // Index regular transactions (tx_index = 1 + i)
+      for (uint32_t tx_idx = 0; tx_idx < block.transactions.size() - 1; ++tx_idx)
+      {
+        const auto &tx = block.transactions[1 + tx_idx].tx;
+        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx.extra);
+        if (txPubKey == cn::NULL_PUBLIC_KEY)
+          continue;
+
+        crypto::Hash txHash = getObjectHash(tx);
+        for (uint16_t out_idx = 0; out_idx < tx.outputs.size(); ++out_idx)
+        {
+          const auto &output = tx.outputs[out_idx];
+          if (output.target.type() == typeid(KeyOutput))
+          {
+            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
+            m_mdbxStorage->indexOutputByTxPubKey(
+                txPubKey, height, static_cast<uint32_t>(1 + tx_idx), out_idx,
+                txHash, output.amount, key_out.key);
+          }
+        }
+      }
+
+      // Index spent key images from all transactions in this block
+      for (const auto &tx_entry : block.transactions)
+      {
+        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx_entry.tx.extra);
+        for (const auto &input : tx_entry.tx.inputs)
+        {
+          if (input.type() == typeid(KeyInput))
+          {
+            const KeyInput &ki = boost::get<KeyInput>(input);
+            m_mdbxStorage->indexSpentKeyImage(ki.keyImage, txPubKey, height);
+          }
+        }
+      }
+    }
+    catch (const std::exception &e)
+    {
+      // Indexing failure is non-fatal — log and continue
+      logger(logging::WARNING, logging::BRIGHT_YELLOW)
+          << "Wallet instant import indexing failed for block " << height
+          << ": " << e.what();
+    }
 
     // Update in-memory index
     if (height >= m_blockHashes.size())
@@ -430,7 +474,7 @@ namespace cn
     return true;
   }
 
-  //  Block removal (pop)
+  // Block removal (pop)
   void Blockchain::popBlock(const crypto::Hash &blockHash)
   {
     if (blocksEmpty())
@@ -455,16 +499,7 @@ namespace cn
     m_generatedTransactionsIndex.remove(entry.bl);
     m_depositIndex.popBlock();
 
-    if (m_useMdbx)
-    {
-      popBlockMdbx(blockHash);
-    }
-    else
-    {
-      m_blocks.pop_back();
-      m_blockIndex.pop();
-      assert(m_blockIndex.size() == m_blocks.size());
-    }
+    popBlockMdbx(blockHash);
 
     notifyUpgradeDetectorsBlockPopped();
   }
@@ -486,43 +521,28 @@ namespace cn
 
   bool Blockchain::removeLastBlock()
   {
-    if (m_useMdbx)
-    {
-      uint32_t top = m_mdbxStorage->topBlockHeight();
-      if (top == 0)
-        return false;
-
-      cn::BinaryArray ba;
-      if (!m_mdbxStorage->getBlockEntry(top, ba))
-        return false;
-
-      BlockEntry entry;
-      if (!cn::fromBinaryArray(entry, ba))
-        return false;
-
-      popTransactions(entry, getObjectHash(entry.bl.baseTransaction));
-      crypto::Hash blockHash = get_block_hash(entry.bl);
-      m_timestampIndex.remove(entry.bl.timestamp, blockHash);
-      m_generatedTransactionsIndex.remove(entry.bl);
-
-      popBlockMdbx(blockHash);
-      return true;
-    }
-
-    if (m_blocks.empty())
+    uint32_t top = m_mdbxStorage->topBlockHeight();
+    if (top == 0)
       return false;
 
-    popTransactions(m_blocks.back(), getObjectHash(m_blocks.back().bl.baseTransaction));
-    crypto::Hash blockHash = getBlockIdByHeight(m_blocks.back().height);
-    m_timestampIndex.remove(m_blocks.back().bl.timestamp, blockHash);
-    m_generatedTransactionsIndex.remove(m_blocks.back().bl);
-    m_blocks.pop_back();
-    m_blockIndex.pop();
-    assert(m_blockIndex.size() == m_blocks.size());
+    cn::BinaryArray ba;
+    if (!m_mdbxStorage->getBlockEntry(top, ba))
+      return false;
+
+    BlockEntry entry;
+    if (!cn::fromBinaryArray(entry, ba))
+      return false;
+
+    popTransactions(entry, getObjectHash(entry.bl.baseTransaction));
+    crypto::Hash blockHash = get_block_hash(entry.bl);
+    m_timestampIndex.remove(entry.bl.timestamp, blockHash);
+    m_generatedTransactionsIndex.remove(entry.bl);
+
+    popBlockMdbx(blockHash);
     return true;
   }
 
-  //  Transaction push / pop (indices, outputs, spent keys)
+  // Transaction push / pop (indices, outputs, spent keys)
   bool Blockchain::pushTransaction(BlockEntry &block, const crypto::Hash &transactionHash,
                                    TransactionIndex transactionIndex)
   {
@@ -547,6 +567,20 @@ namespace cn
     {
       m_transactionMap.erase(transactionHash);
       return false;
+    }
+
+    // Wallet instant import: index spent key images
+    if (m_mdbxStorage)
+    {
+      crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(transaction.tx.extra);
+      for (const auto &input : transaction.tx.inputs)
+      {
+        if (input.type() == typeid(KeyInput))
+        {
+          const KeyInput &ki = boost::get<KeyInput>(input);
+          m_mdbxStorage->indexSpentKeyImage(ki.keyImage, txPubKey, block.height);
+        }
+      }
     }
 
     // Mark multisig outputs as spent
@@ -612,7 +646,7 @@ namespace cn
     popTransaction(block.bl.baseTransaction, minerTransactionHash);
   }
 
-  //  Key image / multisig helpers
+  // Key image / multisig helpers
   bool Blockchain::markKeyImagesSpent(const Transaction &tx, uint32_t blockHeight)
   {
     for (size_t i = 0; i < tx.inputs.size(); ++i)
@@ -677,7 +711,7 @@ namespace cn
       m_multisignatureOutputs.erase(it);
   }
 
-  //  Upgrade detector notification helpers
+  // Upgrade detector notification helpers
   void Blockchain::notifyUpgradeDetectorsBlockPushed()
   {
     m_upgradeDetectorV2.blockPushed();
@@ -696,7 +730,7 @@ namespace cn
     m_upgradeDetectorV8.blockPopped();
   }
 
-  //  Transaction pool I/O
+  // Transaction pool I/O
   bool Blockchain::loadTransactions(const Block &block, std::vector<Transaction> &transactions,
                                     uint32_t height)
   {
