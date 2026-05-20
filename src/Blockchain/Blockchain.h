@@ -402,7 +402,7 @@ namespace cn
     CheckpointGeneratedCallback m_checkpointGeneratedCallback;
 
     //  Private methods — Init
-    bool initMdbxStorage(const std::string &config_folder);
+    bool initMdbxStorage(const std::string &config_folder, bool enableWalletIndexes);
     bool initMdbx(bool load_existing, bool rebuildWalletIndexes = false);
     void rebuildMdbxIndex(bool rebuildWalletIndexes = false);
     bool ensureGenesisBlock();

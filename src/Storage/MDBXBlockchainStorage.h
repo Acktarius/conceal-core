@@ -84,6 +84,12 @@ namespace CryptoNote
     MDBX_dbi getDbiBlockHeaders() const { return m_dbiBlockHeaders; }
     MDBX_dbi getDbiHeights() const { return m_dbiHeights; }
 
+    // Used for rebuilding wallet indexes
+    MDBX_dbi getDbiTxPubKeyOutputs() const { return m_dbiTxPubKeyOutputs; }
+    MDBX_dbi getDbiOutputDetails() const { return m_dbiOutputDetails; }
+    MDBX_dbi getDbiKeyImageOwner() const { return m_dbiKeyImageOwner; }
+    MDBX_dbi getDbiTxPubKeySeen() const { return m_dbiTxPubKeySeen; }
+
   private:
     // Environment & database setup
     void openEnvironment(const std::string &path);
