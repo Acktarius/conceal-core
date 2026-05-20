@@ -187,7 +187,7 @@ namespace cn
 
     m_blockchain.setEnableWalletIndexes(config.enableWalletIndexes);
 
-    r = m_blockchain.init(m_config_folder, load_existing, config.testnet);
+    r = m_blockchain.init(m_config_folder, load_existing, config.testnet, config.rebuildWalletIndexes);
     if (!(r))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to initialize blockchain storage";

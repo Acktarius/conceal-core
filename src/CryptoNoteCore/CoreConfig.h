@@ -26,6 +26,7 @@ namespace cn
     bool configFolderDefaulted = true;
     bool testnet = false;
     bool enableWalletIndexes = false;
+    bool rebuildWalletIndexes = false;
   };
 
 } // namespace cn

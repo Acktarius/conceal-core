@@ -22,6 +22,7 @@ namespace cn
   {
     testnet = options[command_line::arg_testnet_on.name].as<bool>();
     enableWalletIndexes = options.count("enable-wallet-indexes") ? options["enable-wallet-indexes"].as<bool>() : false;
+    rebuildWalletIndexes = options.count("rebuild-wallet-indexes") ? options["rebuild-wallet-indexes"].as<bool>() : false;
 
     if (options.count(command_line::arg_data_dir.name) != 0 &&
         !options[command_line::arg_data_dir.name].defaulted())

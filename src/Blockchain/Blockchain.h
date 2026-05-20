@@ -110,7 +110,7 @@ namespace cn
 
     // Lifecycle
     bool init() { return init(tools::getDefaultDataDirectory(), true, m_testnet); }
-    bool init(const std::string &config_folder, bool load_existing, bool testnet);
+    bool init(const std::string &config_folder, bool load_existing, bool testnet, bool rebuildWalletIndexes = false);
     bool deinit();
     bool resetAndSetGenesisBlock(const Block &b);
 
@@ -403,8 +403,8 @@ namespace cn
 
     //  Private methods — Init
     bool initMdbxStorage(const std::string &config_folder);
-    bool initMdbx(bool load_existing);
-    void rebuildMdbxIndex();
+    bool initMdbx(bool load_existing, bool rebuildWalletIndexes = false);
+    void rebuildMdbxIndex(bool rebuildWalletIndexes = false);
     bool ensureGenesisBlock();
     bool validateGenesisBlock();
     bool initUpgradeDetectors();

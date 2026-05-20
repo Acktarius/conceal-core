@@ -44,7 +44,7 @@ namespace cn
   void Blockchain::setEnableWalletIndexes(bool enable) { m_enableWalletIndexes = enable; }
 
   // Full Index Rebuild
-  void Blockchain::rebuildMdbxIndex()
+  void Blockchain::rebuildMdbxIndex(bool rebuildWalletIndexes)
   {
     // Single-pass scan of block_entries to rebuild all in-memory structures.
     // MDBX is the single source of truth — no meta blobs, no fast path.
@@ -146,7 +146,7 @@ namespace cn
   }
 
   // MDBX Init
-  bool Blockchain::initMdbx(bool load_existing)
+  bool Blockchain::initMdbx(bool load_existing, bool rebuildWalletIndexes)
   {
     auto mdbxStart = std::chrono::steady_clock::now();
 
@@ -154,7 +154,6 @@ namespace cn
     {
       logger(logging::INFO) << "Loading in-memory structures from MDBX...";
 
-      // Clear all in-memory caches
       m_blockHashes.clear();
       m_hashToHeight.clear();
       m_transactionMap.clear();
@@ -166,8 +165,7 @@ namespace cn
       m_generatedTransactionsIndex.clear();
       m_paymentIdIndex.clear();
 
-      // Always rebuild from MDBX — single source of truth
-      rebuildMdbxIndex();
+      rebuildMdbxIndex(rebuildWalletIndexes);
     }
 
     auto mdbxEnd = std::chrono::steady_clock::now();
@@ -237,7 +235,7 @@ namespace cn
   }
 
   // Main Init
-  bool Blockchain::init(const std::string &config_folder, bool load_existing, bool testnet)
+  bool Blockchain::init(const std::string &config_folder, bool load_existing, bool testnet, bool rebuildWalletIndexes)
   {
     try
     {
@@ -256,7 +254,7 @@ namespace cn
       // Storage backend
       if (!initMdbxStorage(config_folder))
         return false;
-      if (!initMdbx(load_existing))
+      if (!initMdbx(load_existing, rebuildWalletIndexes))
         return false;
 
       // Genesis

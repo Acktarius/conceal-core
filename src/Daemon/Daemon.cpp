@@ -65,6 +65,8 @@ namespace
       "import-snapshot", "Import full blockchain snapshot and bootstrap database", ""};
   const command_line::arg_descriptor<bool> arg_enable_wallet_indexes = {
       "enable-wallet-indexes", "Enable instant wallet sync indexes (archive node)", false};
+  const command_line::arg_descriptor<bool> arg_rebuild_wallet_indexes = {
+      "rebuild-wallet-indexes", "Rebuild wallet instant import indexes during startup (for migrated chains)", false};
 }
 
 // ── Genesis tx printing ─────────────────────────────────────────────────
@@ -399,6 +401,7 @@ int main(int argc, char *argv[])
     command_line::add_arg(desc_cmd_sett, arg_export_snapshot);
     command_line::add_arg(desc_cmd_sett, arg_import_snapshot);
     command_line::add_arg(desc_cmd_sett, arg_enable_wallet_indexes);
+    command_line::add_arg(desc_cmd_sett, arg_rebuild_wallet_indexes);
 
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
