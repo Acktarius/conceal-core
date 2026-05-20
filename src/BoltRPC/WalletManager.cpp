@@ -193,12 +193,21 @@ namespace BoltRPC
   {
     if (m_syncManager)
       m_syncManager->stop();
+    {
+      std::lock_guard<std::mutex> lock(m_syncProgressMutex);
+      m_syncProgress = SyncProgress();
+    }
   }
 
   void WalletManager::syncNow()
   {
     if (m_syncManager)
       m_syncManager->syncNow();
+  }
+
+  bool WalletManager::isSyncRunning() const
+  {
+    return m_syncManager && m_syncManager->isActive();
   }
 
   // ─── Wallet Queries ────────────────────────────────────────────────────────
@@ -208,13 +217,22 @@ namespace BoltRPC
     WalletStatus status;
     status.locked = m_locked.load();
 
+    {
+      std::lock_guard<std::mutex> lock(m_syncProgressMutex);
+      status.syncProgress = m_syncProgress;
+    }
+
     std::lock_guard<std::mutex> lock(m_stateMutex);
     status.blockHeight = m_state.lastHeight;
     status.balance = m_state.balance;
     status.unlockedBalance = m_state.unlockedBalance;
     status.outputCount = static_cast<uint32_t>(m_state.ownedOutputs.size());
     status.transactionCount = static_cast<uint32_t>(m_state.transactions.size());
-    status.synced = (m_syncManager != nullptr);
+
+    const uint32_t nodeHeight = status.syncProgress.currentHeight;
+    status.synced = !status.locked && m_syncManager &&
+                    status.syncProgress.phase == SyncProgress::COMPLETE &&
+                    nodeHeight > 0 && status.blockHeight >= nodeHeight;
 
     return status;
   }
@@ -321,12 +339,13 @@ namespace BoltRPC
 
   void WalletManager::onSyncProgress(const SyncProgress &progress)
   {
-    if (m_onStatus)
     {
-      WalletStatus status = getStatus();
-      status.syncProgress = progress;
-      m_onStatus(status);
+      std::lock_guard<std::mutex> lock(m_syncProgressMutex);
+      m_syncProgress = progress;
     }
+
+    if (m_onStatus)
+      m_onStatus(getStatus());
   }
 
   void WalletManager::onNewOutputs(const std::vector<OutputInfo> &newOutputs,

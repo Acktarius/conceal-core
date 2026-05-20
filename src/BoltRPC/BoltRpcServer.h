@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -117,6 +118,7 @@ namespace BoltRPC
     std::unordered_map<std::string, RpcMethod> m_methods;
     std::atomic<bool> m_running{false};
     int m_serverSocket = -1;
+    std::thread m_httpThread;
 
     static constexpr int JSON_RPC_PARSE_ERROR = -32700;
     static constexpr int JSON_RPC_METHOD_NOT_FOUND = -32601;
