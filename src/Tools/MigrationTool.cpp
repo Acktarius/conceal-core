@@ -171,16 +171,32 @@ std::string formatSpeed(double blocksPerSecond)
 
 int main(int argc, char *argv[])
 {
-  po::options_description desc("Options");
-  command_line::add_arg(desc, arg_old_data_dir);
-  command_line::add_arg(desc, arg_new_data_dir);
-  command_line::add_arg(desc, arg_testnet);
-  command_line::add_arg(desc, arg_skip_validation);
-  command_line::add_arg(desc, arg_batch_size);
+  po::options_description required("Required");
+  command_line::add_arg(required, arg_old_data_dir);
+  command_line::add_arg(required, arg_new_data_dir);
+
+  po::options_description options("Options");
+  command_line::add_arg(options, arg_testnet);
+  command_line::add_arg(options, arg_skip_validation);
+  command_line::add_arg(options, arg_batch_size);
+  options.add_options()("help,h", "Show this help message and exit");
+
+  po::options_description all;
+  all.add(required).add(options);
 
   po::variables_map vm;
-  po::store(po::parse_command_line(argc, argv, desc), vm);
+  po::store(po::parse_command_line(argc, argv, all), vm);
   po::notify(vm);
+
+  if (vm.count("help"))
+  {
+    std::cout << "Conceal Migration Tool\n\n"
+              << "Usage example:\n"
+              << "  ./conceald-migrate --old-dir ~/.conceal --new-dir ~/.conceal-mdbx\n\n"
+              << required << "\n"
+              << options << std::endl;
+    return 0;
+  }
 
   std::string oldDir = command_line::get_arg(vm, arg_old_data_dir);
   std::string newDir = command_line::get_arg(vm, arg_new_data_dir);
