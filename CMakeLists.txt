@@ -163,6 +163,7 @@ elseif(NOT MSVC)
 endif()
 
 # option(BUILD_TESTS "Build tests." ON)
+option(BUILD_MIGRATION_GUI "Build wxWidgets migration GUI (conceald-migrate-gui)" OFF)
 
 if(BUILD_TESTS)
   add_subdirectory(tests)
