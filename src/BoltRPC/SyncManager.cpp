@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license.
 
 #include "SyncManager.h"
+#include "Common/JsonValue.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "INode.h"
 #include "Rpc/HttpClient.h"
@@ -84,14 +85,28 @@ namespace BoltRPC
       return json.substr(pos, end - pos);
     }
 
+    size_t findJsonArrayStart(const std::string &json, const std::string &key)
+    {
+      const std::string patterns[] = {
+          "\"" + key + "\":[",
+          "\"" + key + "\": [",
+          "\\\"" + key + "\\\":[",
+          "\\\"" + key + "\\\": ["};
+      for (const auto &search : patterns)
+      {
+        size_t pos = json.find(search);
+        if (pos != std::string::npos)
+          return pos + search.size();
+      }
+      return std::string::npos;
+    }
+
     std::vector<std::string> jsonGetStringArray(const std::string &json, const std::string &key)
     {
       std::vector<std::string> result;
-      std::string search = "\"" + key + "\":[";
-      size_t pos = json.find(search);
+      size_t pos = findJsonArrayStart(json, key);
       if (pos == std::string::npos)
         return result;
-      pos += search.size();
       while (pos < json.size())
       {
         if (json[pos] == ']')
@@ -117,6 +132,216 @@ namespace BoltRPC
         ++pos;
       }
       return result;
+    }
+
+    std::string jsonExtractArray(const std::string &json, const std::string &key);
+    std::vector<std::string> jsonSplitObjects(const std::string &arrayContent);
+    OutputInfo parseOutputObject(const std::string &obj);
+
+    // Scan-only parsing — safe for multi‑MB snapshots (do not JsonValue::fromString the whole blob).
+    void parseSnapshotFields(const std::string &snapshotJson,
+                             uint32_t &currentHeight,
+                             uint32_t &reportedKeyCount,
+                             std::vector<crypto::PublicKey> &newTxPubKeys,
+                             std::vector<OutputInfo> &outputs,
+                             std::unordered_set<std::string> &spentKeyImages,
+                             bool parseOutputs,
+                             size_t &hexEntries,
+                             size_t &hexDecoded,
+                             SyncProgress *progressOut = nullptr)
+    {
+      hexEntries = 0;
+      hexDecoded = 0;
+      jsonGetUint(snapshotJson, "current_height", currentHeight);
+      jsonGetUint(snapshotJson, "new_tx_pub_key_count", reportedKeyCount);
+
+      if (progressOut)
+      {
+        progressOut->currentHeight = currentHeight;
+        progressOut->totalKeys = reportedKeyCount;
+      }
+
+      std::vector<std::string> newKeysArr = jsonGetStringArray(snapshotJson, "new_tx_pub_keys");
+      hexEntries = newKeysArr.size();
+      newTxPubKeys.clear();
+      newTxPubKeys.reserve(newKeysArr.size());
+      for (const auto &pkHex : newKeysArr)
+      {
+        crypto::PublicKey pk;
+        if (common::podFromHex(pkHex, pk))
+        {
+          newTxPubKeys.push_back(pk);
+          ++hexDecoded;
+        }
+      }
+
+      if (!parseOutputs)
+        return;
+
+      std::string outputsArr = jsonExtractArray(snapshotJson, "outputs");
+      std::vector<std::string> outputObjs = jsonSplitObjects(outputsArr);
+      outputs.clear();
+      outputs.reserve(outputObjs.size());
+      for (const auto &obj : outputObjs)
+        outputs.push_back(parseOutputObject(obj));
+
+      spentKeyImages.clear();
+      std::vector<std::string> spentArr = jsonGetStringArray(snapshotJson, "spent_key_images");
+      for (const auto &kiHex : spentArr)
+        spentKeyImages.insert(kiHex);
+    }
+
+    size_t findSnapshotValueStart(const std::string &response)
+    {
+      const char *markers[] = {"\"snapshot\":\"", "\"snapshot\": \""};
+      for (const char *marker : markers)
+      {
+        size_t pos = response.find(marker);
+        if (pos != std::string::npos)
+          return pos + std::strlen(marker);
+      }
+      return std::string::npos;
+    }
+
+    bool hasJsonRpcErrorEnvelope(const std::string &response)
+    {
+      if (response.find("\"result\"") != std::string::npos)
+        return false;
+      return response.find("\"error\":") != std::string::npos ||
+             response.find("\"error\" :") != std::string::npos;
+    }
+
+    // Unescape a JSON string value after "field":" (handles large RPC bodies without JsonValue::fromString).
+    std::string extractEscapedJsonStringValue(const std::string &json, const std::string &field)
+    {
+      const std::string search = "\"" + field + "\":\"";
+      size_t pos = json.find(search);
+      if (pos == std::string::npos)
+        return "";
+      pos += search.size();
+      std::string out;
+      out.reserve(json.size() - pos);
+      for (size_t i = pos; i < json.size(); ++i)
+      {
+        char c = json[i];
+        if (c == '"')
+          break;
+        if (c == '\\' && i + 1 < json.size())
+        {
+          char e = json[++i];
+          switch (e)
+          {
+          case '"':
+            out += '"';
+            break;
+          case '\\':
+            out += '\\';
+            break;
+          case 'n':
+            out += '\n';
+            break;
+          case 'r':
+            out += '\r';
+            break;
+          case 't':
+            out += '\t';
+            break;
+          default:
+            out += e;
+            break;
+          }
+          continue;
+        }
+        out += c;
+      }
+      return out;
+    }
+
+    std::string extractSnapshotFromDaemonRpc(const std::string &response)
+    {
+      size_t start = findSnapshotValueStart(response);
+      if (start == std::string::npos)
+        return "";
+
+      std::string out;
+      out.reserve(response.size() - start);
+      for (size_t i = start; i < response.size(); ++i)
+      {
+        char c = response[i];
+        if (c == '"')
+          break;
+        if (c == '\\' && i + 1 < response.size())
+        {
+          char e = response[++i];
+          switch (e)
+          {
+          case '"':
+            out += '"';
+            break;
+          case '\\':
+            out += '\\';
+            break;
+          case 'n':
+            out += '\n';
+            break;
+          case 'r':
+            out += '\r';
+            break;
+          case 't':
+            out += '\t';
+            break;
+          default:
+            out += e;
+            break;
+          }
+          continue;
+        }
+        out += c;
+      }
+      return out;
+    }
+
+    uint32_t extractDaemonRpcUint(const std::string &response, const std::string &field)
+    {
+      uint32_t value = 0;
+      if (jsonGetUint(response, field, value))
+        return value;
+      size_t resultPos = response.find("\"result\"");
+      if (resultPos != std::string::npos && jsonGetUint(response.substr(resultPos), field, value))
+        return value;
+      return 0;
+    }
+
+    std::string describeDaemonRpcFailure(const std::string &response)
+    {
+      if (response.empty())
+        return "no response from daemon (is conceald-archive running? check --daemon-host/--daemon-port, default 16000)";
+
+      if (hasJsonRpcErrorEnvelope(response))
+      {
+        std::string msg = extractEscapedJsonStringValue(response, "message");
+        if (!msg.empty())
+          return msg;
+      }
+
+      try
+      {
+        common::JsonValue rpc = common::JsonValue::fromString(response);
+        if (rpc.isObject() && rpc.contains("error"))
+        {
+          const common::JsonValue &err = rpc("error");
+          if (err.isObject() && err.contains("message") && err("message").isString())
+            return err("message").getString();
+        }
+      }
+      catch (...)
+      {
+      }
+
+      if (response.find("\"result\"") == std::string::npos)
+        return "daemon returned no JSON-RPC result";
+
+      return "could not parse get_wallet_snapshot response";
     }
 
     // Extract the content of a JSON array (raw text between [ and ], handles nesting)
@@ -261,30 +486,49 @@ namespace BoltRPC
 
   void SyncManager::runLoop()
   {
-    SyncProgress progress;
-
-    // ── Determine if this is first sync ────────────────────────────────────
+    try
     {
-      std::lock_guard<std::mutex> lock(m_keysMutex);
-      if (m_knownTxPubKeys.empty())
+      SyncProgress progress;
+
+      // ── Determine if this is first sync ────────────────────────────────────
       {
-        doBootstrap(progress);
+        std::lock_guard<std::mutex> lock(m_keysMutex);
+        if (m_knownTxPubKeys.empty())
+        {
+          doBootstrap(progress);
+        }
+      }
+
+      // ── Background incremental loop ────────────────────────────────────────
+      while (!m_stop.load())
+      {
+        // Wait for poll interval or manual trigger
+        for (uint32_t i = 0; i < POLL_INTERVAL_SECONDS * 2 && !m_stop.load() && !m_triggerSync.load(); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        if (m_stop.load())
+          break;
+
+        doIncrementalSync(progress);
+
+        m_triggerSync.store(false);
       }
     }
-
-    // ── Background incremental loop ────────────────────────────────────────
-    while (!m_stop.load())
+    catch (const std::exception &e)
     {
-      // Wait for poll interval or manual trigger
-      for (uint32_t i = 0; i < POLL_INTERVAL_SECONDS * 2 && !m_stop.load() && !m_triggerSync.load(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-      if (m_stop.load())
-        break;
-
-      doIncrementalSync(progress);
-
-      m_triggerSync.store(false);
+      SyncProgress progress;
+      progress.phase = SyncProgress::COMPLETE;
+      progress.errorMessage = std::string("Sync thread error: ") + e.what();
+      if (m_onProgress)
+        m_onProgress(progress);
+    }
+    catch (...)
+    {
+      SyncProgress progress;
+      progress.phase = SyncProgress::COMPLETE;
+      progress.errorMessage = "Sync thread error: unknown exception";
+      if (m_onProgress)
+        m_onProgress(progress);
     }
   }
 
@@ -295,6 +539,8 @@ namespace BoltRPC
     // Step 1: Fetch all tx_pub_keys from daemon
     progress = SyncProgress();
     progress.phase = SyncProgress::FETCHING_KEYS;
+    if (m_rpcCallback)
+      progress.currentHeight = extractDaemonRpcUint(m_rpcCallback("getblockcount", "{}"), "count");
     if (m_onProgress)
       m_onProgress(progress);
 
@@ -308,9 +554,10 @@ namespace BoltRPC
 
       // Empty tx_pub_keys → daemon returns all keys from tx_pubkey_seen index
       std::vector<crypto::PublicKey> emptyKeys;
-      if (!callGetWalletSnapshot(emptyKeys, 0, dummyOutputs, dummySpent, newKeys, chainHeight))
+      std::string rpcError;
+      if (!callGetWalletSnapshot(emptyKeys, 0, dummyOutputs, dummySpent, newKeys, chainHeight, &rpcError, &progress))
       {
-        progress.errorMessage = "Failed to fetch tx_pub_keys from daemon";
+        progress.errorMessage = "Failed to fetch tx_pub_keys from daemon: " + rpcError;
         progress.phase = SyncProgress::COMPLETE;
         if (m_onProgress)
           m_onProgress(progress);
@@ -318,8 +565,26 @@ namespace BoltRPC
       }
 
       allKeys = std::move(newKeys);
-      progress.totalKeys = static_cast<uint32_t>(allKeys.size());
       progress.currentHeight = chainHeight;
+      progress.totalKeys = static_cast<uint32_t>(allKeys.size());
+      progress.processedKeys = progress.totalKeys;
+      if (m_onProgress)
+        m_onProgress(progress);
+    }
+
+    if (allKeys.empty())
+    {
+      std::ostringstream msg;
+      msg << "Daemon returned no tx_pub_keys at height " << chainHeight
+          << ". Archive node needs wallet indexes: use --enable-wallet-indexes when first "
+             "creating the DB; use --rebuild-wallet-indexes if the chain was synced/migrated "
+             "without indexes. If curl to the same host:port shows keys, set conceal-rpc "
+             "--daemon-host/--daemon-port to that archive (default 16000) and retry syncNow.";
+      progress.errorMessage = msg.str();
+      progress.phase = SyncProgress::COMPLETE;
+      if (m_onProgress)
+        m_onProgress(progress);
+      return;
     }
 
     if (m_stop.load())
@@ -469,7 +734,9 @@ namespace BoltRPC
       std::vector<OutputInfo> &outputs,
       std::unordered_set<std::string> &spentKeyImages,
       std::vector<crypto::PublicKey> &newTxPubKeys,
-      uint32_t &currentHeight)
+      uint32_t &currentHeight,
+      std::string *errorOut,
+      SyncProgress *progressOut)
   {
     // Build JSON-RPC params
     std::ostringstream paramsJson;
@@ -489,82 +756,82 @@ namespace BoltRPC
     requestBody << R"({"jsonrpc":"2.0","id":1,"method":"get_wallet_snapshot","params":)"
                 << paramsJson.str() << "}";
 
+    auto fail = [&](const std::string &reason) -> bool
+    {
+      if (errorOut)
+        *errorOut = reason;
+      return false;
+    };
+
     // Send to daemon via HTTP POST to /json_rpc
     if (!m_rpcCallback)
-      return false;
+      return fail("daemon RPC callback not configured");
 
     std::string response = m_rpcCallback("get_wallet_snapshot", paramsJson.str());
 
     if (response.empty())
-      return false;
+      return fail(describeDaemonRpcFailure(response));
 
-    // Parse result
-    // Extract "result" object from JSON-RPC response
-    std::string resultJson;
+    if (hasJsonRpcErrorEnvelope(response))
+      return fail(describeDaemonRpcFailure(response));
+
+    static constexpr size_t kMaxJsonTreeParseBytes = 8 * 1024 * 1024;
+
+    // Extract inner snapshot without parsing the full multi‑MB JSON-RPC envelope into a tree.
+    std::string resultJson = extractSnapshotFromDaemonRpc(response);
+    if (resultJson.empty())
     {
-      std::string search = "\"result\":";
-      size_t pos = response.find(search);
-      if (pos != std::string::npos)
+      if (response.size() > kMaxJsonTreeParseBytes)
       {
-        pos += search.size();
-        int depth = 0;
-        bool inStr = false;
-        size_t start = pos;
-        while (pos < response.size())
-        {
-          char c = response[pos];
-          if (c == '"' && (pos == start || response[pos - 1] != '\\'))
-            inStr = !inStr;
-          if (!inStr)
-          {
-            if (c == '{')
-              ++depth;
-            else if (c == '}')
-            {
-              if (depth == 0)
-              {
-                ++pos;
-                break;
-              }
-              --depth;
-            }
-          }
-          ++pos;
-        }
-        resultJson = response.substr(start, pos - start);
+        return fail("daemon snapshot response is " + std::to_string(response.size()) +
+                    " bytes but snapshot field could not be extracted (rebuild conceald-archive + "
+                    "conceal-rpc with JSON escape fix)");
       }
-      else
+
+      try
       {
-        // Maybe the response IS the result (no JSON-RPC wrapper)
-        resultJson = response;
+        common::JsonValue rpc = common::JsonValue::fromString(response);
+        if (!rpc.isObject() || !rpc.contains("result"))
+          return fail(describeDaemonRpcFailure(response));
+
+        const common::JsonValue &result = rpc("result");
+        if (result.isObject() && result.contains("snapshot") && result("snapshot").isString())
+          resultJson = result("snapshot").getString();
+        else if (result.isObject())
+          resultJson = result.toString();
+        else if (result.isString())
+          resultJson = result.getString();
+        else
+          resultJson = result.toString();
+      }
+      catch (...)
+      {
+        return fail(describeDaemonRpcFailure(response));
       }
     }
 
-    // Parse fields
-    jsonGetUint(resultJson, "current_height", currentHeight);
-
-    // Parse outputs
-    std::string outputsArr = jsonExtractArray(resultJson, "outputs");
-    std::vector<std::string> outputObjs = jsonSplitObjects(outputsArr);
-    outputs.reserve(outputObjs.size());
-    for (const auto &obj : outputObjs)
-      outputs.push_back(parseOutputObject(obj));
-
-    // Parse spent_key_images
-    spentKeyImages.clear();
-    std::vector<std::string> spentArr = jsonGetStringArray(resultJson, "spent_key_images");
-    for (const auto &kiHex : spentArr)
-      spentKeyImages.insert(kiHex);
-
-    // Parse new_tx_pub_keys
-    std::vector<std::string> newKeysArr = jsonGetStringArray(resultJson, "new_tx_pub_keys");
-    newTxPubKeys.clear();
-    newTxPubKeys.reserve(newKeysArr.size());
-    for (const auto &pkHex : newKeysArr)
+    if (resultJson.empty())
     {
-      crypto::PublicKey pk;
-      if (common::podFromHex(pkHex, pk))
-        newTxPubKeys.push_back(pk);
+      return fail("empty snapshot in daemon response (" + std::to_string(response.size()) + " byte body)");
+    }
+
+    size_t hexEntries = 0;
+    size_t hexDecoded = 0;
+    uint32_t reportedKeyCount = 0;
+    const bool parseOutputs = !txPubKeys.empty();
+    parseSnapshotFields(resultJson, currentHeight, reportedKeyCount, newTxPubKeys, outputs,
+                        spentKeyImages, parseOutputs, hexEntries, hexDecoded, progressOut);
+
+    if (progressOut && m_onProgress)
+      m_onProgress(*progressOut);
+
+    if (newTxPubKeys.empty() && reportedKeyCount > 0)
+    {
+      return fail("daemon snapshot lists new_tx_pub_key_count=" + std::to_string(reportedKeyCount) +
+                  " but wallet parsed 0 keys (" + std::to_string(hexEntries) +
+                  " JSON entries, " + std::to_string(hexDecoded) +
+                  " decoded). Response may be truncated — check conceal-rpc can reach the same archive "
+                  "daemon you curl (host/port) and wait for a full HTTP body.");
     }
 
     return true;

@@ -114,7 +114,9 @@ namespace BoltRPC
         std::vector<OutputInfo> &outputs,
         std::unordered_set<std::string> &spentKeyImages,
         std::vector<crypto::PublicKey> &newTxPubKeys,
-        uint32_t &currentHeight);
+        uint32_t &currentHeight,
+        std::string *errorOut = nullptr,
+        SyncProgress *progressOut = nullptr);
 
     // ── Local derivation ───────────────────────────────────────────────────
     void deriveOwnedOutputs(
