@@ -599,8 +599,12 @@ namespace BoltRPC
     }
     saveCachedKeys();
 
-    // Step 2: Fetch all candidate outputs
+    // Step 2: Fetch all candidate outputs (batched — do not POST millions of keys in one RPC)
     progress.phase = SyncProgress::FETCHING_OUTPUTS;
+    progress.totalKeys = static_cast<uint32_t>(allKeys.size());
+    progress.processedKeys = 0;
+    progress.totalOutputs = 0;
+    progress.processedOutputs = 0;
     if (m_onProgress)
       m_onProgress(progress);
 
@@ -608,9 +612,12 @@ namespace BoltRPC
     std::unordered_set<std::string> allSpentImages;
     std::vector<crypto::PublicKey> additionalKeys;
 
-    if (!callGetWalletSnapshot(allKeys, 0, allOutputs, allSpentImages, additionalKeys, chainHeight))
+    std::string outputFetchError;
+    // wallet_height = chainHeight skips re-downloading the full new_tx_pub_keys list
+    if (!fetchOutputsForKeys(allKeys, chainHeight, allOutputs, allSpentImages, additionalKeys, chainHeight,
+                             &progress, &outputFetchError))
     {
-      progress.errorMessage = "Failed to fetch outputs from daemon";
+      progress.errorMessage = outputFetchError.empty() ? "Failed to fetch outputs from daemon" : outputFetchError;
       progress.phase = SyncProgress::COMPLETE;
       if (m_onProgress)
         m_onProgress(progress);
@@ -679,7 +686,7 @@ namespace BoltRPC
     std::vector<crypto::PublicKey> newKeys;
     uint32_t chainHeight = 0;
 
-    if (!callGetWalletSnapshot(keys, walletHeight, newOutputs, spentImages, newKeys, chainHeight))
+    if (!fetchOutputsForKeys(keys, walletHeight, newOutputs, spentImages, newKeys, chainHeight, &progress))
     {
       // Silently retry on next poll
       return;
@@ -724,6 +731,79 @@ namespace BoltRPC
     progress.phase = SyncProgress::COMPLETE;
     if (m_onProgress)
       m_onProgress(progress);
+  }
+
+  // ─── Batched output fetch ────────────────────────────────────────────────────
+
+  bool SyncManager::fetchOutputsForKeys(
+      const std::vector<crypto::PublicKey> &keys,
+      uint32_t walletHeight,
+      std::vector<OutputInfo> &outputs,
+      std::unordered_set<std::string> &spentKeyImages,
+      std::vector<crypto::PublicKey> &additionalKeys,
+      uint32_t &currentHeight,
+      SyncProgress *progress,
+      std::string *errorOut)
+  {
+    outputs.clear();
+    spentKeyImages.clear();
+    additionalKeys.clear();
+
+    if (keys.empty())
+      return callGetWalletSnapshot(keys, walletHeight, outputs, spentKeyImages, additionalKeys, currentHeight,
+                                   errorOut, progress);
+
+    const size_t batchSize = WALLET_SNAPSHOT_KEY_BATCH_SIZE;
+    if (keys.size() <= batchSize)
+      return callGetWalletSnapshot(keys, walletHeight, outputs, spentKeyImages, additionalKeys, currentHeight,
+                                   errorOut, progress);
+
+    if (progress)
+    {
+      progress->totalKeys = static_cast<uint32_t>(keys.size());
+      progress->processedKeys = 0;
+    }
+
+    for (size_t offset = 0; offset < keys.size(); offset += batchSize)
+    {
+      if (m_stop.load())
+        return false;
+
+      const size_t end = std::min(offset + batchSize, keys.size());
+      std::vector<crypto::PublicKey> batch(keys.begin() + static_cast<std::ptrdiff_t>(offset),
+                                           keys.begin() + static_cast<std::ptrdiff_t>(end));
+
+      std::vector<OutputInfo> batchOutputs;
+      std::unordered_set<std::string> batchSpent;
+      std::vector<crypto::PublicKey> batchAdditional;
+
+      // After the first batch, pin wallet_height to chain tip so daemon does not re-send new_tx_pub_keys
+      const uint32_t batchWalletHeight =
+          (offset == 0) ? walletHeight : (currentHeight > 0 ? currentHeight : walletHeight);
+
+      if (!callGetWalletSnapshot(batch, batchWalletHeight, batchOutputs, batchSpent, batchAdditional, currentHeight,
+                                 errorOut))
+        return false;
+
+      outputs.insert(outputs.end(), batchOutputs.begin(), batchOutputs.end());
+      for (const auto &ki : batchSpent)
+        spentKeyImages.insert(ki);
+      for (const auto &pk : batchAdditional)
+      {
+        if (std::find(additionalKeys.begin(), additionalKeys.end(), pk) == additionalKeys.end())
+          additionalKeys.push_back(pk);
+      }
+
+      if (progress)
+      {
+        progress->processedKeys = static_cast<uint32_t>(end);
+        progress->processedOutputs = static_cast<uint32_t>(outputs.size());
+        if (m_onProgress)
+          m_onProgress(*progress);
+      }
+    }
+
+    return true;
   }
 
   // ─── Daemon RPC Call ───────────────────────────────────────────────────────
@@ -946,7 +1026,7 @@ namespace BoltRPC
 
     uint32_t count = 0;
     file.read(reinterpret_cast<char *>(&count), sizeof(count));
-    if (!file || count == 0 || count > 1000000) // sanity: max 1M keys = 32 MB
+    if (!file || count == 0 || count > 10000000) // sanity: max 10M keys (~320 MB)
       return;
 
     std::lock_guard<std::mutex> lock(m_keysMutex);
