@@ -44,13 +44,6 @@ namespace BoltHttp
       return false;
     }
 
-    // Do not block shutdown indefinitely on slow daemon RPC (e.g. archive snapshot).
-    struct timeval tv;
-    tv.tv_sec = 10;
-    tv.tv_usec = 0;
-    setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(m_socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
     return true;
   }
 

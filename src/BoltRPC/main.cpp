@@ -13,10 +13,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <fcntl.h>
-#include <poll.h>
 #include <termios.h>
-#include <unistd.h>
 #endif
 
 #include <boost/program_options.hpp>
@@ -55,75 +52,13 @@ struct BoltConfig
 
 static std::atomic<bool> g_shutdown{false};
 
-#ifndef _WIN32
-static int g_signalPipe[2] = {-1, -1};
-
-static bool initSignalPipe()
-{
-  if (pipe(g_signalPipe) != 0)
-    return false;
-  fcntl(g_signalPipe[0], F_SETFL, O_NONBLOCK);
-  fcntl(g_signalPipe[1], F_SETFL, O_NONBLOCK);
-  return true;
-}
-
-static void closeSignalPipe()
-{
-  if (g_signalPipe[0] >= 0)
-    close(g_signalPipe[0]);
-  if (g_signalPipe[1] >= 0)
-    close(g_signalPipe[1]);
-  g_signalPipe[0] = g_signalPipe[1] = -1;
-}
-#endif
-
 void signalHandler(int signal)
 {
-  if (signal != SIGINT && signal != SIGTERM)
-    return;
-
-  // Second signal: force exit (e.g. sync thread blocked on daemon I/O).
-  if (g_shutdown.exchange(true))
-    _exit(128 + signal);
-
-#ifndef _WIN32
-  if (g_signalPipe[1] >= 0)
+  if (signal == SIGINT || signal == SIGTERM)
   {
-    const char byte = 1;
-    ssize_t n = write(g_signalPipe[1], &byte, 1);
-    (void)n;
+    std::cout << "\nShutting down...\n";
+    g_shutdown.store(true);
   }
-#endif
-}
-
-static void installSignalHandlers()
-{
-  struct sigaction sa{};
-  sa.sa_handler = signalHandler;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = 0;
-  sigaction(SIGINT, &sa, nullptr);
-  sigaction(SIGTERM, &sa, nullptr);
-}
-
-// Main thread idle loop — returns after first SIGINT/SIGTERM.
-static void waitForShutdownRequest()
-{
-#ifndef _WIN32
-  if (g_signalPipe[0] >= 0)
-  {
-    while (!g_shutdown.load())
-    {
-      pollfd pfd{};
-      pfd.fd = g_signalPipe[0];
-      pfd.events = POLLIN;
-      poll(&pfd, 1, 100);
-    }
-    return;
-  }
-#endif
-  while (!g_shutdown.load())
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
 // ─── Password prompt (no echo) ────────────────────────────────────────────
@@ -182,10 +117,8 @@ common::JsonValue buildLoggerConfiguration(logging::Level level, const std::stri
 
 int main(int argc, char *argv[])
 {
-  installSignalHandlers();
-#ifndef _WIN32
-  initSignalPipe();
-#endif
+  std::signal(SIGINT, signalHandler);
+  std::signal(SIGTERM, signalHandler);
 
   BoltConfig config;
 
@@ -429,23 +362,19 @@ int main(int argc, char *argv[])
 
   logger(INFO) << "Press Ctrl+C to stop.";
 
-  waitForShutdownRequest();
+  // Wait for shutdown signal
+  while (!g_shutdown.load())
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
   logger(INFO) << "Shutting down...";
-  server.wallet().stopSync();
   server.stop();
   if (nodePtr)
   {
     nodePtr->shutdown();
     delete nodePtr;
-    nodePtr = nullptr;
   }
   delete dispatcherPtr;
-  dispatcherPtr = nullptr;
   logger(INFO) << "conceal-rpc stopped.";
 
-#ifndef _WIN32
-  closeSignalPipe();
-#endif
   return 0;
 }
