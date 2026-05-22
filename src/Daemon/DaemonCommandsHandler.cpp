@@ -19,6 +19,7 @@
 #include "CryptoNoteCore/CryptoNoteTools.h"
 
 #include <boost/filesystem.hpp>
+#include <fstream>
 
 namespace
 {
@@ -531,7 +532,7 @@ bool DaemonCommandsHandler::export_snapshot(const std::vector<std::string> &args
     dbPath += '/';
   dbPath += "mdbx_blocks";
 
-  CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
+  CryptoNote::MDBXBlockchainStorage storage(dbPath);
   uint32_t topHeight = storage.topBlockHeight();
 
   if (topHeight == 0)

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <ctime>
 
 using namespace cn;
 
@@ -49,7 +50,6 @@ namespace BoltRPC
     if (hasExistingWallet())
       return false;
 
-    // Generate new keys
     AccountBase account;
     account.generate();
 
@@ -68,7 +68,6 @@ namespace BoltRPC
     m_state = WalletState();
     saveState();
 
-    // Initialize sync manager
     m_syncManager.reset(new SyncManager(
         m_node,
         m_keys.viewSecretKey,
@@ -92,15 +91,11 @@ namespace BoltRPC
     if (!common::podFromHex(spendKeyHex, keys.spendSecretKey))
       return false;
 
-    // Derive public spend key
     if (!crypto::secret_key_to_public_key(keys.spendSecretKey, keys.spendPublicKey))
       return false;
 
-    // Derive address
     AccountPublicAddress addr;
     addr.spendPublicKey = keys.spendPublicKey;
-
-    // Derive view public key for address
     if (!crypto::secret_key_to_public_key(keys.viewSecretKey, addr.viewPublicKey))
       return false;
 
@@ -127,8 +122,6 @@ namespace BoltRPC
   bool WalletManager::importFromMnemonic(const std::string &mnemonic,
                                          const std::string &password)
   {
-    // BIP39 mnemonic → seed → keys
-    // (Simplified — full implementation would use BIP39 library)
     return false;
   }
 
@@ -144,10 +137,8 @@ namespace BoltRPC
     m_keys = keys;
     m_locked.store(false);
 
-    // Load state
     loadState();
 
-    // Create sync manager
     m_syncManager.reset(new SyncManager(
         m_node,
         m_keys.viewSecretKey,
@@ -270,6 +261,15 @@ namespace BoltRPC
   TransferResult WalletManager::sendTransfer(const TransferRequest &req)
   {
     TransferResult result;
+
+    if (m_locked.load())
+    {
+      result.errorMessage = "Wallet is locked";
+      return result;
+    }
+
+    // TODO: Implement full transaction building and relaying
+    // For now, record the outgoing transaction when the full builder is ready
     result.errorMessage = "Transaction builder not yet implemented";
     return result;
   }
@@ -334,7 +334,6 @@ namespace BoltRPC
   {
     std::lock_guard<std::mutex> lock(m_stateMutex);
 
-    // Add new outputs
     uint64_t addedBalance = 0;
     for (const auto &out : newOutputs)
     {
@@ -354,17 +353,19 @@ namespace BoltRPC
         if (!out.spent)
           addedBalance += out.amount;
 
+        // Record incoming transaction
         TransactionRecord tx;
         tx.txHash = out.txHash;
         tx.blockHeight = out.blockHeight;
+        tx.timestamp = 0;
         tx.totalReceived = out.amount;
+        tx.totalSent = 0;
         tx.type = out.isDeposit ? TransactionRecord::DEPOSIT : TransactionRecord::INCOMING;
         tx.confirmed = true;
         m_state.transactions.push_back(tx);
       }
     }
 
-    // Mark spent outputs
     for (const auto &ki : spentKeyImages)
     {
       m_state.spentKeyImages.push_back(ki);
@@ -372,7 +373,6 @@ namespace BoltRPC
 
     m_state.balance += addedBalance;
 
-    // Update unlocked balance
     uint32_t currentHeight = (m_syncManager) ? m_syncManager->lastScannedHeight() : 0;
     uint64_t unlocked = 0;
     for (const auto &out : m_state.ownedOutputs)

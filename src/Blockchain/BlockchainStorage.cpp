@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "Blockchain/Blockchain.h"
+#include "Blockchain/BlockchainFilter.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 
@@ -13,21 +14,6 @@
 
 namespace cn
 {
-  // Wallet Instant Import Helper
-  namespace
-  {
-
-    // Extracts the transaction public key from the tx_extra field.
-    // Returns NULL_PUBLIC_KEY if not found (should not happen for valid transactions).
-    crypto::PublicKey getTxPublicKeyFromExtra(const std::vector<uint8_t> &extra)
-    {
-      crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(extra);
-      if (tx_pub_key == cn::NULL_PUBLIC_KEY)
-        return cn::NULL_PUBLIC_KEY;
-      return tx_pub_key;
-    }
-
-  } // anonymous namespace
 
   // Constructor
   Blockchain::Blockchain(const Currency &currency, tx_memory_pool &tx_pool, logging::ILogger &logger, bool blockchainIndexesEnabled)
@@ -385,70 +371,23 @@ namespace cn
     // Atomic write — single transaction, immediate commit
     m_mdbxStorage->pushCompleteBlock(height, blockHash, ba, hdr);
 
-    // Wallet instant import: index outputs by tx_pub_key
-    // Runs AFTER pushCompleteBlock so the block is already durable.
-    // Indexing failure is non-fatal — logged and continued.
+    // Build and store filter record for this block
     try
     {
-      // Index coinbase transaction (tx_index = 0)
-      crypto::PublicKey coinbasePubKey = getTxPublicKeyFromExtra(block.bl.baseTransaction.extra);
-      if (coinbasePubKey != cn::NULL_PUBLIC_KEY)
-      {
-        crypto::Hash coinbaseHash = getObjectHash(block.bl.baseTransaction);
-        for (uint16_t out_idx = 0; out_idx < block.bl.baseTransaction.outputs.size(); ++out_idx)
-        {
-          const auto &output = block.bl.baseTransaction.outputs[out_idx];
-          if (output.target.type() == typeid(KeyOutput))
-          {
-            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
-            m_mdbxStorage->indexOutputByTxPubKey(
-                coinbasePubKey, height, 0, out_idx,
-                coinbaseHash, output.amount, key_out.key);
-          }
-        }
-      }
+      // Collect all transactions for this block (skip base tx at index 0)
+      std::vector<Transaction> allTxs;
+      for (uint32_t i = 1; i < block.transactions.size(); ++i)
+        allTxs.push_back(block.transactions[i].tx);
 
-      // Index regular transactions (tx_index = 1 + i)
-      for (uint32_t tx_idx = 0; tx_idx < block.transactions.size() - 1; ++tx_idx)
-      {
-        const auto &tx = block.transactions[1 + tx_idx].tx;
-        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx.extra);
-        if (txPubKey == cn::NULL_PUBLIC_KEY)
-          continue;
-
-        crypto::Hash txHash = getObjectHash(tx);
-        for (uint16_t out_idx = 0; out_idx < tx.outputs.size(); ++out_idx)
-        {
-          const auto &output = tx.outputs[out_idx];
-          if (output.target.type() == typeid(KeyOutput))
-          {
-            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
-            m_mdbxStorage->indexOutputByTxPubKey(
-                txPubKey, height, static_cast<uint32_t>(1 + tx_idx), out_idx,
-                txHash, output.amount, key_out.key);
-          }
-        }
-      }
-
-      // Index spent key images from all transactions in this block
-      for (const auto &tx_entry : block.transactions)
-      {
-        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx_entry.tx.extra);
-        for (const auto &input : tx_entry.tx.inputs)
-        {
-          if (input.type() == typeid(KeyInput))
-          {
-            const KeyInput &ki = boost::get<KeyInput>(input);
-            m_mdbxStorage->indexSpentKeyImage(ki.keyImage, txPubKey, height);
-          }
-        }
-      }
+      BlockFilterRecord filterRecord = buildBlockFilterRecord(
+          block.bl, block.height, allTxs);
+      m_mdbxStorage->storeBlockFilterRecord(block.height, filterRecord);
     }
     catch (const std::exception &e)
     {
-      // Indexing failure is non-fatal — log and continue
+      // Filter building failure is non-fatal — log and continue
       logger(logging::WARNING, logging::BRIGHT_YELLOW)
-          << "Wallet instant import indexing failed for block " << height
+          << "Failed to build filter record for block " << block.height
           << ": " << e.what();
     }
 
@@ -513,6 +452,7 @@ namespace cn
     if (top == 0)
       return;
 
+    // removeCompleteBlock also removes the filter record
     m_mdbxStorage->removeCompleteBlock(top, blockHash);
 
     m_blockHashes.pop_back();
@@ -567,20 +507,6 @@ namespace cn
     {
       m_transactionMap.erase(transactionHash);
       return false;
-    }
-
-    // Wallet instant import: index spent key images
-    if (m_mdbxStorage)
-    {
-      crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(transaction.tx.extra);
-      for (const auto &input : transaction.tx.inputs)
-      {
-        if (input.type() == typeid(KeyInput))
-        {
-          const KeyInput &ki = boost::get<KeyInput>(input);
-          m_mdbxStorage->indexSpentKeyImage(ki.keyImage, txPubKey, block.height);
-        }
-      }
     }
 
     // Mark multisig outputs as spent

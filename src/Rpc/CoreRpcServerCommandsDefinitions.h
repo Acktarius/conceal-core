@@ -12,6 +12,8 @@
 #include "CryptoNoteCore/Difficulty.h"
 #include "crypto/hash.h"
 
+#include "Blockchain/BlockchainFilter.h"
+
 #include "Serialization/SerializationOverloads.h"
 
 namespace cn {
@@ -1265,6 +1267,33 @@ struct COMMAND_RPC_GET_WALLET_SNAPSHOT
     void serialize(ISerializer &s)
     {
       KV_MEMBER(snapshot)
+      KV_MEMBER(status)
+    }
+  };
+};
+
+struct COMMAND_RPC_GET_FILTER_RECORDS
+{
+  struct request
+  {
+    uint32_t start_height;
+    uint32_t end_height;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(start_height)
+      KV_MEMBER(end_height)
+    }
+  };
+
+  struct response
+  {
+    std::vector<BlockFilterRecord> records;
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(records)
       KV_MEMBER(status)
     }
   };

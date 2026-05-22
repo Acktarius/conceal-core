@@ -4,6 +4,7 @@
 
 #include "BoltRpcServer.h"
 #include "WalletManager.h"
+#include "SyncManager.h"
 #include "Common/StringTools.h"
 #include "Common/JsonValue.h"
 #include "CryptoNoteCore/Currency.h"
@@ -384,12 +385,13 @@ namespace BoltRPC
     {
       common::JsonValue sync;
       sync("phase") = common::JsonValue::Integer(static_cast<int>(status.syncProgress.phase));
-      sync("totalKeys") = common::JsonValue::Integer(status.syncProgress.totalKeys);
-      sync("processedKeys") = common::JsonValue::Integer(status.syncProgress.processedKeys);
-      sync("totalOutputs") = common::JsonValue::Integer(status.syncProgress.totalOutputs);
-      sync("processedOutputs") = common::JsonValue::Integer(status.syncProgress.processedOutputs);
+      sync("totalBlocks") = common::JsonValue::Integer(status.syncProgress.totalBlocks);
+      sync("processedBlocks") = common::JsonValue::Integer(status.syncProgress.processedBlocks);
+      sync("candidatesFound") = common::JsonValue::Integer(status.syncProgress.candidatesFound);
       sync("ownedOutputs") = common::JsonValue::Integer(status.syncProgress.ownedOutputs);
       sync("currentHeight") = common::JsonValue::Integer(status.syncProgress.currentHeight);
+      if (!status.syncProgress.errorMessage.empty())
+        sync("errorMessage") = status.syncProgress.errorMessage;
       result("syncProgress") = sync;
     }
 

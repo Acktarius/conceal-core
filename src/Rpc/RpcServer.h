@@ -33,10 +33,6 @@ public:
   bool enableCors(const std::string& domain);
   std::string getCorsDomain() const;
 
-  bool exportHeadersToFile(const std::string &filename);
-  bool on_export_headers(const COMMAND_RPC_EXPORT_HEADERS::request &req,
-                         COMMAND_RPC_EXPORT_HEADERS::response &res);
-
 private:
 
   template <class Handler>
@@ -104,8 +100,9 @@ private:
                                   COMMAND_RPC_GET_OUTPUTS_FOR_ADDRESS::response &res);
   
   bool on_get_spv_outputs(const COMMAND_RPC_GET_SPV_OUTPUTS::request &req, COMMAND_RPC_GET_SPV_OUTPUTS::response &res);
-  bool on_get_wallet_snapshot(const COMMAND_RPC_GET_WALLET_SNAPSHOT::request &req,
-                              COMMAND_RPC_GET_WALLET_SNAPSHOT::response &res);
+
+  bool on_get_filter_records(const COMMAND_RPC_GET_FILTER_RECORDS::request &req,
+                             COMMAND_RPC_GET_FILTER_RECORDS::response &res);
 
   logging::LoggerRef logger;
   core& m_core;

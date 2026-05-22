@@ -54,7 +54,7 @@ namespace BoltSync
   bool Scanner::scan(const ScanConfig &config, ScanState &state)
   {
     std::string dbPath = PathHelpers::appendPath(config.dataDir, "mdbx_blocks");
-    CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
+    CryptoNote::MDBXBlockchainStorage storage(dbPath);
 
     uint32_t topHeight = storage.topBlockHeight();
     if (topHeight == 0)

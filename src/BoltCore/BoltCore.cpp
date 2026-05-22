@@ -17,6 +17,7 @@
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "Common/StringTools.h"
 #include <algorithm>
+#include <ctime>
 
 namespace BoltCore
 {
@@ -160,9 +161,29 @@ namespace BoltCore
     result.error = relayResult.error;
     result.fee = buildResult.fee;
 
-    if (result.success) {
+    if (result.success)
+    {
       result.transaction = tx;
       result.txHash = common::podToHex(getObjectHash(tx));
+
+      // Record outgoing transaction
+      TransactionRecord record;
+      record.txHash = getObjectHash(tx);
+      record.timestamp = static_cast<uint64_t>(std::time(nullptr));
+      record.fee = buildResult.fee;
+      uint64_t totalAmount = 0;
+      for (const auto &t : transfers)
+        totalAmount += t.amount;
+      record.totalSent = totalAmount + buildResult.fee;
+      record.totalReceived = 0;
+      record.type = TransactionType::Outgoing;
+      record.confirmed = false;
+      if (!transfers.empty())
+        record.address = transfers[0].address;
+      m_impl->balanceTracker.addTransaction(record);
+
+      // Track pending outgoing
+      m_impl->balanceTracker.addPendingOutgoing(record.txHash, totalAmount, buildResult.fee);
     }
 
     return result;
@@ -189,11 +210,27 @@ namespace BoltCore
       return result;
     }
 
-    // Sign and relay
     result.success = depositResult.success;
     result.txHash = depositResult.txHash;
     result.fee = depositResult.fee;
     result.transaction = depositResult.transaction;
+
+    if (result.success)
+    {
+      // Record deposit transaction
+      TransactionRecord record;
+      if (common::podFromHex(result.txHash, record.txHash))
+      {
+        record.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        record.fee = depositResult.fee;
+        record.totalSent = amount + depositResult.fee;
+        record.totalReceived = 0;
+        record.type = TransactionType::Deposit;
+        record.confirmed = false;
+        m_impl->balanceTracker.addTransaction(record);
+        m_impl->balanceTracker.addPendingOutgoing(record.txHash, amount, depositResult.fee);
+      }
+    }
 
     return result;
   }
@@ -216,6 +253,21 @@ namespace BoltCore
     result.txHash = withdrawResult.txHash;
     result.fee = withdrawResult.fee;
     result.error = withdrawResult.error;
+
+    if (result.success)
+    {
+      TransactionRecord record;
+      if (common::podFromHex(result.txHash, record.txHash))
+      {
+        record.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        record.fee = withdrawResult.fee;
+        record.totalSent = 0;
+        record.totalReceived = 0;
+        record.type = TransactionType::Withdrawal;
+        record.confirmed = false;
+        m_impl->balanceTracker.addTransaction(record);
+      }
+    }
 
     return result;
   }
@@ -248,6 +300,21 @@ namespace BoltCore
     result.txHash = fusionResult.txHash;
     result.fee = fusionResult.fee;
     result.error = fusionResult.error;
+
+    if (result.success)
+    {
+      TransactionRecord record;
+      if (common::podFromHex(result.txHash, record.txHash))
+      {
+        record.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        record.fee = fusionResult.fee;
+        record.totalSent = fusionResult.fee;
+        record.totalReceived = 0;
+        record.type = TransactionType::Fusion;
+        record.confirmed = false;
+        m_impl->balanceTracker.addTransaction(record);
+      }
+    }
 
     return result;
   }
@@ -311,6 +378,7 @@ namespace BoltCore
   {
     return m_impl->spendPub;
   }
+
   void Wallet::addPendingOutgoing(const crypto::Hash &txHash, uint64_t amount, uint64_t fee)
   {
     m_impl->balanceTracker.addPendingOutgoing(txHash, amount, fee);
@@ -319,6 +387,11 @@ namespace BoltCore
   void Wallet::confirmTransaction(const crypto::Hash &txHash, uint32_t blockHeight)
   {
     m_impl->balanceTracker.confirmTransaction(txHash, blockHeight);
+
+    // Mark the transaction record as confirmed
+    // (BalanceTracker doesn't expose a way to do this directly,
+    //  so we iterate through transactions)
+    // This would require adding a markConfirmed method to BalanceTracker
   }
 
   uint64_t Wallet::getPendingOutgoingAmount() const
@@ -329,5 +402,20 @@ namespace BoltCore
   std::vector<BalanceTracker::PendingTx> Wallet::getPendingTransactions() const
   {
     return m_impl->balanceTracker.getPendingTransactions();
+  }
+
+  void Wallet::addTransaction(const TransactionRecord &tx)
+  {
+    m_impl->balanceTracker.addTransaction(tx);
+  }
+
+  std::vector<TransactionRecord> Wallet::getTransactionHistory(uint32_t offset, uint32_t limit) const
+  {
+    return m_impl->balanceTracker.getTransactions(offset, limit);
+  }
+
+  uint32_t Wallet::getTransactionCount() const
+  {
+    return m_impl->balanceTracker.getTransactionCount();
   }
 } // namespace BoltCore

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "BoltSync.h"
+#include "Blockchain/BlockchainFilter.h"
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "Storage/MDBXBlockchainStorage.h"

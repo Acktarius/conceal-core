@@ -78,6 +78,30 @@ namespace BoltCore
     crypto::SecretKey spendSecretKey;
   };
 
+  enum class TransactionType : uint8_t
+  {
+    Incoming,
+    Outgoing,
+    Deposit,
+    Withdrawal,
+    Fusion
+  };
+
+  struct TransactionRecord
+  {
+    crypto::Hash txHash;
+    uint32_t blockHeight = 0;
+    uint64_t timestamp = 0;
+    uint64_t fee = 0;
+    uint64_t totalSent = 0;
+    uint64_t totalReceived = 0;
+    TransactionType type = TransactionType::Incoming;
+    bool confirmed = false;
+    std::string paymentId;
+    std::string address;             // Destination for outgoing, empty for incoming
+    std::vector<OutputInfo> outputs; // Outputs involved in this tx
+  };
+
   enum class WalletType
   {
     Full,

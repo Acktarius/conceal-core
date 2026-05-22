@@ -11,6 +11,7 @@ namespace BoltCore
     m_currentHeight = currentHeight;
     m_outputs.clear();
     m_byAddress.clear();
+    m_transactions.clear();
     m_total = {0, 0, 0, 0, 0, 0};
 
     for (const auto &out : outputs)
@@ -145,5 +146,32 @@ namespace BoltCore
       result.push_back(pair.second);
     }
     return result;
+  }
+
+  void BalanceTracker::addTransaction(const TransactionRecord &tx)
+  {
+    // Avoid duplicates
+    for (const auto &existing : m_transactions)
+    {
+      if (existing.txHash == tx.txHash)
+        return;
+    }
+    m_transactions.push_back(tx);
+  }
+
+  std::vector<TransactionRecord> BalanceTracker::getTransactions(uint32_t offset, uint32_t limit) const
+  {
+    std::vector<TransactionRecord> result;
+    if (offset >= m_transactions.size())
+      return result;
+
+    uint32_t end = std::min(offset + limit, static_cast<uint32_t>(m_transactions.size()));
+    result.assign(m_transactions.begin() + offset, m_transactions.begin() + end);
+    return result;
+  }
+
+  uint32_t BalanceTracker::getTransactionCount() const
+  {
+    return static_cast<uint32_t>(m_transactions.size());
   }
 }

@@ -18,6 +18,7 @@
 
 #include <parallel_hashmap/phmap.h>
 
+#include "Blockchain/BlockchainFilter.h"
 #include "Blockchain/BlockchainIndices.h"
 #include "Blockchain/BlockchainMessages.h"
 #include "Blockchain/Checkpoints.h"
@@ -110,7 +111,7 @@ namespace cn
 
     // Lifecycle
     bool init() { return init(tools::getDefaultDataDirectory(), true, m_testnet); }
-    bool init(const std::string &config_folder, bool load_existing, bool testnet, bool rebuildWalletIndexes = false);
+    bool init(const std::string &config_folder, bool load_existing, bool testnet);
     bool deinit();
     bool resetAndSetGenesisBlock(const Block &b);
 
@@ -265,6 +266,10 @@ namespace cn
                                 crypto::Hash &max_used_block_id,
                                 BlockInfo *tail = nullptr);
 
+    // Filter database access
+    bool getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const;
+    bool hasBlockFilterRecord(uint32_t height) const;
+
     // Debug
     void print_blockchain(uint64_t start_index, uint64_t end_index);
     void print_blockchain_index(bool print_all);
@@ -294,8 +299,6 @@ namespace cn
                          t_missed_container &missed_txs, bool checkTxPool = false);
 
     CryptoNote::MDBXBlockchainStorage *getMdbxStorage() const { return m_mdbxStorage.get(); }
-
-    void setEnableWalletIndexes(bool enable);
 
     // Legacy public member
     uint8_t blockMajorVersion;
@@ -355,7 +358,6 @@ namespace cn
 
     // Storage backend
     std::unique_ptr<CryptoNote::MDBXBlockchainStorage> m_mdbxStorage;
-    bool m_enableWalletIndexes = false;
 
     // In-memory chain index
     std::vector<crypto::Hash> m_blockHashes;
@@ -402,9 +404,9 @@ namespace cn
     CheckpointGeneratedCallback m_checkpointGeneratedCallback;
 
     //  Private methods — Init
-    bool initMdbxStorage(const std::string &config_folder, bool enableWalletIndexes);
-    bool initMdbx(bool load_existing, bool rebuildWalletIndexes = false);
-    void rebuildMdbxIndex(bool rebuildWalletIndexes = false);
+    bool initMdbxStorage(const std::string &config_folder);
+    bool initMdbx(bool load_existing);
+    void rebuildMdbxIndex();
     bool ensureGenesisBlock();
     bool validateGenesisBlock();
     bool initUpgradeDetectors();

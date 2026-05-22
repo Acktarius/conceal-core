@@ -63,8 +63,8 @@ namespace BoltRPC
     std::string address;
     uint64_t amount;
     std::string paymentId;
-    uint64_t mixin = cn::parameters::MINIMUM_MIXIN; // Default ring size
-    uint64_t fee = 0;   // 0 = auto-calculate
+    uint64_t mixin = cn::parameters::MINIMUM_MIXIN;
+    uint64_t fee = 0;
   };
 
   struct TransferResult
@@ -78,14 +78,14 @@ namespace BoltRPC
   struct DepositRequest
   {
     uint64_t amount;
-    uint32_t term; // In blocks
+    uint32_t term;
     uint64_t fee = 0;
   };
 
   struct WithdrawalRequest
   {
     uint64_t amount;
-    uint64_t depositId; // Index of the deposit to withdraw from
+    uint64_t depositId;
     uint64_t fee = 0;
   };
 
@@ -133,9 +133,9 @@ namespace BoltRPC
     TransferResult sendWithdrawal(const WithdrawalRequest &req);
 
     // ── Export ──────────────────────────────────────────────────────────────
-    std::string exportKeys() const;     // Hex-encoded, encrypted
-    std::string exportMnemonic() const; // BIP39 mnemonic
-    std::string exportState() const;    // Full state file path for backup
+    std::string exportKeys() const;
+    std::string exportMnemonic() const;
+    std::string exportState() const;
 
     // ── State file ──────────────────────────────────────────────────────────
     bool hasExistingWallet() const;
@@ -167,19 +167,14 @@ namespace BoltRPC
     std::string m_daemonHost;
     uint16_t m_daemonPort;
 
-    // Active wallet data (only populated when unlocked)
     WalletKeys m_keys;
     WalletState m_state;
     std::atomic<bool> m_locked{true};
 
-    // Sync subsystem
     std::unique_ptr<SyncManager> m_syncManager;
     std::unique_ptr<StateManager> m_stateManager;
     StatusCallback m_onStatus;
     mutable std::mutex m_stateMutex;
-
-    // Transaction building
-    // (In a full implementation, this would use the ring signature / bulletproof builder)
   };
 
 } // namespace BoltRPC

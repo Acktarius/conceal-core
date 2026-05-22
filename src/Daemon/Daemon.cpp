@@ -10,8 +10,11 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
+#include <fstream>
+#include <iostream>
 
 #include "DaemonCommandsHandler.h"
+#include "Blockchain/BlockchainFilter.h"
 #include "Blockchain/Checkpoints.h"
 #include "Common/PathTools.h"
 #include "Common/SignalHandler.h"
@@ -63,10 +66,6 @@ namespace
       "export-snapshot", "Export full blockchain snapshot for fast bootstrap", false};
   const command_line::arg_descriptor<std::string> arg_import_snapshot = {
       "import-snapshot", "Import full blockchain snapshot and bootstrap database", ""};
-  const command_line::arg_descriptor<bool> arg_enable_wallet_indexes = {
-      "enable-wallet-indexes", "Enable instant wallet sync indexes (archive node)", false};
-  const command_line::arg_descriptor<bool> arg_rebuild_wallet_indexes = {
-      "rebuild-wallet-indexes", "Rebuild wallet instant import indexes during startup (for migrated chains)", false};
 }
 
 // ── Genesis tx printing ─────────────────────────────────────────────────
@@ -102,16 +101,6 @@ JsonValue buildLoggerConfiguration(Level level, const std::string &logfile)
   return loggerConfiguration;
 }
 
-// ── Helper: extract tx public key from extra ────────────────────────────
-
-crypto::PublicKey getTxPublicKeyFromExtra(const std::vector<uint8_t> &extra)
-{
-  crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(extra);
-  if (tx_pub_key == cn::NULL_PUBLIC_KEY)
-    return cn::NULL_PUBLIC_KEY;
-  return tx_pub_key;
-}
-
 // ── Snapshot export ─────────────────────────────────────────────────────
 
 bool exportSnapshot(const std::string &dataDir, const std::string &outputFile,
@@ -124,7 +113,7 @@ bool exportSnapshot(const std::string &dataDir, const std::string &outputFile,
     dbPath += '/';
   dbPath += "mdbx_blocks";
 
-  CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
+  CryptoNote::MDBXBlockchainStorage storage(dbPath);
   uint32_t topHeight = storage.topBlockHeight();
 
   if (topHeight == 0)
@@ -144,12 +133,12 @@ bool exportSnapshot(const std::string &dataDir, const std::string &outputFile,
 
   // Magic + version header
   const uint32_t magic = 0x43434E58; // "CCNX"
-  const uint32_t version = 2;        // v2: full block entries
+  const uint32_t version = 3;        // v3: includes filter records
   file.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
   file.write(reinterpret_cast<const char *>(&version), sizeof(version));
   file.write(reinterpret_cast<const char *>(&topHeight), sizeof(topHeight));
 
-  // Write each block: [32-byte hash][4-byte entry_size][serialized BlockEntry]
+  // Write each block: [32-byte hash][4-byte entry_size][serialized BlockEntry][4-byte filter_size][serialized BlockFilterRecord]
   for (uint32_t h = 0; h <= topHeight; ++h)
   {
     if (h % 10000 == 0)
@@ -178,6 +167,17 @@ bool exportSnapshot(const std::string &dataDir, const std::string &outputFile,
     uint32_t entrySize = static_cast<uint32_t>(ba.size());
     file.write(reinterpret_cast<const char *>(&entrySize), sizeof(entrySize));
     file.write(reinterpret_cast<const char *>(ba.data()), ba.size());
+
+    // Export filter record if available
+    cn::BlockFilterRecord filterRecord;
+    bool hasFilter = storage.getBlockFilterRecord(h, filterRecord);
+    cn::BinaryArray filterBa;
+    if (hasFilter)
+      filterBa = cn::toBinaryArray(filterRecord);
+    uint32_t filterSize = static_cast<uint32_t>(filterBa.size());
+    file.write(reinterpret_cast<const char *>(&filterSize), sizeof(filterSize));
+    if (filterSize > 0)
+      file.write(reinterpret_cast<const char *>(filterBa.data()), filterBa.size());
   }
 
   file.close();
@@ -211,14 +211,16 @@ bool importSnapshot(const std::string &dataDir, const std::string &inputFile,
     logger(ERROR) << "Invalid snapshot file (bad magic)";
     return false;
   }
-  if (version != 2)
+  if (version < 2 || version > 3)
   {
     logger(ERROR) << "Unsupported snapshot version: " << version
-                  << " (expected version 2 for full block entries)";
+                  << " (expected version 2 or 3)";
     return false;
   }
 
-  logger(INFO) << "Snapshot contains " << (topHeight + 1) << " blocks (0.." << topHeight << ")";
+  bool hasFilterRecords = (version >= 3);
+  logger(INFO) << "Snapshot contains " << (topHeight + 1) << " blocks (0.." << topHeight << ")"
+               << (hasFilterRecords ? " [with filter records]" : " [no filter records]");
 
   if (!tools::directoryExists(dataDir))
   {
@@ -238,8 +240,7 @@ bool importSnapshot(const std::string &dataDir, const std::string &inputFile,
   boost::system::error_code ec;
   boost::filesystem::remove_all(dbPath, ec);
 
-  // Create storage with wallet indexes enabled so imported blocks get indexed
-  CryptoNote::MDBXBlockchainStorage storage(dbPath, true);
+  CryptoNote::MDBXBlockchainStorage storage(dbPath);
 
   for (uint32_t h = 0; h <= topHeight; ++h)
   {
@@ -290,67 +291,53 @@ bool importSnapshot(const std::string &dataDir, const std::string &inputFile,
     // Write to MDBX — single atomic transaction
     storage.pushCompleteBlock(h, blockHash, ba, hdr);
 
-    // Wallet instant import indexing
+    // Import or build filter record
     try
     {
-      // Index coinbase transaction (tx_index = 0)
-      crypto::PublicKey coinbasePubKey = getTxPublicKeyFromExtra(entry.bl.baseTransaction.extra);
-      if (coinbasePubKey != cn::NULL_PUBLIC_KEY)
+      if (hasFilterRecords)
       {
-        crypto::Hash coinbaseHash = getObjectHash(entry.bl.baseTransaction);
-        for (uint16_t out_idx = 0; out_idx < entry.bl.baseTransaction.outputs.size(); ++out_idx)
+        // v3+: filter record is embedded in the snapshot
+        uint32_t filterSize;
+        file.read(reinterpret_cast<char *>(&filterSize), sizeof(filterSize));
+        if (!file)
         {
-          const auto &output = entry.bl.baseTransaction.outputs[out_idx];
-          if (output.target.type() == typeid(KeyOutput))
+          logger(ERROR) << "Failed to read filter size at height " << h;
+          return false;
+        }
+
+        if (filterSize > 0)
+        {
+          cn::BinaryArray filterBa(filterSize);
+          file.read(reinterpret_cast<char *>(filterBa.data()), filterSize);
+          if (!file)
           {
-            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
-            storage.indexOutputByTxPubKey(
-                coinbasePubKey, h, 0, out_idx,
-                coinbaseHash, output.amount, key_out.key);
+            logger(ERROR) << "Failed to read filter record at height " << h;
+            return false;
+          }
+
+          cn::BlockFilterRecord filterRecord;
+          if (cn::fromBinaryArray(filterRecord, filterBa))
+          {
+            storage.storeBlockFilterRecord(h, filterRecord);
           }
         }
       }
-
-      // Index regular transactions (tx_index = 1 + i)
-      for (uint32_t tx_idx = 0; tx_idx < entry.transactions.size() - 1; ++tx_idx)
+      else
       {
-        const auto &tx = entry.transactions[1 + tx_idx].tx;
-        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx.extra);
-        if (txPubKey == cn::NULL_PUBLIC_KEY)
-          continue;
+        // v2: no filter records in snapshot — build them on import
+        std::vector<cn::Transaction> allTxs;
+        for (uint32_t i = 1; i < entry.transactions.size(); ++i)
+          allTxs.push_back(entry.transactions[i].tx);
 
-        crypto::Hash txHash = getObjectHash(tx);
-        for (uint16_t out_idx = 0; out_idx < tx.outputs.size(); ++out_idx)
-        {
-          const auto &output = tx.outputs[out_idx];
-          if (output.target.type() == typeid(KeyOutput))
-          {
-            const KeyOutput &key_out = boost::get<KeyOutput>(output.target);
-            storage.indexOutputByTxPubKey(
-                txPubKey, h, static_cast<uint32_t>(1 + tx_idx), out_idx,
-                txHash, output.amount, key_out.key);
-          }
-        }
-      }
-
-      // Index spent key images from all transactions
-      for (const auto &tx_entry : entry.transactions)
-      {
-        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx_entry.tx.extra);
-        for (const auto &input : tx_entry.tx.inputs)
-        {
-          if (input.type() == typeid(KeyInput))
-          {
-            const KeyInput &ki = boost::get<KeyInput>(input);
-            storage.indexSpentKeyImage(ki.keyImage, txPubKey, h);
-          }
-        }
+        cn::BlockFilterRecord filterRecord = buildBlockFilterRecord(
+            entry.bl, entry.height, allTxs);
+        storage.storeBlockFilterRecord(entry.height, filterRecord);
       }
     }
     catch (const std::exception &e)
     {
       logger(WARNING, BRIGHT_YELLOW)
-          << "Wallet indexing failed for block " << h << ": " << e.what();
+          << "Filter record build failed for block " << h << ": " << e.what();
     }
   }
 
@@ -358,6 +345,7 @@ bool importSnapshot(const std::string &dataDir, const std::string &inputFile,
 
   logger(INFO, BRIGHT_GREEN) << "Snapshot imported successfully!";
   logger(INFO) << "  Blocks: " << (topHeight + 1);
+  logger(INFO) << "  Filter records: " << (hasFilterRecords ? "imported" : "built on import");
   logger(INFO) << "  Database created at: " << dbPath;
   logger(INFO) << "  Start daemon normally to begin syncing remaining blocks.";
 
@@ -400,8 +388,6 @@ int main(int argc, char *argv[])
     command_line::add_arg(desc_cmd_sett, arg_print_genesis_tx);
     command_line::add_arg(desc_cmd_sett, arg_export_snapshot);
     command_line::add_arg(desc_cmd_sett, arg_import_snapshot);
-    command_line::add_arg(desc_cmd_sett, arg_enable_wallet_indexes);
-    command_line::add_arg(desc_cmd_sett, arg_rebuild_wallet_indexes);
 
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
@@ -417,14 +403,6 @@ int main(int argc, char *argv[])
                                                {
       po::store(po::parse_command_line(argc, argv, desc_options), vm);
       coreConfig.init(vm);
-
-#ifdef DEFAULT_LIGHT_NODE
-      coreConfig.enableWalletIndexes = false;
-#else
-      coreConfig.enableWalletIndexes = 
-        command_line::has_arg(vm, arg_enable_wallet_indexes)
-        ? command_line::get_arg(vm, arg_enable_wallet_indexes): true;
-#endif
 
       if (command_line::get_arg(vm, command_line::arg_help))
       {

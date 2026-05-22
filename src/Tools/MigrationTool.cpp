@@ -14,6 +14,7 @@
 #include <boost/program_options.hpp>
 
 #include "Blockchain/Blockchain.h"
+#include "Blockchain/BlockchainFilter.h"
 #include "Blockchain/SwappedVector.h"
 #include "Common/CommandLine.h"
 #include "Common/FileMappedVector.h"
@@ -114,6 +115,13 @@ std::string blockHeaderKey(uint32_t height)
 {
   std::ostringstream oss;
   oss << "hdr_" << std::setw(8) << std::setfill('0') << height;
+  return oss.str();
+}
+
+std::string filterRecordKey(uint32_t height)
+{
+  std::ostringstream oss;
+  oss << "fr_" << std::setw(8) << std::setfill('0') << height;
   return oss.str();
 }
 
@@ -250,16 +258,17 @@ int main(int argc, char *argv[])
   }
   std::cout << "Genesis block verified: " << common::podToHex(genesisHash) << std::endl;
 
-  // Initialize MDBX storage (no wallet indexes needed for migration)
+  // Initialize MDBX storage
   std::cout << "Initializing MDBX storage backend..." << std::endl;
   std::string mdbxPath = PathHelpers::appendPath(newDir, "mdbx_blocks");
-  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath, false);
+  CryptoNote::MDBXBlockchainStorage mdbxStorage(mdbxPath);
 
   // Get MDBX handles for batched writes
   MDBX_env *env = mdbxStorage.getEnv();
   MDBX_dbi dbiEntries = mdbxStorage.getDbiBlockEntries();
   MDBX_dbi dbiHeaders = mdbxStorage.getDbiBlockHeaders();
   MDBX_dbi dbiHeights = mdbxStorage.getDbiHeights();
+  MDBX_dbi dbiFilterRecords = mdbxStorage.getDbiFilterRecords();
 
   // Build indexes during migration (for verification only)
   MigrationIndexes idx;
@@ -267,6 +276,7 @@ int main(int argc, char *argv[])
 
   uint32_t skippedBlocks = 0;
   uint32_t migratedBlocks = 0;
+  uint32_t filterRecordsBuilt = 0;
 
   // Batched transaction state
   MDBX_txn *batchTxn = nullptr;
@@ -274,7 +284,7 @@ int main(int argc, char *argv[])
 
   std::cout << std::endl;
   std::cout << "═══════════════════════════════════════════════════════" << std::endl;
-  std::cout << "  Starting migration" << std::endl;
+  std::cout << "  Starting migration (blocks + filter records)" << std::endl;
   std::cout << "  Total blocks: " << totalBlocks << std::endl;
   std::cout << "  Batch size:   " << batchSize << std::endl;
   std::cout << "  Commits:      ~" << (totalBlocks / batchSize + 1) << std::endl;
@@ -358,6 +368,24 @@ int main(int argc, char *argv[])
       mdbx_put(batchTxn, dbiHeaders, &hk, &hv, MDBX_UPSERT);
     }
 
+    // ── Build and write filter record ─────────────────────────────────
+    {
+      // Collect all transactions for the filter
+      std::vector<Transaction> allTxs;
+      for (uint32_t i = 1; i < entry.transactions.size(); ++i)
+        allTxs.push_back(entry.transactions[i].tx);
+
+      BlockFilterRecord filterRecord = buildBlockFilterRecord(
+          entry.bl, entry.height, allTxs);
+
+      BinaryArray filterBa = toBinaryArray(filterRecord);
+      std::string frKey = filterRecordKey(h);
+      MDBX_val fk = toMdbxVal(frKey.data(), frKey.size());
+      MDBX_val fv = toMdbxVal(filterBa.data(), filterBa.size());
+      mdbx_put(batchTxn, dbiFilterRecords, &fk, &fv, MDBX_UPSERT);
+      filterRecordsBuilt++;
+    }
+
     idx.blockHashes.push_back(blockHash);
     idx.hashToHeight[blockHash] = h;
     migratedBlocks++;
@@ -427,11 +455,12 @@ int main(int argc, char *argv[])
   std::cout << "═══════════════════════════════════════════════════════" << std::endl;
   std::cout << "  Migration complete!" << std::endl;
   std::cout << "═══════════════════════════════════════════════════════" << std::endl;
-  std::cout << "  Blocks migrated: " << migratedBlocks << std::endl;
-  std::cout << "  Blocks skipped:  " << skippedBlocks << std::endl;
-  std::cout << "  Total time:      " << formatDuration(totalSeconds) << std::endl;
-  std::cout << "  Avg speed:       " << formatSpeed(totalSeconds > 0 ? migratedBlocks / (float)totalSeconds : 0) << std::endl;
-  std::cout << "  Database:        " << mdbxPath << std::endl;
+  std::cout << "  Blocks migrated:       " << migratedBlocks << std::endl;
+  std::cout << "  Filter records built:  " << filterRecordsBuilt << std::endl;
+  std::cout << "  Blocks skipped:        " << skippedBlocks << std::endl;
+  std::cout << "  Total time:            " << formatDuration(totalSeconds) << std::endl;
+  std::cout << "  Avg speed:             " << formatSpeed(totalSeconds > 0 ? migratedBlocks / (float)totalSeconds : 0) << std::endl;
+  std::cout << "  Database:              " << mdbxPath << std::endl;
   std::cout << "═══════════════════════════════════════════════════════" << std::endl;
 
   if (skippedBlocks > 0)
@@ -475,10 +504,19 @@ int main(int argc, char *argv[])
       verificationOk = false;
       break;
     }
+
+    // Spot-check filter record
+    BlockFilterRecord filterRecord;
+    if (!mdbxStorage.getBlockFilterRecord(h, filterRecord))
+    {
+      std::cerr << "  FAIL: filter record " << h << " not found in MDBX" << std::endl;
+      verificationOk = false;
+      break;
+    }
   }
 
   if (verificationOk)
-    std::cout << "  All " << blocksToCheck << " spot-checks passed!" << std::endl;
+    std::cout << "  All " << blocksToCheck << " spot-checks passed (blocks + filter records)!" << std::endl;
   else
     std::cerr << "  Verification FAILED." << std::endl;
 
@@ -489,7 +527,7 @@ int main(int argc, char *argv[])
   std::cout << "Done. Start your daemon with:" << std::endl;
   std::cout << "  ./conceald --data-dir " << newDir << std::endl;
   std::cout << std::endl;
-  std::cout << "In-memory indexes will be rebuilt automatically on first startup." << std::endl;
+  std::cout << "In-memory indexes and filter records will be available immediately." << std::endl;
 
   return verificationOk ? 0 : 1;
 }

@@ -43,6 +43,10 @@ namespace BoltCore
     uint64_t getPendingOutgoingAmount() const;
     std::vector<PendingTx> getPendingTransactions() const;
 
+    void addTransaction(const TransactionRecord &tx);
+    std::vector<TransactionRecord> getTransactions(uint32_t offset = 0, uint32_t limit = 50) const;
+    uint32_t getTransactionCount() const;
+
   private:
     struct AddressBalance
     {
@@ -59,5 +63,6 @@ namespace BoltCore
     std::vector<OutputInfo> m_outputs;
     std::unordered_map<std::string, AddressBalance> m_byAddress;
     Balance m_total;
+    std::vector<TransactionRecord> m_transactions;
   };
 }

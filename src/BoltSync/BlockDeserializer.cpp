@@ -1,11 +1,14 @@
 #include "BlockDeserializer.h"
 #include "CryptoHelpers.h"
 
+#include "Blockchain/BlockchainFilter.h"
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Serialization/BinaryInputStreamSerializer.h"
 #include "Common/MemoryInputStream.h"
+
+#include <cstring>
 
 namespace BoltSync
 {
@@ -89,9 +92,15 @@ namespace BoltSync
 
       static const crypto::PublicKey NULL_KEY = {};
 
+      // Load the filter record for this block
+      cn::BlockFilterRecord filterRecord;
+      bool haveFilter = ctx.storage.getBlockFilterRecord(h, filterRecord);
+      size_t filterIdx = 0;
+
       auto scanTx = [&](cn::Transaction &tx, uint32_t blockHeight)
       {
         crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
+
         if (txPubKey == NULL_KEY)
           return;
 
@@ -103,8 +112,6 @@ namespace BoltSync
         if (!getTxHash(tx, txHash))
           return;
 
-        // Sequential key counter across all output keys in the tx (KeyOutput counts 1,
-        // MultisignatureOutput counts N = number of keys it contains).
         size_t keyIndex = 0;
 
         for (size_t outIdx = 0; outIdx < tx.outputs.size(); ++outIdx)
@@ -114,6 +121,28 @@ namespace BoltSync
           if (out.target.type() == typeid(cn::KeyOutput))
           {
             const auto &keyOut = boost::get<cn::KeyOutput>(out.target);
+
+            // View tag filter
+            if (haveFilter)
+            {
+              if (filterIdx >= filterRecord.entries.size())
+              {
+                ++keyIndex;
+                continue;
+              }
+
+              const auto &entry = filterRecord.entries[filterIdx];
+              ++filterIdx;
+
+              uint8_t walletTag = computeDaemonViewTag(txPubKey, outIdx);
+              if (walletTag != entry.view_tag)
+              {
+                ++keyIndex;
+                continue;
+              }
+            }
+
+            // Full ECDH derivation
             crypto::PublicKey derivedKey;
             if (crypto::derive_public_key(derivation, keyIndex, ctx.spendPublicKey, derivedKey) &&
                 derivedKey == keyOut.key)
@@ -140,9 +169,6 @@ namespace BoltSync
           }
           else if (out.target.type() == typeid(cn::MultisignatureOutput))
           {
-            // Deposits use MultisignatureOutput (term > 0 means it is a deposit).
-            // Ownership: underive_public_key(derivation, outIdx, key) must recover our spendPublicKey.
-            // The reference (TransfersConsumer) uses outIdx (not the running keyIndex) for multisig.
             const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
             for (size_t ki = 0; ki < msigOut.keys.size(); ++ki)
             {
@@ -170,10 +196,8 @@ namespace BoltSync
         }
       };
 
-      // Process base transaction (coinbase)
-      scanTx(block.baseTransaction, h);
-
-      // Process regular transactions
+      // transactions[0] is the coinbase — process all transactions
+      // through the same path so filterIdx stays aligned
       for (auto &tx : transactions)
         scanTx(tx, h);
     }
@@ -190,9 +214,6 @@ namespace BoltSync
     if (results.empty())
       return;
 
-    // Build keyImage → result index map for all non-deposit outputs we found.
-    // Deposits (MultisignatureOutput) are spent via MultisignatureInput which
-    // references by global output index — a separate concern handled later.
     std::unordered_map<crypto::KeyImage, size_t> keyImageIndex;
     keyImageIndex.reserve(results.size());
     for (size_t i = 0; i < results.size(); ++i)
@@ -209,8 +230,6 @@ namespace BoltSync
     if (keyImageIndex.empty())
       return;
 
-    // Sequential pass: for every KeyInput in every transaction, check if
-    // its keyImage matches one of our outputs. Mark matched outputs as spent.
     for (uint32_t h = 0; h <= topHeight; ++h)
     {
       cn::BinaryArray serializedEntry;

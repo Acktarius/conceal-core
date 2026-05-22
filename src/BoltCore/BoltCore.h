@@ -76,6 +76,10 @@ namespace BoltCore
     uint64_t getPendingOutgoingAmount() const;
     std::vector<BalanceTracker::PendingTx> getPendingTransactions() const;
 
+    void addTransaction(const TransactionRecord &tx);
+    std::vector<TransactionRecord> getTransactionHistory(uint32_t offset = 0, uint32_t limit = 50) const;
+    uint32_t getTransactionCount() const;
+
   private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

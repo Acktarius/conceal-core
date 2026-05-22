@@ -177,6 +177,8 @@ namespace cn
     BlockHeaderPOD getBlockHeader(uint32_t height) const;
     CryptoNote::MDBXBlockchainStorage *getMdbxStorage() const;
 
+    bool getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const;
+
   private:
     bool add_new_tx(const Transaction &tx, const crypto::Hash &tx_hash, size_t blob_size, tx_verification_context &tvc, bool keeped_by_block, uint32_t height);
     bool load_state_data();

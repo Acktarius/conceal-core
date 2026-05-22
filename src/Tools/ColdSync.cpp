@@ -3,7 +3,8 @@
 // Distributed under the MIT/X11 software license.
 
 // conceal-coldsync – Offline wallet pre-syncer
-// Creates an encrypted wallet state file by scanning the MDBX blockchain directly.
+// Creates an encrypted wallet state file by scanning the MDBX blockchain directly
+// using the two-pass filter for fast output recognition.
 // No daemon connection required.
 
 #include <cstring>
@@ -15,19 +16,20 @@
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 
-#include "BoltRPC/SyncManager.h"
+#include "BoltSync/BoltSync.h"
+#include "BoltSync/CryptoHelpers.h"
 #include "BoltRPC/StateManager.h"
 #include "BoltRPC/WalletManager.h"
 #include "Storage/MDBXBlockchainStorage.h"
 
 #include "Common/Util.h"
+#include "Common/PathHelpers.h"
 #include "Common/StringTools.h"
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Logging/ConsoleLogger.h"
 #include "Logging/LoggerManager.h"
-#include "NodeRpcProxy/NodeRpcProxy.h"
 #include "CryptoNoteConfig.h"
 
 namespace po = boost::program_options;
@@ -53,7 +55,18 @@ struct Config
 bool parseArgs(int argc, char *argv[], Config &cfg)
 {
   po::options_description desc("Cold Storage Wallet Initializer for Conceal");
-  desc.add_options()("help,h", "Show this help message")("data-dir", po::value<std::string>()->required(), "Path to conceal data directory (contains mdbx_blocks)")("container", po::value<std::string>()->default_value(""), "Output wallet container path (auto-generated if not specified)")("password", po::value<std::string>()->required(), "Password to encrypt the container")("view-key", po::value<std::string>()->required(), "64-char hex private view key")("spend-key", po::value<std::string>()->default_value(""), "64-char hex private spend key (optional)")("scan-blockchain", po::value<bool>()->default_value(true), "Scan blockchain (true) or create empty container (false)")("progress-file", po::value<std::string>()->default_value(""), "File to write scan progress (for GUI)")("threads", po::value<unsigned int>()->default_value(1), "Number of scan threads (0=auto, 1=single thread)")("start-block", po::value<uint32_t>()->default_value(0), "Start scanning from this block height")("end-block", po::value<uint32_t>()->default_value(0), "Stop scanning at this block height")("force", po::value<bool>()->default_value(false), "Overwrite existing container file if present");
+  desc.add_options()("help,h", "Show this help message")("data-dir", po::value<std::string>()->required(),
+                                                         "Path to conceal data directory (contains mdbx_blocks)")("container", po::value<std::string>()->default_value(""),
+                                                                                                                  "Output wallet container path (auto-generated if not specified)")("password", po::value<std::string>()->required(),
+                                                                                                                                                                                    "Password to encrypt the container")("view-key", po::value<std::string>()->required(),
+                                                                                                                                                                                                                         "64-char hex private view key")("spend-key", po::value<std::string>()->default_value(""),
+                                                                                                                                                                                                                                                         "64-char hex private spend key (optional, omit for view-only)")("scan-blockchain", po::value<bool>()->default_value(true),
+                                                                                                                                                                                                                                                                                                                         "Scan blockchain (true) or create empty container (false)")("progress-file", po::value<std::string>()->default_value(""),
+                                                                                                                                                                                                                                                                                                                                                                                     "File to write scan progress (for GUI)")("threads", po::value<unsigned int>()->default_value(1),
+                                                                                                                                                                                                                                                                                                                                                                                                                              "Number of scan threads (0=auto)")("start-block", po::value<uint32_t>()->default_value(0),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                 "Start scanning from this block height")("end-block", po::value<uint32_t>()->default_value(0),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          "Stop scanning at this block height (0=scan all)")("force", po::value<bool>()->default_value(false),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             "Overwrite existing container file if present");
 
   po::variables_map vm;
   try
@@ -97,50 +110,6 @@ bool parseArgs(int argc, char *argv[], Config &cfg)
   }
   return true;
 }
-
-// ---------------------------------------------------------------------------
-// Offline INode stub (satisfies INode interface, never connects)
-// ---------------------------------------------------------------------------
-class OfflineNode : public cn::INode
-{
-public:
-  virtual ~OfflineNode() {}
-
-  bool addObserver(cn::INodeObserver *) override { return true; }
-  bool removeObserver(cn::INodeObserver *) override { return true; }
-  void init(const Callback &cb) override { cb(std::error_code()); }
-  bool shutdown() override { return true; }
-
-  size_t getPeerCount() const override { return 0; }
-  uint32_t getLastLocalBlockHeight() const override { return 0; }
-  uint32_t getLastKnownBlockHeight() const override { return 0; }
-  uint32_t getLocalBlockCount() const override { return 0; }
-  uint32_t getKnownBlockCount() const override { return 0; }
-  uint64_t getLastLocalBlockTimestamp() const override { return 0; }
-
-  void relayTransaction(const cn::Transaction &, const Callback &cb) override { cb(std::error_code()); }
-  void getRandomOutsByAmounts(std::vector<uint64_t> &&, uint64_t, std::vector<cn::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> &, const Callback &cb) override { cb(std::error_code()); }
-  void getNewBlocks(std::vector<crypto::Hash> &&, std::vector<cn::block_complete_entry> &, uint32_t &, const Callback &cb) override { cb(std::error_code()); }
-  void getTransactionOutsGlobalIndices(const crypto::Hash &, std::vector<uint32_t> &, const Callback &cb) override { cb(std::error_code()); }
-  void queryBlocks(std::vector<crypto::Hash> &&, uint64_t, std::vector<cn::BlockShortEntry> &, uint32_t &, const Callback &cb) override { cb(std::error_code()); }
-  void getPoolSymmetricDifference(std::vector<crypto::Hash> &&, crypto::Hash, bool &, std::vector<std::unique_ptr<cn::ITransactionReader>> &, std::vector<crypto::Hash> &, const Callback &cb) override { cb(std::error_code()); }
-  void getMultisignatureOutputByGlobalIndex(uint64_t, uint32_t, cn::MultisignatureOutput &, const Callback &cb) override { cb(std::error_code()); }
-  void getTransaction(const crypto::Hash &, cn::Transaction &, const Callback &cb) override { cb(std::error_code()); }
-  void getBlocks(const std::vector<uint32_t> &, std::vector<std::vector<cn::BlockDetails>> &, const Callback &cb) override { cb(std::error_code()); }
-  void getBlocks(const std::vector<crypto::Hash> &, std::vector<cn::BlockDetails> &, const Callback &cb) override { cb(std::error_code()); }
-  void getBlocks(uint64_t, uint64_t, uint32_t, std::vector<cn::BlockDetails> &, uint32_t &, const Callback &cb) override { cb(std::error_code()); }
-  void getTransactions(const std::vector<crypto::Hash> &, std::vector<cn::TransactionDetails> &, const Callback &cb) override { cb(std::error_code()); }
-  void getTransactionsByPaymentId(const crypto::Hash &, std::vector<cn::TransactionDetails> &, const Callback &cb) override { cb(std::error_code()); }
-  void getPoolTransactions(uint64_t, uint64_t, uint32_t, std::vector<cn::TransactionDetails> &, uint64_t &, const Callback &cb) override { cb(std::error_code()); }
-  void isSynchronized(bool &sync, const Callback &cb) override
-  {
-    sync = true;
-    cb(std::error_code());
-  }
-
-  std::vector<crypto::Hash> getPoolTransactions() override { return {}; }
-  bool getTransactionSync(const crypto::Hash &, cn::Transaction &) override { return false; }
-};
 
 // ---------------------------------------------------------------------------
 // Main
@@ -215,90 +184,86 @@ int main(int argc, char *argv[])
       }
     }
 
-    // ── Scan blockchain directly via MDBX ──────────────────────────────
+    // ── Scan blockchain via BoltSync::Scanner ───────────────────────────
     std::vector<BoltRPC::OutputInfo> outputs;
     uint32_t scannedHeight = 0;
 
     if (cfg.scanBlocks && !cfg.dataDir.empty())
     {
-      std::cout << "Opening MDBX blockchain at " << cfg.dataDir << "/mdbx_blocks ..." << std::endl;
+      std::string dbPath = PathHelpers::appendPath(cfg.dataDir, "mdbx_blocks");
+      std::cout << "Opening MDBX blockchain at " << dbPath << std::endl;
 
-      std::string dbPath = cfg.dataDir + "/mdbx_blocks";
-      CryptoNote::MDBXBlockchainStorage storage(dbPath, false);
+      CryptoNote::MDBXBlockchainStorage storage(dbPath);
 
       uint32_t topHeight = storage.topBlockHeight();
+      if (topHeight == 0)
+      {
+        std::cerr << "Error: Blockchain is empty" << std::endl;
+        return 1;
+      }
+
       if (cfg.endBlock == 0 || cfg.endBlock > topHeight)
         cfg.endBlock = topHeight;
 
       std::cout << "Scanning blocks " << cfg.startBlock << " to " << cfg.endBlock
                 << " (chain height: " << topHeight << ")" << std::endl;
 
-      // Use SyncManager-style derivation to find owned outputs
-      OfflineNode offlineNode;
-      BoltRPC::SyncManager syncManager(
-          offlineNode, viewKey, spendPub, cfg.dataDir,
-          [](const std::string &, const std::string &) -> std::string
-          { return ""; });
+      // Use BoltSync::Scanner — does two-pass filter + ECDH derivation
+      // using the local MDBX directly. The scanner already has the filter
+      // integrated (BlockDeserializer.cpp checks filter records before ECDH).
+      BoltSync::Scanner scanner(
+          viewKey, spendPub,
+          hasSpendKey ? &spendKey : nullptr);
 
-      // Scan by fetching all tx_pub_keys and outputs from MDBX indexes
-      std::vector<crypto::PublicKey> allKeys = storage.getNewTxPubKeys(cfg.startBlock, cfg.endBlock);
-      std::cout << "Found " << allKeys.size() << " unique tx public keys in range" << std::endl;
+      BoltSync::ScanConfig scanConfig;
+      scanConfig.dataDir = cfg.dataDir;
+      scanConfig.numThreads = cfg.numThreads;
+      scanConfig.startBlock = cfg.startBlock;
+      scanConfig.endBlock = cfg.endBlock;
+      scanConfig.progressFile = cfg.progressFile;
 
-      std::vector<CryptoNote::WalletOutputInfo> candidates;
-      std::unordered_set<std::string> spentImages;
-      storage.getOutputsByTxPubKeys(allKeys, candidates, spentImages);
+      BoltSync::ScanState state;
 
-      std::cout << "Retrieved " << candidates.size() << " output candidates" << std::endl;
+      std::cout << "Starting scan with "
+                << (cfg.numThreads == 0 ? "auto" : std::to_string(cfg.numThreads))
+                << " threads..." << std::endl;
 
-      // Convert and derive ownership
-      uint64_t totalReceived = 0, totalSpent = 0;
-      for (const auto &c : candidates)
+      if (!scanner.scan(scanConfig, state))
       {
-        BoltRPC::OutputInfo info;
-        info.blockHeight = c.block_height;
-        info.txHash = c.tx_hash;
-        info.amount = c.amount;
-        info.outputIndex = c.output_index;
-        info.outputKey = c.output_key;
-        info.txPublicKey = c.tx_public_key;
-        info.spent = false;
-        info.isDeposit = false;
-        info.term = 0;
-
-        // Derive ownership (using SyncManager's logic via WalletManager's key derivation)
-        crypto::KeyDerivation derivation;
-        if (crypto::generate_key_derivation(c.tx_public_key, viewKey, derivation))
-        {
-          crypto::PublicKey derivedKey;
-          if (crypto::derive_public_key(derivation, c.output_index, spendPub, derivedKey) &&
-              std::memcmp(&derivedKey, &c.output_key, sizeof(crypto::PublicKey)) == 0)
-          {
-            // Check spent status
-
-            if (hasSpendKey)
-            {
-              crypto::KeyImage ki;
-              crypto::SecretKey ephemeralSec;
-              derive_secret_key(derivation, c.output_index, spendKey, ephemeralSec);
-              crypto::PublicKey ephemeralPub;
-              crypto::secret_key_to_public_key(ephemeralSec, ephemeralPub);
-              crypto::generate_key_image(ephemeralPub, ephemeralSec, ki);
-              info.spent = storage.isSpentKeyImage(ki);
-            }
-
-            outputs.push_back(info);
-            totalReceived += info.amount;
-            if (info.spent)
-              totalSpent += info.amount;
-          }
-        }
+        std::cerr << "Error: Scan failed" << std::endl;
+        return 1;
       }
 
-      scannedHeight = cfg.endBlock;
-      std::cout << "Scan complete. Found " << outputs.size() << " owned outputs."
-                << " Received: " << totalReceived
-                << ", Spent: " << totalSpent
-                << ", Balance: " << (totalReceived - totalSpent) << std::endl;
+      scannedHeight = state.scannedTopHeight;
+
+      // Convert BoltSync::FoundOutput → BoltRPC::OutputInfo
+      uint64_t totalReceived = 0, totalSpent = 0;
+      outputs.reserve(state.results.size());
+      for (const auto &fo : state.results)
+      {
+        BoltRPC::OutputInfo info;
+        info.blockHeight = fo.blockHeight;
+        info.txHash = fo.txHash;
+        info.amount = fo.amount;
+        info.outputIndex = fo.outputIndex;
+        info.outputKey = fo.outputKey;
+        info.txPublicKey = fo.txPublicKey;
+        info.spent = fo.spent;
+        info.isDeposit = fo.isDeposit;
+        info.term = fo.term;
+        outputs.push_back(info);
+
+        totalReceived += info.amount;
+        if (info.spent)
+          totalSpent += info.amount;
+      }
+
+      std::cout << "Scan complete." << std::endl;
+      std::cout << "  Blocks processed: " << state.blocksProcessed << std::endl;
+      std::cout << "  Owned outputs: " << outputs.size() << std::endl;
+      std::cout << "  Received: " << totalReceived << std::endl;
+      std::cout << "  Spent: " << totalSpent << std::endl;
+      std::cout << "  Balance: " << (totalReceived - totalSpent) << std::endl;
     }
 
     // ── Save wallet state via StateManager ──────────────────────────────

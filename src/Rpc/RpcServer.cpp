@@ -23,6 +23,8 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteProtocol/ICryptoNoteProtocolQuery.h"
 
+#include "Blockchain/BlockchainFilter.h"
+
 #include "P2p/NetNode.h"
 
 #include "CoreRpcServerErrorCodes.h"
@@ -312,9 +314,8 @@ bool RpcServer::processJsonRpcRequest(const HttpRequest& request, HttpResponse& 
         {"getrawtransactionsbyheights", {makeMemberMethod(&RpcServer::on_get_txs_with_output_global_indexes), true}},
         {"get_merkle_proof", {makeMemberMethod(&RpcServer::on_get_merkle_proof), false}},
         {"get_outputs_for_address", {makeMemberMethod(&RpcServer::on_get_outputs_for_address), false}},
-        {"export_headers", {makeMemberMethod(&RpcServer::on_export_headers), false}},
         {"get_spv_outputs", {makeMemberMethod(&RpcServer::on_get_spv_outputs), false}},
-        {"get_wallet_snapshot", {makeMemberMethod(&RpcServer::on_get_wallet_snapshot), false}},
+        {"get_filter_records", {makeMemberMethod(&RpcServer::on_get_filter_records), true}},
     };
 
     auto it = jsonRpcHandlers.find(jsonRequest.getMethod());
@@ -1910,76 +1911,6 @@ bool RpcServer::on_get_outputs_for_address(const COMMAND_RPC_GET_OUTPUTS_FOR_ADD
   return true;
 }
 
-// Add to RpcServer class
-bool RpcServer::exportHeadersToFile(const std::string &filename)
-{
-  uint32_t topHeight = m_core.get_current_blockchain_height();
-  if (topHeight == 0)
-  {
-    logger(logging::ERROR) << "Blockchain not initialized";
-    return false;
-  }
-
-  topHeight--;
-
-  std::ofstream file(filename, std::ios::binary);
-  if (!file.is_open())
-  {
-    logger(logging::ERROR) << "Failed to open " << filename;
-    return false;
-  }
-
-  // Write magic
-  uint32_t magic = 0x43434844;
-  file.write(reinterpret_cast<char *>(&magic), sizeof(magic));
-
-  uint32_t version = 1;
-  file.write(reinterpret_cast<char *>(&version), sizeof(version));
-
-  uint32_t count = topHeight + 1;
-  file.write(reinterpret_cast<char *>(&count), sizeof(count));
-
-  crypto::Hash genesisHash = m_core.getBlockIdByHeight(0);
-  file.write(reinterpret_cast<char *>(&genesisHash), sizeof(genesisHash));
-
-  for (uint32_t h = 0; h <= topHeight; ++h)
-  {
-    crypto::Hash blockHash = m_core.getBlockIdByHeight(h);
-    cn::BlockHeaderPOD hdr = m_core.getBlockHeader(h);
-
-    // Write compact header
-    file.write(reinterpret_cast<const char *>(&hdr.height), sizeof(hdr.height));
-    file.write(reinterpret_cast<const char *>(&hdr.majorVersion), sizeof(hdr.majorVersion));
-    file.write(reinterpret_cast<const char *>(&hdr.minorVersion), sizeof(hdr.minorVersion));
-    file.write(reinterpret_cast<const char *>(&hdr.timestamp), sizeof(hdr.timestamp));
-    file.write(reinterpret_cast<const char *>(&hdr.nonce), sizeof(hdr.nonce));
-    file.write(reinterpret_cast<const char *>(&hdr.cumulativeDifficulty), sizeof(hdr.cumulativeDifficulty));
-    file.write(reinterpret_cast<const char *>(&hdr.previousBlockHash), sizeof(hdr.previousBlockHash));
-    file.write(reinterpret_cast<const char *>(&blockHash), sizeof(blockHash));
-
-    if (h % 100000 == 0 && h > 0)
-    {
-      logger(logging::INFO) << "Exported " << h << " of " << topHeight;
-    }
-  }
-
-  file.close();
-  logger(logging::INFO) << "Exported " << count << " headers to " << filename;
-  return true;
-}
-
-bool RpcServer::on_export_headers(const COMMAND_RPC_EXPORT_HEADERS::request &req,
-                                  COMMAND_RPC_EXPORT_HEADERS::response &res)
-{
-  if (!exportHeadersToFile(req.filename))
-  {
-    res.status = "Failed";
-    return false;
-  }
-  res.status = CORE_RPC_STATUS_OK;
-  return true;
-}
-
 bool RpcServer::on_get_spv_outputs(const COMMAND_RPC_GET_SPV_OUTPUTS::request &req,
                                    COMMAND_RPC_GET_SPV_OUTPUTS::response &res)
 {
@@ -2148,124 +2079,44 @@ bool RpcServer::on_get_spv_outputs(const COMMAND_RPC_GET_SPV_OUTPUTS::request &r
   res.status = CORE_RPC_STATUS_OK;
   return true;
 }
-
-bool RpcServer::on_get_wallet_snapshot(const COMMAND_RPC_GET_WALLET_SNAPSHOT::request &req,
-                                       COMMAND_RPC_GET_WALLET_SNAPSHOT::response &res)
+bool RpcServer::on_get_filter_records(const COMMAND_RPC_GET_FILTER_RECORDS::request &req,
+                                      COMMAND_RPC_GET_FILTER_RECORDS::response &res)
 {
-  try
+  uint32_t currentHeight = m_core.get_current_blockchain_height();
+  if (currentHeight == 0)
   {
-    // ── Parse tx_pub_keys from hex ──────────────────────────────────────
-    std::vector<crypto::PublicKey> tx_pub_keys;
-    tx_pub_keys.reserve(req.tx_pub_keys.size());
-    for (const auto &hex : req.tx_pub_keys)
-    {
-      crypto::PublicKey pk;
-      if (common::podFromHex(hex, pk))
-        tx_pub_keys.push_back(pk);
-    }
+    throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_INTERNAL_ERROR,
+                                "Blockchain not initialized");
+  }
 
-    if (!!m_core.getMdbxStorage())
-    {
-      // Fallback: no MDBX indexes available — return empty snapshot
-      std::ostringstream json;
-      json << "{"
-           << "\"current_height\":" << m_core.get_current_blockchain_height() << ","
-           << "\"wallet_height\":" << m_core.get_current_blockchain_height() << ","
-           << "\"output_count\":0,"
-           << "\"spent_key_image_count\":0,"
-           << "\"new_tx_pub_key_count\":0,"
-           << "\"outputs\":[],"
-           << "\"spent_key_images\":[],"
-           << "\"new_tx_pub_keys\":[]"
-           << "}";
-      res.snapshot = json.str();
-      res.status = CORE_RPC_STATUS_OK;
-      return true;
-    }
+  uint32_t start = req.start_height;
+  uint32_t end = std::min(req.end_height, currentHeight - 1);
 
-    auto storage = m_core.getMdbxStorage();
-
-    // ── Fast path: query pre-computed indexes ───────────────────────────
-    std::vector<CryptoNote::WalletOutputInfo> outputs;
-    std::unordered_set<std::string> spent_key_images;
-
-    if (!storage->getOutputsByTxPubKeys(tx_pub_keys, outputs, spent_key_images))
-    {
-      res.status = "Failed to get outputs from index";
-      return false;
-    }
-
-    // ── Get new tx_pub_keys since wallet's last scan ────────────────────
-    uint32_t current_height = m_core.get_current_blockchain_height();
-    uint32_t from_height = req.wallet_height > 0 ? req.wallet_height + 1 : 0;
-    std::vector<crypto::PublicKey> new_keys;
-    if (from_height <= current_height)
-      new_keys = storage->getNewTxPubKeys(from_height, current_height);
-
-    // ── Build JSON response manually ────────────────────────────────────
-    std::ostringstream json;
-    json << "{";
-
-    // Metadata
-    json << "\"current_height\":" << current_height << ",";
-    json << "\"wallet_height\":" << current_height << ",";
-    json << "\"output_count\":" << outputs.size() << ",";
-    json << "\"spent_key_image_count\":" << spent_key_images.size() << ",";
-    json << "\"new_tx_pub_key_count\":" << new_keys.size() << ",";
-
-    // Outputs array
-    json << "\"outputs\":[";
-    for (size_t i = 0; i < outputs.size(); ++i)
-    {
-      const auto &out = outputs[i];
-      if (i > 0)
-        json << ",";
-      json << "{"
-           << "\"height\":" << out.block_height << ","
-           << "\"tx_hash\":\"" << common::podToHex(out.tx_hash) << "\","
-           << "\"amount\":" << out.amount << ","
-           << "\"output_index\":" << out.output_index << ","
-           << "\"output_key\":\"" << common::podToHex(out.output_key) << "\","
-           << "\"tx_pubkey\":\"" << common::podToHex(out.tx_public_key) << "\""
-           << "}";
-    }
-    json << "],";
-
-    // Spent key images array (wallet derives these client-side and checks membership)
-    json << "\"spent_key_images\":[";
-    {
-      bool first = true;
-      for (const auto &ki_hex : spent_key_images)
-      {
-        if (!first)
-          json << ",";
-        json << "\"" << ki_hex << "\"";
-        first = false;
-      }
-    }
-    json << "],";
-
-    // New tx_pub_keys the wallet should add to its known set
-    json << "\"new_tx_pub_keys\":[";
-    for (size_t i = 0; i < new_keys.size(); ++i)
-    {
-      if (i > 0)
-        json << ",";
-      json << "\"" << common::podToHex(new_keys[i]) << "\"";
-    }
-    json << "]";
-
-    json << "}";
-
-    res.snapshot = json.str();
+  if (start > end)
+  {
     res.status = CORE_RPC_STATUS_OK;
     return true;
   }
-  catch (const std::exception &e)
+
+  // Limit range to prevent abuse
+  const uint32_t MAX_RANGE = 10000;
+  if (end - start > MAX_RANGE)
   {
-    logger(logging::ERROR) << "on_get_wallet_snapshot error: " << e.what();
-    res.status = std::string("Error: ") + e.what();
-    return false;
+    end = start + MAX_RANGE;
   }
+
+  res.records.reserve(end - start + 1);
+
+  for (uint32_t h = start; h <= end; ++h)
+  {
+    BlockFilterRecord record;
+    if (m_core.getBlockFilterRecord(h, record))
+    {
+      res.records.push_back(std::move(record));
+    }
+  }
+
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
 }
 }

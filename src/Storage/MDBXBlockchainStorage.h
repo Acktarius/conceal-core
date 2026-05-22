@@ -6,12 +6,10 @@
 #pragma once
 
 #include "IBlockchainStorage.h"
-#include "CryptoNoteCore/CryptoNoteBasic.h"
 
 #include <mdbx.h>
 #include <mutex>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace CryptoNote
@@ -20,7 +18,7 @@ namespace CryptoNote
   class MDBXBlockchainStorage : public IBlockchainStorage
   {
   public:
-    explicit MDBXBlockchainStorage(const std::string &dataDir, bool enableWalletIndexes = false);
+    explicit MDBXBlockchainStorage(const std::string &dataDir);
     ~MDBXBlockchainStorage() override;
 
     // Lifecycle
@@ -51,29 +49,12 @@ namespace CryptoNote
     std::vector<cn::BinaryArray> loadPoolTransactions() const override;
     std::vector<crypto::KeyImage> loadPoolSpentKeyImages() const override;
 
-    // Wallet instant import - indexing (called during block processing)
-    void indexOutputByTxPubKey(const crypto::PublicKey &tx_pub_key,
-                               uint32_t height,
-                               uint32_t tx_index,
-                               uint16_t output_index,
-                               const crypto::Hash &tx_hash,
-                               uint64_t amount,
-                               const crypto::PublicKey &output_key) override;
-
-    void indexSpentKeyImage(const crypto::KeyImage &key_image,
-                            const crypto::PublicKey &tx_pub_key,
-                            uint32_t spent_height) override;
-
-    // Wallet instant import - querying (called from RPC)
-    bool getOutputsByTxPubKeys(const std::vector<crypto::PublicKey> &tx_pub_keys,
-                               std::vector<WalletOutputInfo> &outputs,
-                               std::unordered_set<std::string> &spent_key_images) const override;
-
-    std::vector<crypto::PublicKey> getNewTxPubKeys(uint32_t startHeight,
-                                                   uint32_t endHeight) const override;
-
-    // Spent key image check (for wallet tools)
-    bool isSpentKeyImage(const crypto::KeyImage &keyImage) const;
+    // Filter database
+    void storeBlockFilterRecord(uint32_t height,
+                                const cn::BlockFilterRecord &record) override;
+    bool getBlockFilterRecord(uint32_t height,
+                              cn::BlockFilterRecord &record) const override;
+    bool hasBlockFilterRecord(uint32_t height) const override;
 
     // Diagnostics
     std::string printDatabaseStats() const;
@@ -83,12 +64,7 @@ namespace CryptoNote
     MDBX_dbi getDbiBlockEntries() const { return m_dbiBlockEntries; }
     MDBX_dbi getDbiBlockHeaders() const { return m_dbiBlockHeaders; }
     MDBX_dbi getDbiHeights() const { return m_dbiHeights; }
-
-    // Used for rebuilding wallet indexes
-    MDBX_dbi getDbiTxPubKeyOutputs() const { return m_dbiTxPubKeyOutputs; }
-    MDBX_dbi getDbiOutputDetails() const { return m_dbiOutputDetails; }
-    MDBX_dbi getDbiKeyImageOwner() const { return m_dbiKeyImageOwner; }
-    MDBX_dbi getDbiTxPubKeySeen() const { return m_dbiTxPubKeySeen; }
+    MDBX_dbi getDbiFilterRecords() const { return m_dbiFilterRecords; }
 
   private:
     // Environment & database setup
@@ -98,8 +74,7 @@ namespace CryptoNote
     // Key helpers
     static std::string blockEntryKey(uint32_t height);
     static std::string blockHeaderKey(uint32_t height);
-    static std::string makeOutputDetailsKey(uint32_t height, uint32_t tx_idx, uint16_t out_idx);
-    static std::string makeKeyImageOwnerKey(const crypto::KeyImage &ki);
+    static std::string filterRecordKey(uint32_t height);
 
     static constexpr int kHeightKeyWidth = 8;
 
@@ -111,17 +86,11 @@ namespace CryptoNote
 
     // MDBX handles
     MDBX_env *m_env = nullptr;
-    MDBX_dbi m_dbiBlockEntries; // "be_XXXXXXXX" → serialized BlockEntry
-    MDBX_dbi m_dbiBlockHeaders; // "hdr_XXXXXXXX" → BlockHeaderPOD
-    MDBX_dbi m_dbiHeights;      // uint32_t height → crypto::Hash
-    MDBX_dbi m_dbiPoolState;    // "pool_tx_N" / "pool_ki_N" → binary blobs
-
-    // Wallet instant import indexes
-    bool m_enableWalletIndexes = false;
-    MDBX_dbi m_dbiTxPubKeyOutputs; // "txpk_<hex>" → list of OutputRef
-    MDBX_dbi m_dbiOutputDetails;   // "od_<height><txidx><outidx>" → WalletOutputInfo
-    MDBX_dbi m_dbiKeyImageOwner;   // "kio_<hex>" → KeyImageOwner
-    MDBX_dbi m_dbiTxPubKeySeen;    // "txpkseen_<hex>" → TxPubKeySeen
+    MDBX_dbi m_dbiBlockEntries;  // "be_XXXXXXXX" → serialized BlockEntry
+    MDBX_dbi m_dbiBlockHeaders;  // "hdr_XXXXXXXX" → BlockHeaderPOD
+    MDBX_dbi m_dbiHeights;       // uint32_t height → crypto::Hash
+    MDBX_dbi m_dbiPoolState;     // "pool_tx_N" / "pool_ki_N" → binary blobs
+    MDBX_dbi m_dbiFilterRecords; // "fr_XXXXXXXX" → serialized BlockFilterRecord
 
     // Thread safety
     mutable std::mutex m_txMutex;

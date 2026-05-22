@@ -14,17 +14,10 @@
 #include <unordered_set>
 #include <vector>
 
+#include "Blockchain/BlockchainFilter.h"
 #include "crypto/crypto.h"
-
 #include "CryptoNoteCore/CryptoNoteBasic.h"
-
 #include "Common/StringTools.h"
-
-// Forward declarations
-namespace CryptoNote
-{
-  class MDBXBlockchainStorage;
-}
 
 namespace cn
 {
@@ -49,23 +42,31 @@ namespace BoltRPC
     uint32_t term;
   };
 
+  struct FilterCandidate
+  {
+    uint32_t blockHeight;
+    uint16_t txIndex;
+    uint8_t outputIndex;
+    uint8_t expectedNullifier[4];
+  };
+
   struct SyncProgress
   {
     enum Phase
     {
       IDLE,
-      FETCHING_KEYS,    // Downloading tx_pub_keys from daemon
-      FETCHING_OUTPUTS, // Downloading candidate outputs
-      DERIVING,         // Locally deriving ownership
+      FETCHING_FILTERS, // Downloading filter records from daemon
+      FILTERING,        // Running two-pass filter locally
+      FETCHING_BLOCKS,  // Fetching full blocks for candidates
+      DERIVING,         // Full ECDH derivation on candidates
       INCREMENTAL,      // Normal background polling
       COMPLETE
     };
 
     Phase phase = IDLE;
-    uint32_t totalKeys = 0;
-    uint32_t processedKeys = 0;
-    uint32_t totalOutputs = 0;
-    uint32_t processedOutputs = 0;
+    uint32_t totalBlocks = 0;
+    uint32_t processedBlocks = 0;
+    uint32_t candidatesFound = 0;
     uint32_t ownedOutputs = 0;
     uint32_t currentHeight = 0;
     std::string errorMessage;
@@ -98,8 +99,6 @@ namespace BoltRPC
     // ── Getters ────────────────────────────────────────────────────────────
     uint32_t lastScannedHeight() const { return m_lastScannedHeight.load(); }
     bool isActive() const { return m_active.load(); }
-    bool isFirstSync() const { return m_knownTxPubKeys.empty(); }
-    const std::vector<crypto::PublicKey> &knownTxPubKeys() const { return m_knownTxPubKeys; }
 
   private:
     // ── Internal sync methods ──────────────────────────────────────────────
@@ -108,28 +107,32 @@ namespace BoltRPC
     void doIncrementalSync(SyncProgress &progress);
 
     // ── Daemon communication ───────────────────────────────────────────────
-    bool callGetWalletSnapshot(
-        const std::vector<crypto::PublicKey> &txPubKeys,
-        uint32_t walletHeight,
-        std::vector<OutputInfo> &outputs,
-        std::unordered_set<std::string> &spentKeyImages,
-        std::vector<crypto::PublicKey> &newTxPubKeys,
-        uint32_t &currentHeight);
+    bool callGetFilterRecords(uint32_t startHeight, uint32_t endHeight,
+                              std::vector<cn::BlockFilterRecord> &records,
+                              uint32_t &chainHeight);
 
-    // ── Local derivation ───────────────────────────────────────────────────
-    void deriveOwnedOutputs(
-        const std::vector<OutputInfo> &candidates,
-        const std::unordered_set<std::string> &spentKeyImages,
-        std::vector<OutputInfo> &owned);
+    bool callGetBlocks(const std::vector<uint32_t> &heights,
+                       std::vector<cn::Block> &blocks,
+                       std::vector<std::vector<cn::Transaction>> &transactions);
 
-    bool isOurOutput(const OutputInfo &candidate) const;
-    crypto::KeyImage deriveKeyImage(const OutputInfo &output) const;
+    // ── Two-pass filter ────────────────────────────────────────────────────
+    void runFilterPass(const std::vector<cn::BlockFilterRecord> &records,
+                       std::vector<FilterCandidate> &candidates);
+
+    // ── Full derivation on candidates ──────────────────────────────────────
+    void deriveFromCandidates(const std::vector<FilterCandidate> &candidates,
+                              const std::vector<cn::Block> &blocks,
+                              const std::vector<std::vector<cn::Transaction>> &transactions,
+                              std::vector<OutputInfo> &owned);
+
+    bool isOurOutput(const crypto::PublicKey &txPubKey,
+                     size_t outputIndex,
+                     const crypto::PublicKey &outputKey) const;
 
     // ── Persistence ────────────────────────────────────────────────────────
-    void loadCachedKeys();
-    void saveCachedKeys();
-    std::string keysCachePath() const;
-    void addKnownKey(const crypto::PublicKey &txPubKey);
+    void loadProgress();
+    void saveProgress();
+    std::string progressPath() const;
 
     // ── Members ────────────────────────────────────────────────────────────
     cn::INode &m_node;
@@ -143,15 +146,14 @@ namespace BoltRPC
     std::atomic<bool> m_stop{false};
     std::atomic<bool> m_triggerSync{false};
 
-    std::vector<crypto::PublicKey> m_knownTxPubKeys;
-    mutable std::mutex m_keysMutex;
-
     ProgressCallback m_onProgress;
     OutputCallback m_onOutputs;
     std::thread m_thread;
 
     static constexpr uint32_t POLL_INTERVAL_SECONDS = 30;
-    static constexpr size_t MAX_OUTPUTS_PER_CALL = 50000;
+    static constexpr uint32_t FILTER_BATCH_SIZE = 1000; // blocks per get_filter_records call
+    static constexpr uint32_t BLOCK_BATCH_SIZE = 100;   // blocks per get_blocks call
+    static constexpr uint32_t MAX_OUTPUTS_PER_CALL = 50000;
   };
 
 } // namespace BoltRPC

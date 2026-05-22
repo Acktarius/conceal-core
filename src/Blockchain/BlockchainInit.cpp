@@ -10,7 +10,7 @@
 #include "Common/StringTools.h"
 
 #include "CryptoNoteCore/CryptoNoteTools.h"
-#include "CryptoNoteCore/TransactionApiExtra.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 
 #include "Serialization/SerializationTools.h"
 
@@ -20,28 +20,14 @@
 
 namespace cn
 {
-  // ─── Helper: extract tx public key from extra field ────────────────────
-
-  namespace
-  {
-
-    crypto::PublicKey getTxPublicKeyFromExtra(const std::vector<uint8_t> &extra)
-    {
-      crypto::PublicKey tx_pub_key = cn::getTransactionPublicKeyFromExtra(extra);
-      if (tx_pub_key == cn::NULL_PUBLIC_KEY)
-        return cn::NULL_PUBLIC_KEY;
-      return tx_pub_key;
-    }
-
-  } // anonymous namespace
 
   // ─── MDBX Storage Initialisation ───────────────────────────────────────
 
-  bool Blockchain::initMdbxStorage(const std::string &config_folder, bool enableWalletIndexes)
+  bool Blockchain::initMdbxStorage(const std::string &config_folder)
   {
     logger(logging::INFO) << "Initializing MDBX storage backend...";
     m_mdbxStorage.reset(new CryptoNote::MDBXBlockchainStorage(
-        PathHelpers::appendPath(config_folder, "mdbx_blocks"), enableWalletIndexes));
+        PathHelpers::appendPath(config_folder, "mdbx_blocks")));
 
     m_cacheIndex = 0;
     m_cachedEntries.clear();
@@ -50,15 +36,11 @@ namespace cn
     return true;
   }
 
-  void Blockchain::setEnableWalletIndexes(bool enable) { m_enableWalletIndexes = enable; }
-
   // ─── Full Index Rebuild ───────────────────────────────────────────────
 
-  void Blockchain::rebuildMdbxIndex(bool rebuildWalletIndexes)
+  void Blockchain::rebuildMdbxIndex()
   {
     logger(logging::INFO) << "Rebuilding in-memory index from MDBX...";
-    if (rebuildWalletIndexes)
-      logger(logging::INFO) << "Wallet index rebuilding ENABLED";
 
     m_blockHashes.clear();
     m_hashToHeight.clear();
@@ -70,42 +52,6 @@ namespace cn
     m_timestampIndex.clear();
     m_generatedTransactionsIndex.clear();
     m_paymentIdIndex.clear();
-
-    // ── Grab MDBX handles for batched wallet index writes ──────────────
-    MDBX_env *env = nullptr;
-    MDBX_dbi dbiTxPubKeyOutputs = 0, dbiOutputDetails = 0, dbiKeyImageOwner = 0, dbiTxPubKeySeen = 0;
-    if (rebuildWalletIndexes && m_mdbxStorage)
-    {
-      env = m_mdbxStorage->getEnv();
-      dbiTxPubKeyOutputs = m_mdbxStorage->getDbiTxPubKeyOutputs();
-      dbiOutputDetails = m_mdbxStorage->getDbiOutputDetails();
-      dbiKeyImageOwner = m_mdbxStorage->getDbiKeyImageOwner();
-      dbiTxPubKeySeen = m_mdbxStorage->getDbiTxPubKeySeen();
-    }
-
-    // ── Key helpers for wallet index databases ─────────────────────────
-    auto makeOutputDetailsKey = [](uint32_t height, uint32_t tx_idx, uint16_t out_idx) -> std::string
-    {
-      std::ostringstream oss;
-      oss << "od_"
-          << std::setw(8) << std::setfill('0') << height << "_"
-          << std::setw(6) << std::setfill('0') << tx_idx << "_"
-          << std::setw(4) << std::setfill('0') << out_idx;
-      return oss.str();
-    };
-
-    auto makeKeyImageOwnerKey = [](const crypto::KeyImage &ki) -> std::string
-    {
-      return "kio_" + common::podToHex(ki);
-    };
-
-    auto toMdbxVal = [](const void *data, size_t len) -> MDBX_val
-    {
-      MDBX_val v;
-      v.iov_base = const_cast<void *>(data);
-      v.iov_len = len;
-      return v;
-    };
 
     uint32_t topHeight = m_mdbxStorage->topBlockHeight();
 
@@ -135,15 +81,6 @@ namespace cn
       // Generated transactions index
       m_generatedTransactionsIndex.add(entry.bl);
 
-      // ── Batched wallet index transaction for this block ──────────────
-      MDBX_txn *walletTxn = nullptr;
-      if (rebuildWalletIndexes && env)
-      {
-        int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &walletTxn);
-        if (rc != MDBX_SUCCESS)
-          walletTxn = nullptr;
-      }
-
       // Process transactions
       for (uint32_t t = 0; t < entry.transactions.size(); ++t)
       {
@@ -155,8 +92,6 @@ namespace cn
         // Payment ID index
         m_paymentIdIndex.add(tx_entry.tx);
 
-        crypto::PublicKey txPubKey = getTxPublicKeyFromExtra(tx_entry.tx.extra);
-
         // Spent key images
         for (const auto &input : tx_entry.tx.inputs)
         {
@@ -164,19 +99,6 @@ namespace cn
           {
             const auto &ki = boost::get<KeyInput>(input);
             m_spent_keys.insert(std::make_pair(ki.keyImage, h));
-
-            // ── Wallet index: key_image_owner ────────────────────────
-            if (walletTxn)
-            {
-              std::string kiKey = makeKeyImageOwnerKey(ki.keyImage);
-              CryptoNote::KeyImageOwner owner;
-              owner.tx_pub_key = txPubKey;
-              owner.spent_height = h;
-              cn::BinaryArray ownerBa = cn::toBinaryArray(owner);
-              MDBX_val mk = toMdbxVal(kiKey.data(), kiKey.size());
-              MDBX_val mv = toMdbxVal(ownerBa.data(), ownerBa.size());
-              mdbx_put(walletTxn, dbiKeyImageOwner, &mk, &mv, MDBX_UPSERT);
-            }
           }
           else if (input.type() == typeid(MultisignatureInput))
           {
@@ -191,66 +113,7 @@ namespace cn
           const auto &out = tx_entry.tx.outputs[o];
           if (out.target.type() == typeid(KeyOutput))
           {
-            const KeyOutput &key_out = boost::get<KeyOutput>(out.target);
             m_outputs[out.amount].push_back(std::make_pair<>(txIdx, o));
-
-            // ── Wallet index: output_details + tx_pubkey_outputs + tx_pubkey_seen
-            if (walletTxn && txPubKey != cn::NULL_PUBLIC_KEY)
-            {
-              // output_details
-              {
-                std::string detailsKey = makeOutputDetailsKey(h, t, static_cast<uint16_t>(o));
-                CryptoNote::WalletOutputInfo info;
-                info.block_height = h;
-                info.tx_hash = txHash;
-                info.amount = out.amount;
-                info.output_index = static_cast<uint16_t>(o);
-                info.output_key = key_out.key;
-                info.tx_public_key = txPubKey;
-                cn::BinaryArray infoBa = cn::toBinaryArray(info);
-                MDBX_val mk = toMdbxVal(detailsKey.data(), detailsKey.size());
-                MDBX_val mv = toMdbxVal(infoBa.data(), infoBa.size());
-                mdbx_put(walletTxn, dbiOutputDetails, &mk, &mv, MDBX_UPSERT);
-              }
-
-              // tx_pubkey_outputs
-              {
-                std::string pkHex = common::podToHex(txPubKey);
-                std::string pkKey = "txpk_" + pkHex;
-                MDBX_val mk = toMdbxVal(pkKey.data(), pkKey.size());
-                MDBX_val existingVal;
-                std::vector<CryptoNote::OutputRef> refs;
-                if (mdbx_get(walletTxn, dbiTxPubKeyOutputs, &mk, &existingVal) == MDBX_SUCCESS)
-                {
-                  refs.resize(existingVal.iov_len / sizeof(CryptoNote::OutputRef));
-                  memcpy(refs.data(), existingVal.iov_base, existingVal.iov_len);
-                }
-                CryptoNote::OutputRef ref{h, t, static_cast<uint16_t>(o)};
-                refs.push_back(ref);
-                MDBX_val mv = toMdbxVal(refs.data(), refs.size() * sizeof(CryptoNote::OutputRef));
-                mdbx_put(walletTxn, dbiTxPubKeyOutputs, &mk, &mv, MDBX_UPSERT);
-              }
-
-              // tx_pubkey_seen
-              {
-                std::string pkHex = common::podToHex(txPubKey);
-                std::string seenKey = "txpkseen_" + pkHex;
-                MDBX_val mk = toMdbxVal(seenKey.data(), seenKey.size());
-                MDBX_val existingVal;
-                CryptoNote::TxPubKeySeen seen = {h, h};
-                if (mdbx_get(walletTxn, dbiTxPubKeySeen, &mk, &existingVal) == MDBX_SUCCESS &&
-                    existingVal.iov_len == sizeof(CryptoNote::TxPubKeySeen))
-                {
-                  memcpy(&seen, existingVal.iov_base, sizeof(seen));
-                  if (h < seen.first_seen)
-                    seen.first_seen = h;
-                  if (h > seen.last_seen)
-                    seen.last_seen = h;
-                }
-                MDBX_val mv = toMdbxVal(&seen, sizeof(seen));
-                mdbx_put(walletTxn, dbiTxPubKeySeen, &mk, &mv, MDBX_UPSERT);
-              }
-            }
           }
           else if (out.target.type() == typeid(MultisignatureOutput))
           {
@@ -258,14 +121,6 @@ namespace cn
             m_multisignatureOutputs[out.amount].push_back(usage);
           }
         }
-      }
-
-      // ── Commit wallet index transaction for this block ──────────────
-      if (walletTxn)
-      {
-        int rc = mdbx_txn_commit(walletTxn);
-        if (rc != MDBX_SUCCESS)
-          mdbx_txn_abort(walletTxn);
       }
 
       // Deposit index
@@ -280,7 +135,7 @@ namespace cn
 
   // ─── MDBX Init ────────────────────────────────────────────────────────
 
-  bool Blockchain::initMdbx(bool load_existing, bool rebuildWalletIndexes)
+  bool Blockchain::initMdbx(bool load_existing)
   {
     auto mdbxStart = std::chrono::steady_clock::now();
 
@@ -301,7 +156,7 @@ namespace cn
       m_paymentIdIndex.clear();
 
       // Always rebuild from MDBX — single source of truth
-      rebuildMdbxIndex(rebuildWalletIndexes);
+      rebuildMdbxIndex();
     }
 
     auto mdbxEnd = std::chrono::steady_clock::now();
@@ -371,7 +226,7 @@ namespace cn
 
   // ─── Main Init ────────────────────────────────────────────────────────
 
-  bool Blockchain::init(const std::string &config_folder, bool load_existing, bool testnet, bool rebuildWalletIndexes)
+  bool Blockchain::init(const std::string &config_folder, bool load_existing, bool testnet)
   {
     try
     {
@@ -388,9 +243,9 @@ namespace cn
       m_config_folder = config_folder;
 
       // ── Storage backend ────────────────────────────────────────────
-      if (!initMdbxStorage(config_folder, m_enableWalletIndexes || rebuildWalletIndexes))
+      if (!initMdbxStorage(config_folder))
         return false;
-      if (!initMdbx(load_existing, rebuildWalletIndexes))
+      if (!initMdbx(load_existing))
         return false;
 
       // ── Genesis ────────────────────────────────────────────────────
@@ -568,6 +423,22 @@ namespace cn
 
     m_mdbxStorage->flush();
     return true;
+  }
+
+  // ─── Filter database access ───────────────────────────────────────────
+
+  bool Blockchain::getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const
+  {
+    if (!m_mdbxStorage)
+      return false;
+    return m_mdbxStorage->getBlockFilterRecord(height, record);
+  }
+
+  bool Blockchain::hasBlockFilterRecord(uint32_t height) const
+  {
+    if (!m_mdbxStorage)
+      return false;
+    return m_mdbxStorage->hasBlockFilterRecord(height);
   }
 
   // ─── Reset ────────────────────────────────────────────────────────────

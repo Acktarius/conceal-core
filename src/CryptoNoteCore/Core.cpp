@@ -185,9 +185,7 @@ namespace cn
       return false;
     }
 
-    m_blockchain.setEnableWalletIndexes(config.enableWalletIndexes);
-
-    r = m_blockchain.init(m_config_folder, load_existing, config.testnet, config.rebuildWalletIndexes);
+    r = m_blockchain.init(m_config_folder, load_existing, config.testnet);
     if (!(r))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to initialize blockchain storage";
@@ -1359,5 +1357,10 @@ namespace cn
   CryptoNote::MDBXBlockchainStorage *core::getMdbxStorage() const
   {
     return m_blockchain.getMdbxStorage();
+  }
+
+  bool core::getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const
+  {
+    return m_blockchain.getBlockFilterRecord(height, record);
   }
 }
