@@ -117,6 +117,7 @@ namespace BoltRPC
     void startSync(StatusCallback onStatus);
     void stopSync();
     void syncNow();
+    bool isSyncRunning() const;
 
     // ── Wallet queries ──────────────────────────────────────────────────────
     WalletStatus getStatus() const;
@@ -175,6 +176,11 @@ namespace BoltRPC
     std::unique_ptr<StateManager> m_stateManager;
     StatusCallback m_onStatus;
     mutable std::mutex m_stateMutex;
+    mutable std::mutex m_syncProgressMutex;
+    SyncProgress m_syncProgress;
+
+    // Transaction building
+    // (In a full implementation, this would use the ring signature / bulletproof builder)
   };
 
 } // namespace BoltRPC
