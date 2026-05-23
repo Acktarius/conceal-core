@@ -397,6 +397,17 @@ namespace cn
       }
     }
 
+    // Update domain index for post-fork blocks
+    if (block.height >= parameters::UPGRADE_HEIGHT_V9)
+    {
+      m_domainIndex.processBlock(block.bl, block.height);
+      // Also process transactions for domain registrations/deletions
+      for (uint32_t i = 1; i < block.transactions.size(); ++i)
+      {
+        m_domainIndex.extractFromTransaction(block.transactions[i].tx, block.height, i);
+      }
+    }
+
     // Update in-memory index
     if (height >= m_blockHashes.size())
     {

@@ -354,6 +354,7 @@ struct COMMAND_RPC_GET_INFO {
     uint64_t last_block_timestamp;
     uint64_t last_block_difficulty;
     std::vector<std::string> connections;
+    uint64_t upgrade_height_v9;
 
     void serialize(ISerializer &s) {
       KV_MEMBER(status)
@@ -376,7 +377,8 @@ struct COMMAND_RPC_GET_INFO {
       KV_MEMBER(last_block_reward)
       KV_MEMBER(last_block_timestamp)
       KV_MEMBER(last_block_difficulty)
-      KV_MEMBER(connections)      
+      KV_MEMBER(connections)
+      KV_MEMBER(upgrade_height_v9)
     }
   };
 };
@@ -1294,6 +1296,49 @@ struct COMMAND_RPC_GET_FILTER_RECORDS
     void serialize(ISerializer &s)
     {
       KV_MEMBER(records)
+      KV_MEMBER(status)
+    }
+  };
+};
+
+struct COMMAND_RPC_GET_DOMAIN
+{
+  struct request
+  {
+    std::string domain;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(domain)
+    }
+  };
+
+  struct response
+  {
+    std::string domain;
+    uint8_t tier;
+    std::string domain_pub;
+    std::string domain_view_pub;
+    std::string encrypted_addr;
+    std::string metadata;
+    uint32_t registration_height;
+    uint32_t transaction_index;
+    uint32_t output_index;
+    std::string tx_hash;
+    std::string status;
+
+    void serialize(ISerializer &s)
+    {
+      KV_MEMBER(domain)
+      KV_MEMBER(tier)
+      KV_MEMBER(domain_pub)
+      KV_MEMBER(domain_view_pub)
+      KV_MEMBER(encrypted_addr)
+      KV_MEMBER(metadata)
+      KV_MEMBER(registration_height)
+      KV_MEMBER(transaction_index)
+      KV_MEMBER(output_index)
+      KV_MEMBER(tx_hash)
       KV_MEMBER(status)
     }
   };

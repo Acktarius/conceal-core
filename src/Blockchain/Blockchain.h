@@ -35,6 +35,7 @@
 #include "CryptoNoteCore/TransactionPool.h"
 #include "Logging/LoggerRef.h"
 #include "Storage/MDBXBlockchainStorage.h"
+#include "CryptoNoteCore/DomainIndex.h"
 
 #define CURRENT_BLOCKCACHE_STORAGE_ARCHIVE_VER 5
 #define CURRENT_BLOCKCHAININDICES_STORAGE_ARCHIVE_VER 1
@@ -271,6 +272,9 @@ namespace cn
     bool getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const;
     bool hasBlockFilterRecord(uint32_t height) const;
 
+    const DomainIndex &getDomainIndex() const { return m_domainIndex; }
+    DomainIndex &getDomainIndex() { return m_domainIndex; }
+
     // Debug
     void print_blockchain(uint64_t start_index, uint64_t end_index);
     void print_blockchain_index(bool print_all);
@@ -376,6 +380,9 @@ namespace cn
 
     // Deposit tracking
     cn::DepositIndex m_depositIndex;
+
+    // Domain name system
+    DomainIndex m_domainIndex;
 
     // Upgrade detectors
     BasicUpgradeDetector m_upgradeDetectorV2;

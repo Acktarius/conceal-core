@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "Blockchain/BlockchainFilter.h"
+#include "BoltSync/BoltSync.h"
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "Common/StringTools.h"
@@ -54,11 +55,12 @@ namespace BoltRPC
     enum Phase
     {
       IDLE,
-      FETCHING_FILTERS, // Downloading filter records from daemon
-      FILTERING,        // Running view-tag filter locally
-      FETCHING_BLOCKS,  // Fetching full blocks for candidates
-      DERIVING,         // Full ECDH derivation on candidates
-      INCREMENTAL,      // Normal background polling
+      FETCHING_FILTERS,   // Pre-fork: downloading filter records
+      FILTERING,          // Pre-fork: running view-tag filter locally
+      FETCHING_BLOCKS,    // Fetching full blocks (post-fork batches or candidate blocks)
+      SCANNING_POST_FORK, // Post-fork: scanning blocks with on-chain view tags
+      DERIVING,           // Full ECDH derivation on candidates
+      INCREMENTAL,        // Normal background polling
       COMPLETE
     };
 
@@ -105,6 +107,16 @@ namespace BoltRPC
     void doBootstrap(SyncProgress &progress);
     void doIncrementalSync(SyncProgress &progress);
 
+    // ── Pre-fork: filter-based sync ────────────────────────────────────────
+    bool syncPreForkFilters(uint32_t startHeight, uint32_t endHeight,
+                            SyncProgress &progress,
+                            std::vector<OutputInfo> &owned);
+
+    // ── Post-fork: direct block scanning with on-chain view tags ───────────
+    void scanPostForkBlocks(uint32_t startHeight, uint32_t endHeight,
+                            SyncProgress &progress,
+                            std::vector<OutputInfo> &owned);
+
     // ── Daemon communication ───────────────────────────────────────────────
     bool callGetFilterRecords(uint32_t startHeight, uint32_t endHeight,
                               std::vector<cn::BlockFilterRecord> &records,
@@ -118,7 +130,7 @@ namespace BoltRPC
     void runFilterPass(const std::vector<cn::BlockFilterRecord> &records,
                        std::vector<FilterCandidate> &candidates);
 
-    // ── Full derivation on candidates ──────────────────────────────────────
+    // ── Full derivation on candidates (pre-fork only) ─────────────────────
     void deriveFromCandidates(const std::vector<FilterCandidate> &candidates,
                               const std::vector<cn::Block> &blocks,
                               const std::vector<std::vector<cn::Transaction>> &transactions,
@@ -127,6 +139,9 @@ namespace BoltRPC
     bool isOurOutput(const crypto::PublicKey &txPubKey,
                      size_t outputIndex,
                      const crypto::PublicKey &outputKey) const;
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    uint32_t getForkHeight() const;
 
     // ── Persistence ────────────────────────────────────────────────────────
     void loadProgress();
@@ -149,10 +164,11 @@ namespace BoltRPC
     OutputCallback m_onOutputs;
     std::thread m_thread;
 
-    static constexpr uint32_t POLL_INTERVAL_SECONDS = 30;
-    static constexpr uint32_t FILTER_BATCH_SIZE = 1000; // blocks per get_filter_records call
-    static constexpr uint32_t BLOCK_BATCH_SIZE = 100;   // blocks per get_blocks call
-    static constexpr uint32_t MAX_OUTPUTS_PER_CALL = 50000;
+    static const uint32_t POLL_INTERVAL_SECONDS = 30;
+    static const uint32_t FILTER_BATCH_SIZE = 1000;
+    static const uint32_t BLOCK_BATCH_SIZE = 100;
+    static const uint32_t POST_FORK_BLOCK_BATCH = 100; // blocks per batch for post-fork scanning
+    static const uint32_t MAX_OUTPUTS_PER_CALL = 50000;
   };
 
 } // namespace BoltRPC

@@ -8,6 +8,8 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "INode.h"
 #include "Rpc/HttpClient.h"
+#include "BoltCore/NewOutputScanner.h"
+#include "CryptoNoteConfig.h"
 
 #include <algorithm>
 #include <cstring>
@@ -241,9 +243,6 @@ namespace BoltRPC
   void SyncManager::doBootstrap(SyncProgress &progress)
   {
     progress = SyncProgress();
-    progress.phase = SyncProgress::FETCHING_FILTERS;
-    if (m_onProgress)
-      m_onProgress(progress);
 
     // Step 1: Get chain height
     uint32_t chainHeight = 0;
@@ -270,128 +269,30 @@ namespace BoltRPC
       return;
     }
 
-    // Step 2: Download all filter records in batches
-    std::vector<cn::BlockFilterRecord> allRecords;
-    allRecords.reserve(chainHeight + 1);
+    uint32_t forkHeight = getForkHeight();
+    std::vector<OutputInfo> allOwned;
 
-    for (uint32_t h = 0; h <= chainHeight; h += FILTER_BATCH_SIZE)
-    {
-      if (m_stop.load())
-        return;
-
-      uint32_t end = std::min(h + FILTER_BATCH_SIZE - 1, chainHeight);
-      std::vector<cn::BlockFilterRecord> batch;
-      uint32_t dummyHeight;
-
-      if (!callGetFilterRecords(h, end, batch, dummyHeight))
-      {
-        progress.errorMessage = "Failed to fetch filter records at height " + std::to_string(h);
-        progress.phase = SyncProgress::COMPLETE;
-        if (m_onProgress)
-          m_onProgress(progress);
-        return;
-      }
-
-      allRecords.insert(allRecords.end(), batch.begin(), batch.end());
-      progress.processedBlocks = end;
-      if (m_onProgress)
-        m_onProgress(progress);
-    }
-
-    if (m_stop.load())
+    // Step 2: Sync pre-fork range with filters
+    uint32_t preForkEnd = std::min(chainHeight, forkHeight > 0 ? forkHeight - 1 : chainHeight);
+    if (!syncPreForkFilters(0, preForkEnd, progress, allOwned))
       return;
 
-    // Step 3: Run view-tag filter locally
-    progress.phase = SyncProgress::FILTERING;
-    if (m_onProgress)
-      m_onProgress(progress);
-
-    std::vector<FilterCandidate> candidates;
-    runFilterPass(allRecords, candidates);
-
-    // Free filter records — no longer needed
-    allRecords.clear();
-    allRecords.shrink_to_fit();
-
-    progress.candidatesFound = static_cast<uint32_t>(candidates.size());
-    if (m_onProgress)
-      m_onProgress(progress);
-
-    if (candidates.empty())
+    // Step 3: Sync post-fork range by scanning full blocks
+    if (chainHeight >= forkHeight)
     {
-      // No candidates found — wallet is empty or filters eliminated everything
-      m_lastScannedHeight.store(chainHeight);
-      saveProgress();
-      progress.phase = SyncProgress::COMPLETE;
-      if (m_onProgress)
-        m_onProgress(progress);
-      return;
+      scanPostForkBlocks(std::max(forkHeight, 0u), chainHeight, progress, allOwned);
     }
 
-    // Step 4: Fetch full blocks for candidate heights
-    progress.phase = SyncProgress::FETCHING_BLOCKS;
-    if (m_onProgress)
-      m_onProgress(progress);
-
-    // Collect unique block heights that contain candidates
-    std::set<uint32_t> candidateHeights;
-    for (const auto &c : candidates)
-      candidateHeights.insert(c.blockHeight);
-
-    std::vector<uint32_t> heights(candidateHeights.begin(), candidateHeights.end());
-
-    std::vector<cn::Block> blocks;
-    std::vector<std::vector<cn::Transaction>> transactions;
-
-    for (size_t i = 0; i < heights.size(); i += BLOCK_BATCH_SIZE)
-    {
-      if (m_stop.load())
-        return;
-
-      size_t endIdx = std::min(i + BLOCK_BATCH_SIZE, heights.size());
-      std::vector<uint32_t> batch(heights.begin() + i, heights.begin() + endIdx);
-
-      std::vector<cn::Block> batchBlocks;
-      std::vector<std::vector<cn::Transaction>> batchTxs;
-
-      if (!callGetBlocks(batch, batchBlocks, batchTxs))
-      {
-        progress.errorMessage = "Failed to fetch blocks for candidates";
-        progress.phase = SyncProgress::COMPLETE;
-        if (m_onProgress)
-          m_onProgress(progress);
-        return;
-      }
-
-      blocks.insert(blocks.end(), batchBlocks.begin(), batchBlocks.end());
-      transactions.insert(transactions.end(), batchTxs.begin(), batchTxs.end());
-
-      progress.processedBlocks = static_cast<uint32_t>(endIdx);
-      if (m_onProgress)
-        m_onProgress(progress);
-    }
-
-    if (m_stop.load())
-      return;
-
-    // Step 5: Full ECDH derivation on candidates
-    progress.phase = SyncProgress::DERIVING;
-    if (m_onProgress)
-      m_onProgress(progress);
-
-    std::vector<OutputInfo> owned;
-    deriveFromCandidates(candidates, blocks, transactions, owned);
-
-    progress.ownedOutputs = static_cast<uint32_t>(owned.size());
+    progress.ownedOutputs = static_cast<uint32_t>(allOwned.size());
     progress.phase = SyncProgress::COMPLETE;
     if (m_onProgress)
       m_onProgress(progress);
 
-    // Step 6: Report to wallet
-    if (m_onOutputs && !owned.empty())
+    // Report outputs
+    if (m_onOutputs && !allOwned.empty())
     {
       std::vector<crypto::KeyImage> empty;
-      m_onOutputs(owned, empty);
+      m_onOutputs(allOwned, empty);
     }
 
     m_lastScannedHeight.store(chainHeight);
@@ -408,78 +309,46 @@ namespace BoltRPC
     uint32_t walletHeight = m_lastScannedHeight.load();
     uint32_t chainHeight = 0;
 
-    // Get current chain height
     {
       std::vector<cn::BlockFilterRecord> dummy;
       if (!callGetFilterRecords(0, 0, dummy, chainHeight))
-        return; // Silently retry next poll
+        return;
     }
 
     if (chainHeight <= walletHeight)
-      return; // Nothing new
+      return;
 
     progress.totalBlocks = chainHeight;
     progress.currentHeight = chainHeight;
 
-    // Fetch new filter records
-    std::vector<cn::BlockFilterRecord> newRecords;
+    uint32_t forkHeight = getForkHeight();
     uint32_t startHeight = walletHeight + 1;
+    std::vector<OutputInfo> allOwned;
 
-    for (uint32_t h = startHeight; h <= chainHeight; h += FILTER_BATCH_SIZE)
+    // Pre-fork portion (if any)
+    if (startHeight < forkHeight)
     {
-      if (m_stop.load())
+      uint32_t preForkEnd = std::min(chainHeight, forkHeight - 1);
+      if (!syncPreForkFilters(startHeight, preForkEnd, progress, allOwned))
         return;
-
-      uint32_t end = std::min(h + FILTER_BATCH_SIZE - 1, chainHeight);
-      std::vector<cn::BlockFilterRecord> batch;
-      uint32_t dummyHeight;
-
-      if (!callGetFilterRecords(h, end, batch, dummyHeight))
-        return;
-
-      newRecords.insert(newRecords.end(), batch.begin(), batch.end());
     }
 
-    // Run filter
-    std::vector<FilterCandidate> candidates;
-    runFilterPass(newRecords, candidates);
-
-    if (candidates.empty())
+    // Post-fork portion (if any)
+    if (chainHeight >= forkHeight)
     {
-      m_lastScannedHeight.store(chainHeight);
-      saveProgress();
-      progress.phase = SyncProgress::COMPLETE;
-      if (m_onProgress)
-        m_onProgress(progress);
-      return;
+      uint32_t postForkStart = std::max(startHeight, forkHeight);
+      scanPostForkBlocks(postForkStart, chainHeight, progress, allOwned);
     }
 
-    // Fetch blocks for candidates
-    std::set<uint32_t> candidateHeights;
-    for (const auto &c : candidates)
-      candidateHeights.insert(c.blockHeight);
-
-    std::vector<uint32_t> heights(candidateHeights.begin(), candidateHeights.end());
-    std::vector<cn::Block> blocks;
-    std::vector<std::vector<cn::Transaction>> transactions;
-
-    if (!callGetBlocks(heights, blocks, transactions))
-      return;
-
-    // Derive
-    std::vector<OutputInfo> owned;
-    deriveFromCandidates(candidates, blocks, transactions, owned);
-
-    progress.ownedOutputs = static_cast<uint32_t>(owned.size());
-    progress.candidatesFound = static_cast<uint32_t>(candidates.size());
+    progress.ownedOutputs = static_cast<uint32_t>(allOwned.size());
     progress.phase = SyncProgress::COMPLETE;
     if (m_onProgress)
       m_onProgress(progress);
 
-    if (m_onOutputs && !owned.empty())
+    if (m_onOutputs && !allOwned.empty())
     {
       std::vector<crypto::KeyImage> empty;
-      m_onOutputs(owned, empty);
+      m_onOutputs(allOwned, empty);
     }
 
     m_lastScannedHeight.store(chainHeight);
@@ -797,4 +666,250 @@ namespace BoltRPC
     file.write(reinterpret_cast<const char *>(&height), sizeof(height));
   }
 
+  // ─── Fork height ────────────────────────────────────────────────────────────
+
+  uint32_t SyncManager::getForkHeight() const
+  {
+    // Hardcoded from CryptoNoteConfig — matches daemon's UPGRADE_HEIGHT_V9.
+    // Once the daemon exposes this via get_info, switch to RPC query.
+    return cn::parameters::UPGRADE_HEIGHT_V9;
+  }
+
+  // ─── Pre-fork: filter-based sync ────────────────────────────────────────────
+
+  bool SyncManager::syncPreForkFilters(uint32_t startHeight, uint32_t endHeight,
+                                       SyncProgress &progress,
+                                       std::vector<OutputInfo> &owned)
+  {
+    if (startHeight > endHeight)
+      return true;
+
+    progress.phase = SyncProgress::FETCHING_FILTERS;
+    if (m_onProgress)
+      m_onProgress(progress);
+
+    // Step 1: Download filter records for the pre-fork range
+    std::vector<cn::BlockFilterRecord> allRecords;
+    allRecords.reserve(endHeight - startHeight + 1);
+
+    for (uint32_t h = startHeight; h <= endHeight; h += FILTER_BATCH_SIZE)
+    {
+      if (m_stop.load())
+        return false;
+
+      uint32_t batchEnd = std::min(h + FILTER_BATCH_SIZE - 1, endHeight);
+      std::vector<cn::BlockFilterRecord> batch;
+      uint32_t dummyHeight;
+
+      if (!callGetFilterRecords(h, batchEnd, batch, dummyHeight))
+      {
+        progress.errorMessage = "Failed to fetch filter records at height " + std::to_string(h);
+        progress.phase = SyncProgress::COMPLETE;
+        if (m_onProgress)
+          m_onProgress(progress);
+        return false;
+      }
+
+      allRecords.insert(allRecords.end(), batch.begin(), batch.end());
+      progress.processedBlocks = batchEnd;
+      if (m_onProgress)
+        m_onProgress(progress);
+    }
+
+    if (m_stop.load())
+      return false;
+
+    // Step 2: Run view-tag filter locally
+    progress.phase = SyncProgress::FILTERING;
+    if (m_onProgress)
+      m_onProgress(progress);
+
+    std::vector<FilterCandidate> candidates;
+    runFilterPass(allRecords, candidates);
+
+    allRecords.clear();
+    allRecords.shrink_to_fit();
+
+    progress.candidatesFound = static_cast<uint32_t>(candidates.size());
+    if (m_onProgress)
+      m_onProgress(progress);
+
+    if (candidates.empty())
+      return true; // No owned outputs in this range
+
+    // Step 3: Fetch candidate blocks
+    progress.phase = SyncProgress::FETCHING_BLOCKS;
+    if (m_onProgress)
+      m_onProgress(progress);
+
+    std::set<uint32_t> candidateHeights;
+    for (const auto &c : candidates)
+      candidateHeights.insert(c.blockHeight);
+
+    std::vector<uint32_t> heights(candidateHeights.begin(), candidateHeights.end());
+
+    std::vector<cn::Block> blocks;
+    std::vector<std::vector<cn::Transaction>> transactions;
+
+    for (size_t i = 0; i < heights.size(); i += BLOCK_BATCH_SIZE)
+    {
+      if (m_stop.load())
+        return false;
+
+      size_t endIdx = std::min(i + BLOCK_BATCH_SIZE, heights.size());
+      std::vector<uint32_t> batch(heights.begin() + i, heights.begin() + endIdx);
+
+      std::vector<cn::Block> batchBlocks;
+      std::vector<std::vector<cn::Transaction>> batchTxs;
+
+      if (!callGetBlocks(batch, batchBlocks, batchTxs))
+      {
+        progress.errorMessage = "Failed to fetch candidate blocks";
+        progress.phase = SyncProgress::COMPLETE;
+        if (m_onProgress)
+          m_onProgress(progress);
+        return false;
+      }
+
+      blocks.insert(blocks.end(), batchBlocks.begin(), batchBlocks.end());
+      transactions.insert(transactions.end(), batchTxs.begin(), batchTxs.end());
+    }
+
+    if (m_stop.load())
+      return false;
+
+    // Step 4: Full ECDH derivation
+    progress.phase = SyncProgress::DERIVING;
+    if (m_onProgress)
+      m_onProgress(progress);
+
+    deriveFromCandidates(candidates, blocks, transactions, owned);
+
+    return true;
+  }
+
+  // ─── Post-fork: direct block scanning ────────────────────────────────────────
+
+  void SyncManager::scanPostForkBlocks(uint32_t startHeight, uint32_t endHeight,
+                                       SyncProgress &progress,
+                                       std::vector<OutputInfo> &owned)
+  {
+    if (startHeight > endHeight)
+      return;
+
+    progress.phase = SyncProgress::FETCHING_BLOCKS;
+    progress.totalBlocks = endHeight;
+    if (m_onProgress)
+      m_onProgress(progress);
+
+    for (uint32_t h = startHeight; h <= endHeight; h += POST_FORK_BLOCK_BATCH)
+    {
+      if (m_stop.load())
+        return;
+
+      uint32_t batchEnd = std::min(h + POST_FORK_BLOCK_BATCH - 1, endHeight);
+      std::vector<uint32_t> heights;
+      for (uint32_t bh = h; bh <= batchEnd; ++bh)
+        heights.push_back(bh);
+
+      std::vector<cn::Block> blocks;
+      std::vector<std::vector<cn::Transaction>> transactions;
+
+      if (!callGetBlocks(heights, blocks, transactions))
+      {
+        progress.errorMessage = "Failed to fetch blocks for post-fork scan at height " + std::to_string(h);
+        progress.phase = SyncProgress::COMPLETE;
+        if (m_onProgress)
+          m_onProgress(progress);
+        return;
+      }
+
+      progress.phase = SyncProgress::SCANNING_POST_FORK;
+      if (m_onProgress)
+        m_onProgress(progress);
+
+      // Scan each block's transactions with NewOutputScanner
+      for (size_t i = 0; i < blocks.size(); ++i)
+      {
+        if (m_stop.load())
+          return;
+
+        cn::Block &block = blocks[i];
+        std::vector<cn::Transaction> &txs = transactions[i];
+        uint32_t blockHeight = h + static_cast<uint32_t>(i);
+
+        // Get coinbase tx public key
+        crypto::PublicKey coinbaseTxPubKey = cn::getTransactionPublicKeyFromExtra(block.baseTransaction.extra);
+
+        static const crypto::PublicKey NULL_KEY = {};
+        if (coinbaseTxPubKey != NULL_KEY)
+        {
+          std::vector<BoltSync::FoundOutput> txResults;
+          std::vector<uint32_t> emptyIndexes; // Global indexes not available via RPC sync
+          BoltCore::NewOutputScanner::scanTransaction(
+              block.baseTransaction, coinbaseTxPubKey, emptyIndexes, blockHeight,
+              m_viewSecretKey, m_spendPublicKey, nullptr, txResults);
+
+          for (const auto &fo : txResults)
+          {
+            if (!fo.spent)
+            {
+              OutputInfo info;
+              info.blockHeight = fo.blockHeight;
+              info.txHash = fo.txHash;
+              info.amount = fo.amount;
+              info.outputIndex = fo.outputIndex;
+              info.outputKey = fo.outputKey;
+              info.txPublicKey = fo.txPublicKey;
+              info.spent = false;
+              info.isDeposit = fo.isDeposit;
+              info.term = fo.term;
+              owned.push_back(info);
+            }
+          }
+        }
+
+        // Scan each non-coinbase transaction
+        for (size_t txIdx = 0; txIdx < txs.size(); ++txIdx)
+        {
+          if (m_stop.load())
+            return;
+
+          cn::Transaction &tx = txs[txIdx];
+          crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
+
+          if (txPubKey == NULL_KEY)
+            continue;
+
+          std::vector<BoltSync::FoundOutput> txResults;
+          std::vector<uint32_t> emptyIndexes;
+          BoltCore::NewOutputScanner::scanTransaction(
+              tx, txPubKey, emptyIndexes, blockHeight,
+              m_viewSecretKey, m_spendPublicKey, nullptr, txResults);
+
+          for (const auto &fo : txResults)
+          {
+            if (!fo.spent)
+            {
+              OutputInfo info;
+              info.blockHeight = fo.blockHeight;
+              info.txHash = fo.txHash;
+              info.amount = fo.amount;
+              info.outputIndex = fo.outputIndex;
+              info.outputKey = fo.outputKey;
+              info.txPublicKey = fo.txPublicKey;
+              info.spent = false;
+              info.isDeposit = fo.isDeposit;
+              info.term = fo.term;
+              owned.push_back(info);
+            }
+          }
+        }
+      }
+
+      progress.processedBlocks = batchEnd;
+      if (m_onProgress)
+        m_onProgress(progress);
+    }
+  }
 } // namespace BoltRPC

@@ -316,6 +316,7 @@ bool RpcServer::processJsonRpcRequest(const HttpRequest& request, HttpResponse& 
         {"get_outputs_for_address", {makeMemberMethod(&RpcServer::on_get_outputs_for_address), false}},
         {"get_spv_outputs", {makeMemberMethod(&RpcServer::on_get_spv_outputs), false}},
         {"get_filter_records", {makeMemberMethod(&RpcServer::on_get_filter_records), true}},
+        {"get_domain", {makeMemberMethod(&RpcServer::on_get_domain), true}},
     };
 
     auto it = jsonRpcHandlers.find(jsonRequest.getMethod());
@@ -1126,6 +1127,7 @@ bool RpcServer::on_get_info(const COMMAND_RPC_GET_INFO::request&, COMMAND_RPC_GE
   crypto::Hash last_block_hash = m_core.getBlockIdByHeight(m_core.get_current_blockchain_height() - 1);
   res.top_block_hash = common::podToHex(last_block_hash);
   res.version = PROJECT_VERSION;
+  res.upgrade_height_v9 = cn::parameters::UPGRADE_HEIGHT_V9;
 
   Block blk;
   if (!m_core.getBlockByHash(last_block_hash, blk)) {
@@ -2117,6 +2119,37 @@ bool RpcServer::on_get_filter_records(const COMMAND_RPC_GET_FILTER_RECORDS::requ
   }
 
   res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_get_domain(const COMMAND_RPC_GET_DOMAIN::request &req,
+                              COMMAND_RPC_GET_DOMAIN::response &res)
+{
+  if (req.domain.empty())
+  {
+    throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_WRONG_PARAM, "Domain name is empty");
+  }
+
+  DomainIndex::DomainEntry entry;
+  if (!m_core.getDomainEntry(req.domain, entry))
+  {
+    throw JsonRpc::JsonRpcError(CORE_RPC_ERROR_CODE_WRONG_PARAM,
+                                "Domain not found: " + req.domain);
+  }
+
+  res.domain = entry.registration.domain;
+  res.tier = entry.registration.tier;
+  res.domain_pub = common::podToHex(entry.registration.domain_pub);
+  res.domain_view_pub = common::podToHex(entry.registration.domain_view_pub);
+  res.encrypted_addr = common::toHex(entry.registration.encrypted_addr.data(),
+                                     entry.registration.encrypted_addr.size());
+  res.metadata = common::toHex(entry.registration.metadata.data(),
+                               entry.registration.metadata.size());
+  res.registration_height = static_cast<uint32_t>(entry.registrationHeight);
+  res.transaction_index = entry.transactionIndex;
+  res.output_index = entry.outputIndex;
+  res.status = CORE_RPC_STATUS_OK;
+
   return true;
 }
 }

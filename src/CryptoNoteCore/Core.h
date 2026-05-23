@@ -25,6 +25,8 @@
 #include "CryptoNoteCore/MessageQueue.h"
 #include "Blockchain/BlockchainMessages.h"
 
+#include "CryptoNoteCore/DomainIndex.h"
+
 #include <Logging/LoggerMessage.h>
 
 namespace cn
@@ -179,6 +181,8 @@ namespace cn
 
     bool getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const;
 
+    bool getDomainEntry(const std::string &domain, DomainIndex::DomainEntry &entry) const;
+
   private:
     bool add_new_tx(const Transaction &tx, const crypto::Hash &tx_hash, size_t blob_size, tx_verification_context &tvc, bool keeped_by_block, uint32_t height);
     bool load_state_data();
@@ -202,6 +206,7 @@ namespace cn
 
     bool findStartAndFullOffsets(const std::vector<crypto::Hash> &knownBlockIds, uint64_t timestamp, uint32_t &startOffset, uint32_t &startFullOffset);
     std::vector<crypto::Hash> findIdsForShortBlocks(uint32_t startOffset, uint32_t startFullOffset);
+
 
     const Currency &m_currency;
     logging::LoggerRef logger;

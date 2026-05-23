@@ -119,16 +119,16 @@ namespace cn
         const std::vector<crypto::Hash> &blockTxHashes,
         const std::function<crypto::Hash(const Block &)> &getBlockHash) const;
 
+    // Helper: extract domain registrations from a transaction
+    void extractFromTransaction(const Transaction &tx, uint64_t height,
+                                uint32_t txIndex);
+
   private:
     // Domain name -> DomainEntry (only active domains are stored)
     std::unordered_map<std::string, DomainEntry> m_index;
 
     // Block height of the last processed block (for incremental updates)
     uint64_t m_lastProcessedHeight;
-
-    // Helper: extract domain registrations from a transaction
-    void extractFromTransaction(const Transaction &tx, uint64_t height,
-                                uint32_t txIndex);
   };
 
 } // namespace cn

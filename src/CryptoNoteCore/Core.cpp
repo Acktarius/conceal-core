@@ -1363,4 +1363,13 @@ namespace cn
   {
     return m_blockchain.getBlockFilterRecord(height, record);
   }
+
+  bool core::getDomainEntry(const std::string &domain, DomainIndex::DomainEntry &entry) const
+  {
+    const DomainIndex::DomainEntry *result = m_blockchain.getDomainIndex().resolve(domain);
+    if (!result)
+      return false;
+    entry = *result;
+    return true;
+  }
 }

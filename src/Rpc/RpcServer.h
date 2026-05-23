@@ -104,6 +104,9 @@ private:
   bool on_get_filter_records(const COMMAND_RPC_GET_FILTER_RECORDS::request &req,
                              COMMAND_RPC_GET_FILTER_RECORDS::response &res);
 
+  bool on_get_domain(const COMMAND_RPC_GET_DOMAIN::request &req,
+                     COMMAND_RPC_GET_DOMAIN::response &res);
+
   logging::LoggerRef logger;
   core& m_core;
   NodeServer& m_p2p;
