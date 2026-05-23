@@ -338,6 +338,50 @@ bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
           return false;
         }
       }
+    }
+    else if (out.target.type() == typeid(StandardPaymentOutput))
+    {
+      const StandardPaymentOutput &standardOutput = ::boost::get<StandardPaymentOutput>(out.target);
+      if (!check_key(standardOutput.key))
+      {
+        if (error)
+        {
+          *error = "StandardPaymentOutput with invalid key";
+        }
+        return false;
+      }
+    }
+    else if (out.target.type() == typeid(MultisigPaymentOutput))
+    {
+      const MultisigPaymentOutput &multisigOutput = ::boost::get<MultisigPaymentOutput>(out.target);
+      if (multisigOutput.num_keys > multisigOutput.keys.size())
+      {
+        if (error)
+        {
+          *error = "MultisigPaymentOutput with invalid key count";
+        }
+        return false;
+      }
+      for (const PublicKey &key : multisigOutput.keys)
+      {
+        if (!check_key(key))
+        {
+          if (error)
+          {
+            *error = "MultisigPaymentOutput with invalid public key";
+          }
+          return false;
+        }
+      }
+    }
+    else if (out.target.type() == typeid(DomainRegistrationOutput))
+    {
+      // Domain registrations are valid as long as they parse correctly
+      // Serialization already validates structure
+    }
+    else if (out.target.type() == typeid(DomainDeletionOutput))
+    {
+      // Domain deletions are valid as long as they parse correctly
     } else {
       if (error) {
         *error = "Output with invalid type";

@@ -1,6 +1,6 @@
 add_definitions(-DMINIUPNP_STATICLIB)
 
-include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR} ../version)
+include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR} ../version ${MDBX_INCLUDE_DIR})
 
 file(GLOB_RECURSE CoreTests CoreTests/*)
 file(GLOB_RECURSE CryptoTests crypto/*)
@@ -116,3 +116,5 @@ endforeach(hash)
 if(MINGW AND STATIC)
   set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive")
 endif()
+
+add_subdirectory(NewOutputTests)

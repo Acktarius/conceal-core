@@ -111,6 +111,8 @@ namespace cn
 		const uint64_t UPGRADE_HEIGHT_V6 = 104200;	  /* LWMA3 */
 		const uint64_t UPGRADE_HEIGHT_V7 = 195765;	  /* Cryptoight Conceal */
 		const uint64_t UPGRADE_HEIGHT_V8 = 661300;	  /* LWMA1, CN-GPU, Halving */
+		const uint64_t UPGRADE_HEIGHT_V9 = 999999999; // Self-describing outputs, encrypted memos, on-chain DNS (set before deployment)
+
 		const unsigned UPGRADE_VOTING_THRESHOLD = 90; // percent
 		const size_t UPGRADE_VOTING_WINDOW = EXPECTED_NUMBER_OF_BLOCKS_PER_DAY;
 		const size_t UPGRADE_WINDOW = EXPECTED_NUMBER_OF_BLOCKS_PER_DAY;
@@ -124,6 +126,7 @@ namespace cn
 		const uint64_t TESTNET_UPGRADE_HEIGHT_V6 = 48;	  /* LWMA3 */
 		const uint64_t TESTNET_UPGRADE_HEIGHT_V7 = 60;	  /* Cryptoight Conceal */
 		const uint64_t TESTNET_UPGRADE_HEIGHT_V8 = 72;	  /* LWMA1, CN-GPU, Halving */
+		const uint64_t TESTNET_UPGRADE_HEIGHT_V9 = 100;		// Testnet activation
 
 		const uint32_t TESTNET_DEPOSIT_MIN_TERM_V3 = 30;		/* testnet deposits 1 month -> 1 hour */
 		const uint32_t TESTNET_DEPOSIT_MAX_TERM_V3 = 12 * 30;	/* testnet deposits 1 year -> 12 hour */
@@ -159,6 +162,8 @@ namespace cn
 
 	const uint8_t TRANSACTION_VERSION_1 = 1;
 	const uint8_t TRANSACTION_VERSION_2 = 2;
+	const uint8_t TRANSACTION_VERSION_3 = 3; // New self-describing outputs
+
 	const uint8_t BLOCK_MAJOR_VERSION_1 = 1; // (Consensus I)
 	const uint8_t BLOCK_MAJOR_VERSION_2 = 2; // (Consensus II)
 	const uint8_t BLOCK_MAJOR_VERSION_3 = 3; // (Consensus III)
@@ -171,15 +176,15 @@ namespace cn
 	const size_t BLOCKS_IDS_SYNCHRONIZING_DEFAULT_COUNT = 10000; // by default, blocks ids count in synchronizing
 	const size_t BLOCKS_SYNCHRONIZING_DEFAULT_COUNT = 128;		 // by default, blocks count in blocks downloading
 	const size_t COMMAND_RPC_GET_BLOCKS_FAST_MAX_COUNT = 1000;
-    const size_t COMMAND_RPC_GET_OBJECTS_MAX_COUNT = 1000;
+  const size_t COMMAND_RPC_GET_OBJECTS_MAX_COUNT = 1000;
 
 	const int P2P_DEFAULT_PORT = 15000;
 	const int RPC_DEFAULT_PORT = 16000;
-    const int PAYMENT_GATE_DEFAULT_PORT = 8070;
+  const int PAYMENT_GATE_DEFAULT_PORT = 8070;
 
 	const int TESTNET_P2P_DEFAULT_PORT = 15500;
 	const int TESTNET_RPC_DEFAULT_PORT = 16600;
-    const int TESTNET_PAYMENT_GATE_DEFAULT_PORT = 8770;
+  const int TESTNET_PAYMENT_GATE_DEFAULT_PORT = 8770;
 
 	/* P2P Network Configuration Section - This defines our current P2P network version
 	and the minimum version for communication between nodes */
@@ -211,6 +216,9 @@ namespace cn
 	const uint64_t P2P_DEFAULT_INVOKE_TIMEOUT = 60 * 2 * 1000; // 2 minutes
 	const size_t P2P_DEFAULT_HANDSHAKE_INVOKE_TIMEOUT = 5000;  // 5 seconds
 	const char P2P_STAT_TRUSTED_PUB_KEY[] = "f7061e9a5f0d30549afde49c9bfbaa52ac60afdc46304642b460a9ea34bf7a4e";
+
+	const uint64_t DOMAIN_REGISTRATION_FEE = 100 * parameters::COIN; // 100 CCX domain registration fee
+	const char TEAM_DOMAIN_FEE_ADDRESS[] = "ccx7Peeg3UGhLcevV3JrBLaR3u3ipaMFFFKb9qRacoWLfZjqUvj59FyXtznxBsofFP8JB32YYBmtwLdoEirjAbYo4DBZkDnCg3"; // TODO: Replace with actual team address
 
 	// Seed Nodes
 	const std::initializer_list<const char *> SEED_NODES = {

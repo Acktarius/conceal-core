@@ -651,4 +651,40 @@ namespace cn
     return true;
   }
 
+  bool Blockchain::checkDomainRegistrationFee(const Transaction &tx, uint32_t height) const
+  {
+    // Only enforce post-fork
+    if (height < parameters::UPGRADE_HEIGHT_V9)
+      return true;
+
+    bool hasDomainRegistration = false;
+    bool hasFeePayment = false;
+
+    for (const auto &output : tx.outputs)
+    {
+      if (output.target.type() == typeid(DomainRegistrationOutput))
+      {
+        hasDomainRegistration = true;
+      }
+      else if (output.target.type() == typeid(StandardPaymentOutput) &&
+               output.amount == cn::DOMAIN_REGISTRATION_FEE)
+      {
+        // Verify the fee is going to the team address
+        // We need the txPubKey to derive the output key
+        // For now, just check the amount matches
+        hasFeePayment = true;
+      }
+    }
+
+    // If there's a domain registration, there must be a matching fee payment
+    if (hasDomainRegistration && !hasFeePayment)
+    {
+      logger(logging::ERROR, logging::BRIGHT_RED)
+          << "Transaction contains domain registration without required "
+          << cn::DOMAIN_REGISTRATION_FEE / parameters::COIN << " CCX fee";
+      return false;
+    }
+
+    return true;
+  }
 } // namespace cn

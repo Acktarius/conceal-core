@@ -13,6 +13,7 @@
 #include <cstring>
 #include <sstream>
 #include <thread>
+#include <iostream>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -58,16 +59,28 @@ namespace BoltRPC
     std::string extractJsonBody(const std::string &httpRequest)
     {
       size_t bodyStart = httpRequest.find("\r\n\r\n");
-      if (bodyStart == std::string::npos)
-        bodyStart = httpRequest.find("\n\n");
-      if (bodyStart == std::string::npos)
-        return "";
+      if (bodyStart != std::string::npos)
+      {
+        return httpRequest.substr(bodyStart + 4);
+      }
 
-      bodyStart = httpRequest.find("\n", bodyStart);
-      if (bodyStart == std::string::npos)
-        return "";
+      bodyStart = httpRequest.find("\n\n");
+      if (bodyStart != std::string::npos)
+      {
+        return httpRequest.substr(bodyStart + 2);
+      }
 
-      return httpRequest.substr(bodyStart + 1);
+      return "";
+    }
+
+    // Build a JSON-RPC error response string directly (avoids JsonValue bugs)
+    std::string buildJsonRpcError(int code, const std::string &message, const std::string &idJson)
+    {
+      std::ostringstream ss;
+      ss << R"({"jsonrpc":"2.0","id":)" << idJson
+         << R"(,"error":{"code":)" << code
+         << R"(,"message":")" << message << R"("}})";
+      return ss.str();
     }
 
   } // anonymous namespace
@@ -209,32 +222,51 @@ namespace BoltRPC
       {
         std::string request(buffer, bytesRead);
 
-        if (request.find("OPTIONS") == 0)
+        try
         {
-          response = buildHttpResponse(200, "text/plain", "", m_corsDomain);
+          if (request.find("OPTIONS") == 0)
+          {
+            response = buildHttpResponse(200, "text/plain", "", m_corsDomain);
+          }
+          else if (request.find("POST /json_rpc") != std::string::npos)
+          {
+            std::string body = extractJsonBody(request);
+            std::string responseBody;
+            handleJsonRpc(body, responseBody);
+            response = buildHttpResponse(200, "application/json",
+                                         responseBody, m_corsDomain);
+          }
+          else if (request.find("POST /") != std::string::npos ||
+                   request.find("GET /") != std::string::npos)
+          {
+            std::string body = extractJsonBody(request);
+            std::string responseBody;
+            handleRequest(body, responseBody);
+            response = buildHttpResponse(200, "application/json",
+                                         responseBody, m_corsDomain);
+          }
+          else
+          {
+            response = buildHttpResponse(404, "text/plain",
+                                         "Not Found", m_corsDomain);
+          }
         }
-        else if (request.find("POST /json_rpc") != std::string::npos)
+        catch (const std::exception &e)
         {
-          std::string body = extractJsonBody(request);
-          std::string responseBody;
-          handleJsonRpc(body, responseBody);
-          response = buildHttpResponse(200, "application/json",
-                                       responseBody, m_corsDomain);
+          std::string errBody = buildJsonRpcError(JSON_RPC_INTERNAL_ERROR,
+                                                  std::string("Internal error: ") + e.what(), "null");
+          response = buildHttpResponse(200, "application/json", errBody, m_corsDomain);
         }
-        else if (request.find("POST /") != std::string::npos ||
-                 request.find("GET /") != std::string::npos)
+        catch (...)
         {
-          std::string body = extractJsonBody(request);
-          std::string responseBody;
-          handleRequest(body, responseBody);
-          response = buildHttpResponse(200, "application/json",
-                                       responseBody, m_corsDomain);
+          std::string errBody = buildJsonRpcError(JSON_RPC_INTERNAL_ERROR,
+                                                  "Unknown internal error", "null");
+          response = buildHttpResponse(200, "application/json", errBody, m_corsDomain);
         }
-        else
-        {
-          response = buildHttpResponse(404, "text/plain",
-                                       "Not Found", m_corsDomain);
-        }
+      }
+      else
+      {
+        response = buildHttpResponse(400, "text/plain", "Bad Request", m_corsDomain);
       }
 
       send(clientSocket, response.data(), response.size(), 0);
@@ -247,8 +279,18 @@ namespace BoltRPC
   void BoltRpcServer::handleJsonRpc(const std::string &requestBody,
                                     std::string &responseBody)
   {
+    // Extract id from request for error responses
+    std::string idStr = "null";
+
     try
     {
+      if (requestBody.empty())
+      {
+        responseBody = buildJsonRpcError(JSON_RPC_PARSE_ERROR, "Empty request body", "null");
+        return;
+      }
+
+      // Parse the request
       common::JsonValue request;
       try
       {
@@ -256,54 +298,94 @@ namespace BoltRPC
       }
       catch (...)
       {
-        common::JsonValue err;
-        err("jsonrpc") = std::string("2.0");
-        err("error") = makeError(JSON_RPC_PARSE_ERROR, "Parse error")("error");
-        responseBody = err.toString();
+        responseBody = buildJsonRpcError(JSON_RPC_PARSE_ERROR, "Parse error", "null");
         return;
       }
 
-      std::string method = request("method").getString();
+      if (!request.isObject())
+      {
+        responseBody = buildJsonRpcError(JSON_RPC_PARSE_ERROR, "Request must be a JSON object", "null");
+        return;
+      }
+
+      // Extract id
+      try
+      {
+        if (request.contains("id"))
+        {
+          common::JsonValue idVal = request("id");
+          idStr = idVal.toString();
+        }
+      }
+      catch (...)
+      {
+      }
+
+      // Extract method
+      std::string method;
+      try
+      {
+        method = request("method").getString();
+      }
+      catch (...)
+      {
+        responseBody = buildJsonRpcError(JSON_RPC_PARSE_ERROR, "Missing method", idStr);
+        return;
+      }
+
+      // Extract params
       common::JsonValue params;
-      if (request.contains("params"))
-        params = request("params");
-      common::JsonValue id;
-      if (request.contains("id"))
-        id = request("id");
+      try
+      {
+        if (request.contains("params"))
+          params = request("params");
+      }
+      catch (...)
+      {
+      }
 
-      common::JsonValue baseResponse;
-      baseResponse("jsonrpc") = std::string("2.0");
-      baseResponse("id") = id;
-
+      // Find handler
       auto handler = findMethod(method);
       if (!handler)
       {
-        baseResponse("error") = makeError(JSON_RPC_METHOD_NOT_FOUND,
-                                          "Method not found: " + method)("error");
-        responseBody = baseResponse.toString();
+        responseBody = buildJsonRpcError(JSON_RPC_METHOD_NOT_FOUND,
+                                         "Method not found: " + method, idStr);
         return;
       }
 
-      common::JsonValue result = handler(params);
-
-      if (result.contains("error"))
+      // Call handler and build response
+      common::JsonValue result;
+      try
       {
-        baseResponse("error") = result("error");
+        result = handler(params);
       }
-      else
+      catch (const std::exception &e)
       {
-        baseResponse("result") = result;
+        responseBody = buildJsonRpcError(JSON_RPC_INTERNAL_ERROR,
+                                         std::string("Handler error: ") + e.what(), idStr);
+        return;
+      }
+      catch (...)
+      {
+        responseBody = buildJsonRpcError(JSON_RPC_INTERNAL_ERROR,
+                                         "Unknown handler error", idStr);
+        return;
       }
 
-      responseBody = baseResponse.toString();
+      // Build success response
+      std::ostringstream ss;
+      ss << R"({"jsonrpc":"2.0","id":)" << idStr << R"(,"result":)" << result.toString() << "}";
+      responseBody = ss.str();
     }
     catch (const std::exception &e)
     {
-      common::JsonValue err;
-      err("jsonrpc") = std::string("2.0");
-      err("error") = makeError(JSON_RPC_INTERNAL_ERROR,
-                               std::string("Internal error: ") + e.what())("error");
-      responseBody = err.toString();
+      responseBody = buildJsonRpcError(JSON_RPC_INTERNAL_ERROR,
+                                       std::string("Internal error: ") + e.what(), idStr);
+    }
+    catch (...)
+    {
+      responseBody = buildJsonRpcError(JSON_RPC_INTERNAL_ERROR,
+                                       "Unknown internal error", idStr);
     }
   }
 
@@ -316,10 +398,7 @@ namespace BoltRPC
       return;
     }
 
-    common::JsonValue err;
-    err("jsonrpc") = std::string("2.0");
-    err("error") = makeError(-32600, "Invalid Request")("error");
-    responseBody = err.toString();
+    responseBody = buildJsonRpcError(-32600, "Invalid Request", "null");
   }
 
   // ─── Method Registration ──────────────────────────────────────────────────
@@ -356,6 +435,10 @@ namespace BoltRPC
     { return rpc_exportKeys(p); };
     m_methods["exportState"] = [this](const common::JsonValue &p)
     { return rpc_exportState(p); };
+    m_methods["listWallets"] = [this](const common::JsonValue &p)
+    { return rpc_listWallets(p); };
+    m_methods["setActiveWallet"] = [this](const common::JsonValue &p)
+    { return rpc_setActiveWallet(p); };
   }
 
   RpcMethod BoltRpcServer::findMethod(const std::string &name) const
@@ -372,213 +455,292 @@ namespace BoltRPC
   {
     WalletStatus status = m_walletManager->getStatus();
 
-    common::JsonValue result;
-    result("locked") = common::JsonValue::Integer(status.locked ? 1 : 0);
-    result("synced") = common::JsonValue::Integer(status.synced ? 1 : 0);
-    result("blockHeight") = common::JsonValue::Integer(status.blockHeight);
-    result("balance") = common::JsonValue::Integer(status.balance);
-    result("unlockedBalance") = common::JsonValue::Integer(status.unlockedBalance);
-    result("outputCount") = common::JsonValue::Integer(status.outputCount);
-    result("transactionCount") = common::JsonValue::Integer(status.transactionCount);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("locked", common::JsonValue(static_cast<int64_t>(status.locked ? 1 : 0)));
+    result.insert("synced", common::JsonValue(static_cast<int64_t>(status.synced ? 1 : 0)));
+    result.insert("blockHeight", common::JsonValue(static_cast<int64_t>(status.blockHeight)));
+    result.insert("balance", common::JsonValue(static_cast<int64_t>(status.balance)));
+    result.insert("unlockedBalance", common::JsonValue(static_cast<int64_t>(status.unlockedBalance)));
+    result.insert("outputCount", common::JsonValue(static_cast<int64_t>(status.outputCount)));
+    result.insert("transactionCount", common::JsonValue(static_cast<int64_t>(status.transactionCount)));
 
     if (status.syncProgress.phase != SyncProgress::IDLE)
     {
-      common::JsonValue sync;
-      sync("phase") = common::JsonValue::Integer(static_cast<int>(status.syncProgress.phase));
-      sync("totalBlocks") = common::JsonValue::Integer(status.syncProgress.totalBlocks);
-      sync("processedBlocks") = common::JsonValue::Integer(status.syncProgress.processedBlocks);
-      sync("candidatesFound") = common::JsonValue::Integer(status.syncProgress.candidatesFound);
-      sync("ownedOutputs") = common::JsonValue::Integer(status.syncProgress.ownedOutputs);
-      sync("currentHeight") = common::JsonValue::Integer(status.syncProgress.currentHeight);
+      common::JsonValue sync(common::JsonValue::OBJECT);
+      sync.insert("phase", common::JsonValue(static_cast<int64_t>(status.syncProgress.phase)));
+      sync.insert("totalBlocks", common::JsonValue(static_cast<int64_t>(status.syncProgress.totalBlocks)));
+      sync.insert("processedBlocks", common::JsonValue(static_cast<int64_t>(status.syncProgress.processedBlocks)));
+      sync.insert("candidatesFound", common::JsonValue(static_cast<int64_t>(status.syncProgress.candidatesFound)));
+      sync.insert("ownedOutputs", common::JsonValue(static_cast<int64_t>(status.syncProgress.ownedOutputs)));
+      sync.insert("currentHeight", common::JsonValue(static_cast<int64_t>(status.syncProgress.currentHeight)));
       if (!status.syncProgress.errorMessage.empty())
-        sync("errorMessage") = status.syncProgress.errorMessage;
-      result("syncProgress") = sync;
+        sync.insert("errorMessage", common::JsonValue(status.syncProgress.errorMessage));
+      result.insert("syncProgress", sync);
     }
 
-    return makeResult(result);
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_getBalance(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
-    common::JsonValue result;
-    result("balance") = common::JsonValue::Integer(m_walletManager->getBalance());
-    result("unlockedBalance") = common::JsonValue::Integer(m_walletManager->getUnlockedBalance());
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("balance", common::JsonValue(static_cast<int64_t>(m_walletManager->getBalance())));
+    result.insert("unlockedBalance", common::JsonValue(static_cast<int64_t>(m_walletManager->getUnlockedBalance())));
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_getAddress(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
-    common::JsonValue result;
-    result("address") = m_walletManager->getAddress();
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("address", common::JsonValue(m_walletManager->getAddress()));
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_getOutputs(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
     bool unspentOnly = true;
-    if (params.contains("unspentOnly"))
+    if (params.isObject() && params.contains("unspentOnly"))
       unspentOnly = (params("unspentOnly").getInteger() != 0);
 
     auto outputs = m_walletManager->getOutputs(unspentOnly);
 
-    common::JsonValue result;
-    common::JsonValue arr;
+    common::JsonValue result(common::JsonValue::OBJECT);
+    common::JsonValue arr(common::JsonValue::ARRAY);
     for (const auto &out : outputs)
     {
-      common::JsonValue entry;
-      entry("blockHeight") = common::JsonValue::Integer(out.blockHeight);
-      entry("txHash") = common::podToHex(out.txHash);
-      entry("amount") = common::JsonValue::Integer(out.amount);
-      entry("outputIndex") = common::JsonValue::Integer(out.outputIndex);
-      entry("outputKey") = common::podToHex(out.outputKey);
-      entry("txPublicKey") = common::podToHex(out.txPublicKey);
-      entry("spent") = common::JsonValue::Integer(out.spent ? 1 : 0);
-      entry("isDeposit") = common::JsonValue::Integer(out.isDeposit ? 1 : 0);
-      entry("term") = common::JsonValue::Integer(out.term);
+      common::JsonValue entry(common::JsonValue::OBJECT);
+      entry.insert("blockHeight", common::JsonValue(static_cast<int64_t>(out.blockHeight)));
+      entry.insert("txHash", common::JsonValue(common::podToHex(out.txHash)));
+      entry.insert("amount", common::JsonValue(static_cast<int64_t>(out.amount)));
+      entry.insert("outputIndex", common::JsonValue(static_cast<int64_t>(out.outputIndex)));
+      entry.insert("outputKey", common::JsonValue(common::podToHex(out.outputKey)));
+      entry.insert("txPublicKey", common::JsonValue(common::podToHex(out.txPublicKey)));
+      entry.insert("spent", common::JsonValue(static_cast<int64_t>(out.spent ? 1 : 0)));
+      entry.insert("isDeposit", common::JsonValue(static_cast<int64_t>(out.isDeposit ? 1 : 0)));
+      entry.insert("term", common::JsonValue(static_cast<int64_t>(out.term)));
       arr.pushBack(entry);
     }
-    result("outputs") = arr;
-    result("count") = common::JsonValue::Integer(static_cast<int64_t>(outputs.size()));
+    result.insert("outputs", arr);
+    result.insert("count", common::JsonValue(static_cast<int64_t>(outputs.size())));
 
-    return makeResult(result);
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_getTransactions(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
     uint32_t offset = 0;
     uint32_t limit = 50;
 
-    if (params.contains("offset"))
-      offset = static_cast<uint32_t>(params("offset").getInteger());
-    if (params.contains("limit"))
-      limit = static_cast<uint32_t>(params("limit").getInteger());
+    if (params.isObject())
+    {
+      if (params.contains("offset"))
+        offset = static_cast<uint32_t>(params("offset").getInteger());
+      if (params.contains("limit"))
+        limit = static_cast<uint32_t>(params("limit").getInteger());
+    }
 
     auto txs = m_walletManager->getTransactions(offset, limit);
 
-    common::JsonValue result;
-    common::JsonValue arr;
+    common::JsonValue result(common::JsonValue::OBJECT);
+    common::JsonValue arr(common::JsonValue::ARRAY);
     for (const auto &tx : txs)
     {
-      common::JsonValue entry;
-      entry("txHash") = common::podToHex(tx.txHash);
-      entry("blockHeight") = common::JsonValue::Integer(tx.blockHeight);
-      entry("timestamp") = common::JsonValue::Integer(tx.timestamp);
-      entry("fee") = common::JsonValue::Integer(tx.fee);
-      entry("totalSent") = common::JsonValue::Integer(tx.totalSent);
-      entry("totalReceived") = common::JsonValue::Integer(tx.totalReceived);
-      entry("type") = common::JsonValue::Integer(static_cast<int>(tx.type));
-      entry("confirmed") = common::JsonValue::Integer(tx.confirmed ? 1 : 0);
-      entry("paymentId") = tx.paymentId;
+      common::JsonValue entry(common::JsonValue::OBJECT);
+      entry.insert("txHash", common::JsonValue(common::podToHex(tx.txHash)));
+      entry.insert("blockHeight", common::JsonValue(static_cast<int64_t>(tx.blockHeight)));
+      entry.insert("timestamp", common::JsonValue(static_cast<int64_t>(tx.timestamp)));
+      entry.insert("fee", common::JsonValue(static_cast<int64_t>(tx.fee)));
+      entry.insert("totalSent", common::JsonValue(static_cast<int64_t>(tx.totalSent)));
+      entry.insert("totalReceived", common::JsonValue(static_cast<int64_t>(tx.totalReceived)));
+      entry.insert("type", common::JsonValue(static_cast<int64_t>(tx.type)));
+      entry.insert("confirmed", common::JsonValue(static_cast<int64_t>(tx.confirmed ? 1 : 0)));
+      entry.insert("paymentId", common::JsonValue(tx.paymentId));
       arr.pushBack(entry);
     }
-    result("transactions") = arr;
+    result.insert("transactions", arr);
 
-    return makeResult(result);
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_createWallet(const common::JsonValue &params)
   {
-    if (!params.contains("password"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter");
+    if (!params.isObject() || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter"));
+      return err;
+    }
 
     std::string password = params("password").getString();
     if (password.size() < 8)
-      return makeError(JSON_RPC_INVALID_PARAMS, "Password must be at least 8 characters");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Password must be at least 8 characters"));
+      return err;
+    }
 
     if (m_walletManager->hasExistingWallet())
-      return makeError(WALLET_ALREADY_EXISTS, "Wallet already exists");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_ALREADY_EXISTS, "Wallet already exists"));
+      return err;
+    }
 
     if (!m_walletManager->generateNewWallet(password))
-      return makeError(JSON_RPC_INTERNAL_ERROR, "Failed to create wallet");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INTERNAL_ERROR, "Failed to create wallet"));
+      return err;
+    }
 
-    common::JsonValue result;
-    result("address") = m_walletManager->getAddress();
-    result("message") = std::string("Wallet created successfully");
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("address", common::JsonValue(m_walletManager->getAddress()));
+    result.insert("message", common::JsonValue(std::string("Wallet created successfully")));
 
     m_walletManager->startSync([this](const WalletStatus &status) {});
 
-    return makeResult(result);
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_importWallet(const common::JsonValue &params)
   {
-    if (!params.contains("password"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter");
+    if (!params.isObject() || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter"));
+      return err;
+    }
     if (!params.contains("viewKey"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'viewKey' parameter");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'viewKey' parameter"));
+      return err;
+    }
     if (!params.contains("spendKey"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'spendKey' parameter");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'spendKey' parameter"));
+      return err;
+    }
 
     std::string password = params("password").getString();
     std::string viewKey = params("viewKey").getString();
     std::string spendKey = params("spendKey").getString();
 
     if (m_walletManager->hasExistingWallet())
-      return makeError(WALLET_ALREADY_EXISTS, "Wallet already exists");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_ALREADY_EXISTS, "Wallet already exists"));
+      return err;
+    }
 
     if (!m_walletManager->importFromKeys(viewKey, spendKey, password))
-      return makeError(JSON_RPC_INTERNAL_ERROR, "Failed to import wallet");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INTERNAL_ERROR, "Failed to import wallet"));
+      return err;
+    }
 
-    common::JsonValue result;
-    result("address") = m_walletManager->getAddress();
-    result("message") = std::string("Wallet imported successfully");
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("address", common::JsonValue(m_walletManager->getAddress()));
+    result.insert("message", common::JsonValue(std::string("Wallet imported successfully")));
 
     m_walletManager->startSync([this](const WalletStatus &status) {});
 
-    return makeResult(result);
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_unlockWallet(const common::JsonValue &params)
   {
-    if (!params.contains("password"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter");
+    if (!params.isObject() || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter"));
+      return err;
+    }
 
     if (!m_walletManager->hasExistingWallet())
-      return makeError(WALLET_NOT_FOUND, "No wallet found. Create or import first.");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_NOT_FOUND, "No wallet found. Create or import first."));
+      return err;
+    }
 
     std::string password = params("password").getString();
     if (!m_walletManager->unlock(password))
-      return makeError(INVALID_PASSWORD, "Invalid password");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(INVALID_PASSWORD, "Invalid password"));
+      return err;
+    }
 
     m_walletManager->startSync([this](const WalletStatus &status) {});
 
-    common::JsonValue result;
-    result("address") = m_walletManager->getAddress();
-    result("balance") = common::JsonValue::Integer(m_walletManager->getBalance());
-    result("message") = std::string("Wallet unlocked");
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("address", common::JsonValue(m_walletManager->getAddress()));
+    result.insert("balance", common::JsonValue(static_cast<int64_t>(m_walletManager->getBalance())));
+    result.insert("message", common::JsonValue(std::string("Wallet unlocked")));
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_lockWallet(const common::JsonValue &params)
   {
     m_walletManager->lock();
 
-    common::JsonValue result;
-    result("message") = std::string("Wallet locked");
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("message", common::JsonValue(std::string("Wallet locked")));
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_sendTransaction(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
-    if (!params.contains("address"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'address'");
+    if (!params.isObject() || !params.contains("address"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'address'"));
+      return err;
+    }
     if (!params.contains("amount"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'amount'");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'amount'"));
+      return err;
+    }
 
     TransferRequest req;
     req.address = params("address").getString();
@@ -594,23 +756,39 @@ namespace BoltRPC
     TransferResult result = m_walletManager->sendTransfer(req);
 
     if (!result.success)
-      return makeError(JSON_RPC_INTERNAL_ERROR, result.errorMessage);
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INTERNAL_ERROR, result.errorMessage));
+      return err;
+    }
 
-    common::JsonValue res;
-    res("txHash") = result.txHash;
-    res("fee") = common::JsonValue::Integer(result.fee);
-    return makeResult(res);
+    common::JsonValue res(common::JsonValue::OBJECT);
+    res.insert("txHash", common::JsonValue(result.txHash));
+    res.insert("fee", common::JsonValue(static_cast<int64_t>(result.fee)));
+    return res;
   }
 
   common::JsonValue BoltRpcServer::rpc_sendDeposit(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
-    if (!params.contains("amount"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'amount'");
+    if (!params.isObject() || !params.contains("amount"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'amount'"));
+      return err;
+    }
     if (!params.contains("term"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'term'");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'term'"));
+      return err;
+    }
 
     DepositRequest req;
     req.amount = static_cast<uint64_t>(params("amount").getInteger());
@@ -622,23 +800,39 @@ namespace BoltRPC
     TransferResult result = m_walletManager->sendDeposit(req);
 
     if (!result.success)
-      return makeError(JSON_RPC_INTERNAL_ERROR, result.errorMessage);
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INTERNAL_ERROR, result.errorMessage));
+      return err;
+    }
 
-    common::JsonValue res;
-    res("txHash") = result.txHash;
-    res("fee") = common::JsonValue::Integer(result.fee);
-    return makeResult(res);
+    common::JsonValue res(common::JsonValue::OBJECT);
+    res.insert("txHash", common::JsonValue(result.txHash));
+    res.insert("fee", common::JsonValue(static_cast<int64_t>(result.fee)));
+    return res;
   }
 
   common::JsonValue BoltRpcServer::rpc_sendWithdrawal(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
-    if (!params.contains("amount"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'amount'");
+    if (!params.isObject() || !params.contains("amount"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'amount'"));
+      return err;
+    }
     if (!params.contains("depositId"))
-      return makeError(JSON_RPC_INVALID_PARAMS, "Missing 'depositId'");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'depositId'"));
+      return err;
+    }
 
     WithdrawalRequest req;
     req.amount = static_cast<uint64_t>(params("amount").getInteger());
@@ -650,69 +844,116 @@ namespace BoltRPC
     TransferResult result = m_walletManager->sendWithdrawal(req);
 
     if (!result.success)
-      return makeError(JSON_RPC_INTERNAL_ERROR, result.errorMessage);
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INTERNAL_ERROR, result.errorMessage));
+      return err;
+    }
 
-    common::JsonValue res;
-    res("txHash") = result.txHash;
-    res("fee") = common::JsonValue::Integer(result.fee);
-    return makeResult(res);
+    common::JsonValue res(common::JsonValue::OBJECT);
+    res.insert("txHash", common::JsonValue(result.txHash));
+    res.insert("fee", common::JsonValue(static_cast<int64_t>(result.fee)));
+    return res;
   }
 
   common::JsonValue BoltRpcServer::rpc_syncNow(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
     m_walletManager->syncNow();
 
-    common::JsonValue result;
-    result("message") = std::string("Sync triggered");
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("message", common::JsonValue(std::string("Sync triggered")));
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_exportKeys(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
     std::string keys = m_walletManager->exportKeys();
     if (keys.empty())
-      return makeError(JSON_RPC_INTERNAL_ERROR, "Failed to export keys");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INTERNAL_ERROR, "Failed to export keys"));
+      return err;
+    }
 
-    common::JsonValue result;
-    result("keys") = keys;
-    result("warning") = std::string("Keep these keys secure. Anyone with these keys can access your funds.");
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("keys", common::JsonValue(keys));
+    result.insert("warning", common::JsonValue(std::string("Keep these keys secure. Anyone with these keys can access your funds.")));
+    return result;
   }
 
   common::JsonValue BoltRpcServer::rpc_exportState(const common::JsonValue &params)
   {
     if (m_walletManager->getStatus().locked)
-      return makeError(WALLET_LOCKED, "Wallet is locked");
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(WALLET_LOCKED, "Wallet is locked"));
+      return err;
+    }
 
     std::string path = m_walletManager->exportState();
 
-    common::JsonValue result;
-    result("path") = path;
-    result("message") = std::string("State file path. Copy this file to backup or migrate your wallet.");
-    return makeResult(result);
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("path", common::JsonValue(path));
+    result.insert("message", common::JsonValue(std::string("State file path. Copy this file to backup or migrate your wallet.")));
+    return result;
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  common::JsonValue BoltRpcServer::makeResult(const common::JsonValue &data) const
+  common::JsonValue BoltRpcServer::makeErrorObj(int code, const std::string &message) const
   {
-    return data;
+    common::JsonValue errObj(common::JsonValue::OBJECT);
+    errObj.insert("code", common::JsonValue(static_cast<int64_t>(code)));
+    errObj.insert("message", common::JsonValue(message));
+    return errObj;
   }
 
-  common::JsonValue BoltRpcServer::makeError(int code, const std::string &message) const
+  common::JsonValue BoltRpcServer::rpc_listWallets(const common::JsonValue &params)
   {
-    common::JsonValue error;
-    common::JsonValue errObj;
-    errObj("code") = common::JsonValue::Integer(code);
-    errObj("message") = message;
-    error("error") = errObj;
-    return error;
+    auto wallets = m_walletManager->listWalletFiles();
+
+    common::JsonValue result(common::JsonValue::OBJECT);
+    common::JsonValue arr(common::JsonValue::ARRAY);
+    for (const auto &w : wallets)
+    {
+      common::JsonValue entry(common::JsonValue::OBJECT);
+      entry.insert("name", common::JsonValue(w));
+      arr.pushBack(entry);
+    }
+    result.insert("wallets", arr);
+    return result;
   }
 
+  common::JsonValue BoltRpcServer::rpc_setActiveWallet(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("walletName"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'walletName' parameter"));
+      return err;
+    }
+
+    std::string walletName = params("walletName").getString();
+    m_walletManager->setActiveWallet(walletName);
+
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("activeWallet", common::JsonValue(walletName));
+    result.insert("hasWallet", common::JsonValue(static_cast<int64_t>(m_walletManager->hasExistingWallet() ? 1 : 0)));
+    result.insert("message", common::JsonValue(std::string("Active wallet set. Use unlockWallet to open.")));
+    return result;
+  }
 } // namespace BoltRPC

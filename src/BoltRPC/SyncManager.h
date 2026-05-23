@@ -47,7 +47,6 @@ namespace BoltRPC
     uint32_t blockHeight;
     uint16_t txIndex;
     uint8_t outputIndex;
-    uint8_t expectedNullifier[4];
   };
 
   struct SyncProgress
@@ -56,7 +55,7 @@ namespace BoltRPC
     {
       IDLE,
       FETCHING_FILTERS, // Downloading filter records from daemon
-      FILTERING,        // Running two-pass filter locally
+      FILTERING,        // Running view-tag filter locally
       FETCHING_BLOCKS,  // Fetching full blocks for candidates
       DERIVING,         // Full ECDH derivation on candidates
       INCREMENTAL,      // Normal background polling
@@ -115,7 +114,7 @@ namespace BoltRPC
                        std::vector<cn::Block> &blocks,
                        std::vector<std::vector<cn::Transaction>> &transactions);
 
-    // ── Two-pass filter ────────────────────────────────────────────────────
+    // ── View-tag filter ────────────────────────────────────────────────────
     void runFilterPass(const std::vector<cn::BlockFilterRecord> &records,
                        std::vector<FilterCandidate> &candidates);
 

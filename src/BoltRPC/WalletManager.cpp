@@ -14,6 +14,7 @@
 #include <chrono>
 #include <thread>
 #include <ctime>
+#include <dirent.h>
 
 using namespace cn;
 
@@ -60,6 +61,8 @@ namespace BoltRPC
     keys.spendPublicKey = ak.address.spendPublicKey;
     keys.address = m_currency.accountAddressAsString(ak.address);
 
+    m_activeWallet = keys.address;
+
     if (!encryptKeys(keys, password))
       return false;
 
@@ -100,6 +103,7 @@ namespace BoltRPC
       return false;
 
     keys.address = m_currency.accountAddressAsString(addr);
+    m_activeWallet = keys.address;
 
     if (!encryptKeys(keys, password))
       return false;
@@ -135,6 +139,10 @@ namespace BoltRPC
       return false;
 
     m_keys = keys;
+
+    if (m_activeWallet.empty())
+      m_activeWallet = keys.address;
+
     m_locked.store(false);
 
     loadState();
@@ -409,12 +417,48 @@ namespace BoltRPC
 
   std::string WalletManager::keysFilePath() const
   {
+    if (!m_activeWallet.empty())
+      return m_dataDir + "/" + m_activeWallet + ".keys";
     return m_dataDir + "/wallet.keys";
   }
 
   std::string WalletManager::stateFilePath() const
   {
+    if (!m_activeWallet.empty())
+      return m_dataDir + "/" + m_activeWallet + "_state.bin";
     return m_stateManager->filePath();
+  }
+
+  void WalletManager::setActiveWallet(const std::string &walletName)
+  {
+    lock();
+    m_activeWallet = walletName;
+  }
+
+  std::vector<std::string> WalletManager::listWalletFiles() const
+  {
+    std::vector<std::string> wallets;
+
+    DIR *dir = opendir(m_dataDir.c_str());
+    if (!dir)
+      return wallets;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr)
+    {
+      std::string name(entry->d_name);
+      if (name == "." || name == "..")
+        continue;
+
+      if (name.size() > 5 && name.substr(name.size() - 5) == ".keys")
+      {
+        std::string walletName = name.substr(0, name.size() - 5);
+        wallets.push_back(walletName);
+      }
+    }
+
+    closedir(dir);
+    return wallets;
   }
 
   // ─── Encryption ────────────────────────────────────────────────────────────

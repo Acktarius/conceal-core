@@ -265,6 +265,7 @@ namespace cn
                                 uint32_t &pmax_used_block_height,
                                 crypto::Hash &max_used_block_id,
                                 BlockInfo *tail = nullptr);
+    bool checkDomainRegistrationFee(const Transaction &tx, uint32_t height) const;
 
     // Filter database access
     bool getBlockFilterRecord(uint32_t height, BlockFilterRecord &record) const;

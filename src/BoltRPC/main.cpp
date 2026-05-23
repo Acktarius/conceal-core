@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -24,7 +25,7 @@
 #include "Common/Util.h"
 #include "CryptoNoteCore/Currency.h"
 #include "Logging/LoggerManager.h"
-#include "NodeRpcProxy/NodeRpcProxy.h"
+#include "NodeClient/NodeClient.h"
 #include "Rpc/HttpServer.h"
 #include "version.h"
 
@@ -192,18 +193,17 @@ int main(int argc, char *argv[])
     currencyBuilder.testnet(true);
   cn::Currency currency = currencyBuilder.currency();
 
-  // Connect to daemon (unless offline mode)
-  cn::NodeRpcProxy *nodePtr = nullptr;
-  platform_system::Dispatcher *dispatcherPtr = nullptr;
+  // ── Daemon connection (unless offline) ──────────────────────────────────
+
+  std::unique_ptr<cn::INode> nodePtr;
 
   if (!config.offline)
   {
     logger(INFO) << "Connecting to daemon at " << config.daemonHost
                  << ":" << config.daemonPort;
 
-    dispatcherPtr = new platform_system::Dispatcher();
-    nodePtr = new cn::NodeRpcProxy(*dispatcherPtr, config.daemonHost,
-                                   config.daemonPort, logManager);
+    auto *client = new NodeClient::NodeClient(config.daemonHost, config.daemonPort);
+    nodePtr.reset(client);
 
     bool initDone = false;
     std::error_code initEc;
@@ -218,20 +218,19 @@ int main(int argc, char *argv[])
     if (initEc)
     {
       logger(ERROR, BRIGHT_RED) << "Failed to connect to daemon: " << initEc.message();
-      delete nodePtr;
-      delete dispatcherPtr;
       return 1;
     }
 
     logger(INFO) << "Connected to daemon.";
   }
 
-  // Create RPC server
+  // ── Create RPC server ───────────────────────────────────────────────────
+
   logger(INFO) << "Starting conceal-rpc server on port " << config.rpcPort;
 
   BoltRPC::BoltRpcServer server(
       config.rpcPort,
-      config.offline ? *static_cast<cn::INode *>(nullptr) : *nodePtr,
+      nodePtr ? *nodePtr : *static_cast<cn::INode *>(nullptr), // FIXME: BoltRpcServer should accept nullptr for offline
       currency,
       config.dataDir,
       config.daemonHost,
@@ -251,13 +250,7 @@ int main(int argc, char *argv[])
     if (!server.wallet().generateNewWallet(password))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to create wallet";
-      if (nodePtr)
-      {
-        nodePtr->shutdown();
-        delete nodePtr;
-        delete dispatcherPtr;
-      }
-      return 1;
+      goto shutdown;
     }
     logger(INFO, BRIGHT_GREEN) << "New wallet created: " << server.wallet().getAddress();
 
@@ -273,13 +266,7 @@ int main(int argc, char *argv[])
     if (colon == std::string::npos)
     {
       logger(ERROR, BRIGHT_RED) << "Invalid key format. Use spendkey:viewkey";
-      if (nodePtr)
-      {
-        nodePtr->shutdown();
-        delete nodePtr;
-        delete dispatcherPtr;
-      }
-      return 1;
+      goto shutdown;
     }
 
     std::string spendKey = config.importKeys.substr(0, colon);
@@ -291,13 +278,7 @@ int main(int argc, char *argv[])
     if (!server.wallet().importFromKeys(viewKey, spendKey, password))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to import wallet";
-      if (nodePtr)
-      {
-        nodePtr->shutdown();
-        delete nodePtr;
-        delete dispatcherPtr;
-      }
-      return 1;
+      goto shutdown;
     }
     logger(INFO, BRIGHT_GREEN) << "Wallet imported: " << server.wallet().getAddress();
 
@@ -316,13 +297,7 @@ int main(int argc, char *argv[])
     if (!server.wallet().unlock(password))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to unlock wallet. Wrong password?";
-      if (nodePtr)
-      {
-        nodePtr->shutdown();
-        delete nodePtr;
-        delete dispatcherPtr;
-      }
-      return 1;
+      goto shutdown;
     }
     logger(INFO, BRIGHT_GREEN) << "Wallet unlocked: " << server.wallet().getAddress();
 
@@ -337,13 +312,7 @@ int main(int argc, char *argv[])
   if (!server.start())
   {
     logger(ERROR, BRIGHT_RED) << "Failed to start RPC server";
-    if (nodePtr)
-    {
-      nodePtr->shutdown();
-      delete nodePtr;
-      delete dispatcherPtr;
-    }
-    return 1;
+    goto shutdown;
   }
 
   logger(INFO, BRIGHT_GREEN) << "conceal-rpc server running on http://127.0.0.1:" << config.rpcPort;
@@ -366,14 +335,17 @@ int main(int argc, char *argv[])
   while (!g_shutdown.load())
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+shutdown:
   logger(INFO) << "Shutting down...";
+
   server.stop();
+
   if (nodePtr)
   {
     nodePtr->shutdown();
-    delete nodePtr;
+    nodePtr.reset();
   }
-  delete dispatcherPtr;
+
   logger(INFO) << "conceal-rpc stopped.";
 
   return 0;

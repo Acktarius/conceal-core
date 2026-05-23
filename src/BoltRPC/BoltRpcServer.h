@@ -99,10 +99,11 @@ namespace BoltRPC
     common::JsonValue rpc_syncNow(const common::JsonValue &params);
     common::JsonValue rpc_exportKeys(const common::JsonValue &params);
     common::JsonValue rpc_exportState(const common::JsonValue &params);
+    common::JsonValue rpc_listWallets(const common::JsonValue &params);
+    common::JsonValue rpc_setActiveWallet(const common::JsonValue &params);
 
     // ── Helpers ────────────────────────────────────────────────────────────
-    common::JsonValue makeResult(const common::JsonValue &data) const;
-    common::JsonValue makeError(int code, const std::string &message) const;
+    common::JsonValue makeErrorObj(int code, const std::string &message) const;
 
     // ── Members ────────────────────────────────────────────────────────────
     uint16_t m_port;

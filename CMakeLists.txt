@@ -162,7 +162,7 @@ elseif(NOT MSVC)
   set(Boost_LIBRARIES "${Boost_LIBRARIES};rt")
 endif()
 
-# option(BUILD_TESTS "Build tests." ON)
+#option(BUILD_TESTS "Build tests." ON)
 option(BUILD_MIGRATION_GUI "Build wxWidgets migration GUI (conceald-migrate-gui)" OFF)
 
 if(BUILD_TESTS)

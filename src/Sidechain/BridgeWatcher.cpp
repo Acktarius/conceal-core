@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "BridgeWatcher.h"
+#include "BridgeMultisigHandler.h"
 #include "SidechainConfig.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/Currency.h"
@@ -567,5 +568,20 @@ namespace Sidechain
     }
 
     return true;
+  }
+
+  cn::MultisigPaymentOutput BridgeWatcher::createBridgeMultisigOutput(
+      const crypto::PublicKey &userKey,
+      uint64_t amount,
+      uint32_t lockBlocks,
+      const std::vector<uint8_t> &htlcData) const
+  {
+    return BridgeMultisigHandler::createBridgeDeposit(
+        m_bridgeSpendPub, userKey, amount, lockBlocks, htlcData);
+  }
+
+  bool BridgeWatcher::isBridgeMultisigOutput(const cn::MultisigPaymentOutput &output) const
+  {
+    return BridgeMultisigHandler::isBridgeOutput(output, m_bridgeSpendPub);
   }
 }

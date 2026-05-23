@@ -89,6 +89,22 @@ transaction_types::OutputType getTransactionOutputType(const TransactionOutputTa
   if (out.type() == typeid(MultisignatureOutput)) {
     return transaction_types::OutputType::Multisignature;
   }
+  if (out.type() == typeid(StandardPaymentOutput))
+  {
+    return transaction_types::OutputType::StandardPayment;
+  }
+  if (out.type() == typeid(MultisigPaymentOutput))
+  {
+    return transaction_types::OutputType::MultisigPayment;
+  }
+  if (out.type() == typeid(DomainRegistrationOutput))
+  {
+    return transaction_types::OutputType::DomainRegistration;
+  }
+  if (out.type() == typeid(DomainDeletionOutput))
+  {
+    return transaction_types::OutputType::DomainDeletion;
+  }
   return transaction_types::OutputType::Invalid;
 }
 

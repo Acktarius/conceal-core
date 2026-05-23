@@ -1,3 +1,6 @@
+// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Distributed under the MIT/X11 software license
+
 #include "CryptoHelpers.h"
 #include "Common/Util.h"
 #include "Common/Varint.h"
@@ -40,10 +43,9 @@ namespace BoltSync
     return getObjectHash(tx, hash);
   }
 
-  // Two-pass filter helpers
+  // ── View tag helpers ─────────────────────────────────────────────────
   namespace
   {
-
     // Shared buffer builder for view tag computation.
     // Returns the number of bytes written to buf.
     // Buffer layout: salt[8] || derivation[32] || varint(outputIndex)
@@ -100,68 +102,24 @@ namespace BoltSync
     return reinterpret_cast<const uint8_t *>(&h)[0];
   }
 
-  void computeWalletNullifier(const crypto::PublicKey &outputKey,
-                              uint32_t blockHeight,
-                              uint8_t nullifier[4])
-  {
-    // nullifier = H(outputKey || blockHeight)[0:4]
-    uint8_t buf[32 + 4];
-    std::memcpy(buf, &outputKey, 32);
-    for (int i = 0; i < 4; ++i)
-    {
-      buf[32 + i] = static_cast<uint8_t>((blockHeight >> (8 * i)) & 0xFF);
-    }
-
-    crypto::Hash h;
-    crypto::cn_fast_hash(buf, sizeof(buf), reinterpret_cast<char *>(&h));
-    std::memcpy(nullifier, &h, 4);
-  }
-
   bool passesFilter(const crypto::KeyDerivation &derivation,
                     size_t outputIndex,
-                    const crypto::PublicKey &outputKey,
-                    uint32_t blockHeight,
-                    uint8_t expectedViewTag,
-                    const uint8_t expectedNullifier[4])
+                    uint8_t expectedViewTag)
   {
-    // Pass 1: View tag
     uint8_t computedTag = computeWalletViewTag(derivation, outputIndex);
-    if (computedTag != expectedViewTag)
-      return false;
-
-    // Pass 2: Nullifier
-    uint8_t computedNullifier[4];
-    computeWalletNullifier(outputKey, blockHeight, computedNullifier);
-    if (std::memcmp(computedNullifier, expectedNullifier, 4) != 0)
-      return false;
-
-    return true;
+    return computedTag == expectedViewTag;
   }
 
   bool passesFilter(const crypto::PublicKey &txPubKey,
                     const crypto::SecretKey &viewSecretKey,
                     size_t outputIndex,
-                    const crypto::PublicKey &outputKey,
-                    uint32_t blockHeight,
-                    uint8_t expectedViewTag,
-                    const uint8_t expectedNullifier[4])
+                    uint8_t expectedViewTag)
   {
-    // Compute derivation from txPubKey and view secret key
     crypto::KeyDerivation derivation;
     if (!crypto::generate_key_derivation(txPubKey, viewSecretKey, derivation))
       return false;
 
-    // Pass 1: View tag (using derivation, matching Monero's derive_view_tag)
     uint8_t computedTag = computeWalletViewTag(derivation, outputIndex);
-    if (computedTag != expectedViewTag)
-      return false;
-
-    // Pass 2: Nullifier
-    uint8_t computedNullifier[4];
-    computeWalletNullifier(outputKey, blockHeight, computedNullifier);
-    if (std::memcmp(computedNullifier, expectedNullifier, 4) != 0)
-      return false;
-
-    return true;
+    return computedTag == expectedViewTag;
   }
 } // namespace BoltSync

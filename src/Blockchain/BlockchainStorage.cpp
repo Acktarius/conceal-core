@@ -336,6 +336,11 @@ namespace cn
       valid = false;
       logger(logging::INFO, logging::BRIGHT_WHITE) << "invalid output";
     }
+    if (!checkDomainRegistrationFee(tx, block.height))
+    {
+      valid = false;
+      logger(logging::INFO, logging::BRIGHT_WHITE) << "invalid domain registration fee";
+    }
 
     if (!valid)
     {
@@ -371,24 +376,25 @@ namespace cn
     // Atomic write — single transaction, immediate commit
     m_mdbxStorage->pushCompleteBlock(height, blockHash, ba, hdr);
 
-    // Build and store filter record for this block
-    try
+    // Build and store filter record for this block (pre-fork only)
+    if (block.height < parameters::UPGRADE_HEIGHT_V9)
     {
-      // Collect all transactions for this block (skip base tx at index 0)
-      std::vector<Transaction> allTxs;
-      for (uint32_t i = 1; i < block.transactions.size(); ++i)
-        allTxs.push_back(block.transactions[i].tx);
+      try
+      {
+        std::vector<Transaction> allTxs;
+        for (uint32_t i = 1; i < block.transactions.size(); ++i)
+          allTxs.push_back(block.transactions[i].tx);
 
-      BlockFilterRecord filterRecord = buildBlockFilterRecord(
-          block.bl, block.height, allTxs);
-      m_mdbxStorage->storeBlockFilterRecord(block.height, filterRecord);
-    }
-    catch (const std::exception &e)
-    {
-      // Filter building failure is non-fatal — log and continue
-      logger(logging::WARNING, logging::BRIGHT_YELLOW)
-          << "Failed to build filter record for block " << block.height
-          << ": " << e.what();
+        BlockFilterRecord filterRecord = buildBlockFilterRecord(
+            block.bl, block.height, allTxs);
+        m_mdbxStorage->storeBlockFilterRecord(block.height, filterRecord);
+      }
+      catch (const std::exception &e)
+      {
+        logger(logging::WARNING, logging::BRIGHT_YELLOW)
+            << "Failed to build filter record for block " << block.height
+            << ": " << e.what();
+      }
     }
 
     // Update in-memory index
@@ -528,6 +534,20 @@ namespace cn
         transaction.m_global_output_indexes[output] = static_cast<uint32_t>(amountOutputs.size());
         amountOutputs.push_back({transactionIndex, static_cast<uint16_t>(output), false});
       }
+      else if (transaction.tx.outputs[output].target.type() == typeid(StandardPaymentOutput))
+      {
+        auto &amountOutputs = m_outputs[transaction.tx.outputs[output].amount];
+        transaction.m_global_output_indexes[output] = static_cast<uint32_t>(amountOutputs.size());
+        amountOutputs.push_back(std::make_pair<>(transactionIndex, output));
+      }
+      else if (transaction.tx.outputs[output].target.type() == typeid(MultisigPaymentOutput))
+      {
+        auto &amountOutputs = m_multisignatureOutputs[transaction.tx.outputs[output].amount];
+        transaction.m_global_output_indexes[output] = static_cast<uint32_t>(amountOutputs.size());
+        amountOutputs.push_back({transactionIndex, static_cast<uint16_t>(output), false});
+      }
+      // DomainRegistrationOutput and DomainDeletionOutput are not spendable,
+      // so they don't need global output indexing
     }
 
     m_paymentIdIndex.add(transaction.tx);
@@ -546,6 +566,11 @@ namespace cn
         popKeyOutput(output.amount, transactionIndex, transaction.outputs.size() - 1 - outputIndex);
       else if (output.target.type() == typeid(MultisignatureOutput))
         popMultisigOutput(output.amount, transactionIndex, transaction.outputs.size() - 1 - outputIndex);
+      else if (output.target.type() == typeid(StandardPaymentOutput))
+        popKeyOutput(output.amount, transactionIndex, transaction.outputs.size() - 1 - outputIndex);
+      else if (output.target.type() == typeid(MultisigPaymentOutput))
+        popMultisigOutput(output.amount, transactionIndex, transaction.outputs.size() - 1 - outputIndex);
+      // Domain outputs don't have global output entries to pop
     }
 
     // Unmark key images

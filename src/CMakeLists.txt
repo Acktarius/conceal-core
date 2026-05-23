@@ -30,6 +30,7 @@ file(GLOB_RECURSE CLIENT_WALLET_FILES ClientWallet/*)
 file(GLOB_RECURSE BOLTRPC_FILES BoltRPC/*)
 file(GLOB_RECURSE SIDECHAIN_FILES Sidechain/*)
 file(GLOB_RECURSE BOLTHTTP_FILES BoltHttp/*)
+file(GLOB_RECURSE NODECLIENT_FILES NodeClient/*)
 
 if(MSVC OR MINGW)
   file(GLOB_RECURSE System System/* Platform/Windows/System/*)
@@ -46,6 +47,7 @@ source_group("BoltRPC" FILES ${BOLTRPC_FILES})
 source_group("BoltSync" FILES ${BOLTSYNC_FILES})
 source_group("BoltCore" FILES ${BOLTCORE_FILES})
 source_group("BoltHttp" FILES ${BOLTHTTP_FILES})
+source_group("NodeClient" FILES ${NODECLIENT_FILES})
 source_group("Sidechain" FILES ${SIDECHAIN_FILES})
 source_group("ClientWallet" FILES ${CLIENT_WALLET_FILES})
 
@@ -71,6 +73,18 @@ add_library(BoltSync STATIC ${BOLTSYNC_FILES})
 add_library(BoltCore STATIC ${BOLTCORE_FILES})
 add_library(BoltHttp STATIC ${BOLTHTTP_FILES})
 
+# NodeClient — clean INode implementation using BoltHttp (no legacy coroutines)
+add_library(NodeClientLib STATIC ${NODECLIENT_FILES})
+target_link_libraries(NodeClientLib PUBLIC
+    BoltHttp
+    CryptoNoteCore
+    Serialization
+    Common
+    crypto
+    ${Boost_LIBRARIES}
+)
+add_dependencies(NodeClientLib version)
+
 add_library(Storage STATIC ${MDBX_STORAGE_FILES})
 add_dependencies(Storage version)
 target_link_libraries(Storage PRIVATE ${MDBX_LIBRARY_TARGET} Blockchain Serialization Common crypto)
@@ -86,15 +100,15 @@ target_link_libraries(SidechainLib PUBLIC Blockchain NodeRpcProxy System Rpc HTT
   ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 add_dependencies(SidechainLib version)
 
-# BoltRPC static library
+# BoltRPC static library — uses NodeClientLib instead of NodeRpcProxy
 add_library(BoltRpcLib STATIC ${BOLTRPC_FILES})
 target_link_libraries(BoltRpcLib PUBLIC
     Blockchain
     BoltSync
     BoltCore
     BoltHttp
+    NodeClientLib
     Mnemonics
-    NodeRpcProxy
     Rpc
     HTTP
     System
@@ -115,7 +129,7 @@ add_dependencies(BoltRpcLib version)
 target_link_libraries(Blockchain PUBLIC CryptoNoteCore Storage Common crypto Serialization Logging ${Boost_LIBRARIES})
 add_dependencies(Blockchain version)
 
-target_link_libraries(BoltSync PUBLIC Blockchain CryptoNoteCore Storage Common crypto Serialization ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(BoltSync PUBLIC BoltCore Blockchain CryptoNoteCore Storage Common crypto Serialization ${CMAKE_THREAD_LIBS_INIT})
 target_link_libraries(BoltCore PUBLIC Blockchain CryptoNoteCore Common crypto ${Boost_LIBRARIES})
 
 # ── Executables ───────────────────────────────────────────────────────────
@@ -158,15 +172,15 @@ link_daemon(Daemon)
 
 target_link_libraries(ConcealWallet Wallet NodeRpcProxy Transfers Rpc HTTP CryptoNoteCore Blockchain Storage System Logging Common crypto ${Boost_LIBRARIES} Serialization Mnemonics)
 
-# ── ClientWallet ──────────────────────────────────────────────────────────
+# ── ClientWallet — uses NodeClientLib instead of NodeRpcProxy ─────────────
 target_link_libraries(ClientWallet
     BoltCore
     BoltSync
     BoltRpcLib
+    NodeClientLib
     Storage
     Blockchain
     CryptoNoteCore
-    NodeRpcProxy
     Rpc
     HTTP
     System
@@ -180,14 +194,14 @@ target_link_libraries(ClientWallet
     -Wl,--end-group
 )
 
-# ── BoltRPC ───────────────────────────────────────────────────────────────
+# ── BoltRPC — uses NodeClientLib instead of NodeRpcProxy ──────────────────
 target_link_libraries(BoltRPC
     BoltRpcLib
     BoltSync
     BoltCore
     BoltHttp
+    NodeClientLib
     Mnemonics
-    NodeRpcProxy
     Rpc
     HTTP
     System
@@ -233,6 +247,7 @@ add_dependencies(BoltRPC version)
 add_dependencies(Sidechain version)
 add_dependencies(Storage version)
 add_dependencies(BoltRpcLib version)
+add_dependencies(NodeClientLib version)
 add_dependencies(ClientWallet version)
 
 set_property(TARGET ConcealWallet PROPERTY OUTPUT_NAME "concealwallet")

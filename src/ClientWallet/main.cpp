@@ -24,7 +24,7 @@
 
 #include "Logging/ConsoleLogger.h"
 
-#include "NodeRpcProxy/NodeRpcProxy.h"
+#include "NodeClient/NodeClient.h"
 #include "Rpc/HttpClient.h"
 #include "System/Dispatcher.h"
 
@@ -37,6 +37,7 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <cstring>
 
 enum class ConnectionMode
 {
@@ -452,15 +453,21 @@ int main(int argc, char *argv[])
   platform_system::Dispatcher dispatcher;
 
   ClientWallet::NullNode nullNode;
-  std::unique_ptr<cn::NodeRpcProxy> remoteNode;
-  std::shared_ptr<cn::HttpClient> httpClient;
+  std::unique_ptr<cn::INode> remoteNode;
   cn::INode *nodePtr = &nullNode;
 
   if (cfg.mode == ConnectionMode::Remote)
   {
-    remoteNode.reset(new cn::NodeRpcProxy(cfg.daemonHost, cfg.daemonPort));
+    auto *client = new NodeClient::NodeClient(cfg.daemonHost, cfg.daemonPort);
+    remoteNode.reset(client);
     nodePtr = remoteNode.get();
-    httpClient = std::make_shared<cn::HttpClient>(dispatcher, cfg.daemonHost, cfg.daemonPort);
+
+    // Init the connection
+    bool initDone = false;
+    client->init([&initDone](std::error_code ec)
+                 { initDone = true; });
+    while (!initDone)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 
   auto wallet = std::make_shared<BoltCore::Wallet>(
@@ -484,20 +491,8 @@ int main(int argc, char *argv[])
   {
     sync->setNode(nodePtr);
 
-    if (httpClient)
-    {
-      sync->setDaemonRpc([httpClient](const std::string &method, const std::string &paramsJson) -> std::string
-                         {
-        cn::HttpRequest req;
-        cn::HttpResponse res;
-        req.setUrl("/json_rpc");
-        std::string body = R"({"jsonrpc":"2.0","id":1,"method":")" + method + R"(","params":)" + paramsJson + "}";
-        req.setBody(body);
-        httpClient->request(req, res);
-        if (res.getStatus() == cn::HttpResponse::STATUS_200)
-          return res.getBody();
-        return ""; });
-    }
+    // NodeClient handles all daemon communication internally.
+    // SyncEngine uses cn::INode interface directly.
   }
 
   if (!cfg.stateFile.empty())

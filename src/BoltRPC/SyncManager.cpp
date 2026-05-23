@@ -134,14 +134,6 @@ namespace BoltRPC
       entry.output_index = static_cast<uint8_t>(output_index);
       entry.tx_index = static_cast<uint16_t>(tx_index);
 
-      // Parse nullifier hex string
-      std::string nullifierHex = jsonGetString(obj, "nullifier");
-      if (!nullifierHex.empty())
-      {
-        // nullifier is serialized as a hex string in JSON
-        common::podFromHex(nullifierHex, entry.nullifier);
-      }
-
       return entry;
     }
 
@@ -242,7 +234,7 @@ namespace BoltRPC
   // ─── Bootstrap Sync ────────────────────────────────────────────────────────
   //
   // 1. Download filter records for the entire chain in batches
-  // 2. Run two-pass filter locally to find candidate outputs
+  // 2. Run view-tag filter locally to find candidate outputs
   // 3. Fetch full blocks only for blocks that contain candidates
   // 4. Do full ECDH derivation to confirm ownership
 
@@ -309,7 +301,7 @@ namespace BoltRPC
     if (m_stop.load())
       return;
 
-    // Step 3: Run two-pass filter locally
+    // Step 3: Run view-tag filter locally
     progress.phase = SyncProgress::FILTERING;
     if (m_onProgress)
       m_onProgress(progress);
@@ -641,7 +633,7 @@ namespace BoltRPC
     return !blocks.empty();
   }
 
-  // ─── Two-pass filter ───────────────────────────────────────────────────────
+  // ─── View-tag filter ───────────────────────────────────────────────────────
 
   void SyncManager::runFilterPass(const std::vector<cn::BlockFilterRecord> &records,
                                   std::vector<FilterCandidate> &candidates)
@@ -663,18 +655,16 @@ namespace BoltRPC
         if (!crypto::generate_key_derivation(entry.txPubKey, m_viewSecretKey, derivation))
           continue;
 
-        // Pass 1: View tag check
+        // View tag check
         uint8_t computedTag = BoltSync::computeWalletViewTag(derivation, entry.output_index);
         if (computedTag != entry.view_tag)
           continue;
 
-        // Pass 1 passed! Store as candidate with the expected nullifier
-        // for Pass 2 verification once we have the output key from the block.
+        // View tag passed! Store as candidate for full ECDH derivation
         FilterCandidate candidate;
         candidate.blockHeight = record.block_height;
         candidate.txIndex = entry.tx_index;
         candidate.outputIndex = entry.output_index;
-        std::memcpy(candidate.expectedNullifier, entry.nullifier, 4);
         candidates.push_back(candidate);
       }
     }
@@ -737,13 +727,7 @@ namespace BoltRPC
       if (txPubKey == NULL_PUBLIC_KEY)
         continue;
 
-      // ── Pass 2: Nullifier check before expensive ECDH ────────────────
-      uint8_t computedNullifier[4];
-      BoltSync::computeWalletNullifier(keyOut.key, candidate.blockHeight, computedNullifier);
-      if (std::memcmp(computedNullifier, candidate.expectedNullifier, 4) != 0)
-        continue;
-
-      // ── Full ECDH derivation ─────────────────────────────────────────
+      // Full ECDH derivation
       crypto::KeyDerivation derivation;
       if (!crypto::generate_key_derivation(txPubKey, m_viewSecretKey, derivation))
         continue;

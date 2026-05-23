@@ -8,6 +8,7 @@
 #include <string>
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/Currency.h"
+#include "CryptoNoteCore/NewOutputTypes.h"
 
 namespace cn
 {
@@ -58,6 +59,77 @@ namespace cn
                       { return !check_key(key); }))
       {
         m_error = "contains multisignature output with invalid public key";
+        return false;
+      }
+      return true;
+    }
+    bool operator()(const StandardPaymentOutput &out) const
+    {
+      if (m_amount == 0)
+      {
+        m_error = "zero amount standard payment output";
+        return false;
+      }
+      if (!check_key(out.key))
+      {
+        m_error = "standard payment output with invalid key";
+        return false;
+      }
+      return true;
+    }
+
+    bool operator()(const MultisigPaymentOutput &out) const
+    {
+      if (m_tx.version < TRANSACTION_VERSION_3)
+      {
+        m_error = "contains multisig payment output but has version ";
+        m_error += std::to_string(m_tx.version);
+        return false;
+      }
+      if (out.num_keys > out.keys.size())
+      {
+        m_error = "multisig payment output with invalid key count";
+        return false;
+      }
+      if (std::any_of(out.keys.begin(), out.keys.end(),
+                      [](const crypto::PublicKey &key)
+                      { return !check_key(key); }))
+      {
+        m_error = "multisig payment output with invalid public key";
+        return false;
+      }
+      if (out.isTimeLocked() && out.term == 0)
+      {
+        m_error = "time-locked multisig payment output with zero term";
+        return false;
+      }
+      return true;
+    }
+
+    bool operator()(const DomainRegistrationOutput &out) const
+    {
+      // Domain registrations are non-spendable outputs.
+      // Validate basic structure: domain must be non-empty, tier 1-3.
+      if (out.domain.empty())
+      {
+        m_error = "domain registration with empty domain name";
+        return false;
+      }
+      if (out.tier < 1 || out.tier > 3)
+      {
+        m_error = "domain registration with invalid tier";
+        return false;
+      }
+      return true;
+    }
+
+    bool operator()(const DomainDeletionOutput &out) const
+    {
+      // Domain deletions are non-spendable outputs.
+      // Validate basic structure: domain must be non-empty.
+      if (out.domain.empty())
+      {
+        m_error = "domain deletion with empty domain name";
         return false;
       }
       return true;

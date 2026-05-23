@@ -53,6 +53,16 @@ namespace Sidechain
     // Get pending unlock count
     size_t getPendingUnlockCount() const;
 
+    // Post-fork: create an authorized multisig deposit output for the bridge
+    cn::MultisigPaymentOutput createBridgeMultisigOutput(
+        const crypto::PublicKey &userKey,
+        uint64_t amount,
+        uint32_t lockBlocks,
+        const std::vector<uint8_t> &htlcData) const;
+
+    // Check if a found output is a bridge-authorized multisig output
+    bool isBridgeMultisigOutput(const cn::MultisigPaymentOutput &output) const;
+
   private:
     void watchLoop(const DepositCallback &onDeposit);
     void unlockLoop();

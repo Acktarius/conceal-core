@@ -1,7 +1,11 @@
+// Copyright (c) 2018-2023 Conceal Network & Conceal Devs
+// Distributed under the MIT/X11 software license
+
 #include "BlockDeserializer.h"
 #include "CryptoHelpers.h"
 
 #include "Blockchain/BlockchainFilter.h"
+#include "BoltCore/NewOutputScanner.h"
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
@@ -92,25 +96,44 @@ namespace BoltSync
 
       static const crypto::PublicKey NULL_KEY = {};
 
-      // Load the filter record for this block
+      // Load the filter record for this block (only needed for legacy outputs)
       cn::BlockFilterRecord filterRecord;
-      bool haveFilter = ctx.storage.getBlockFilterRecord(h, filterRecord);
+      bool haveFilter = false;
       size_t filterIdx = 0;
 
-      auto scanTx = [&](cn::Transaction &tx, uint32_t blockHeight)
+      auto scanTx = [&](cn::Transaction &tx, uint32_t blockHeight,
+                        const std::vector<uint32_t> *globalIndexes)
       {
         crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
 
         if (txPubKey == NULL_KEY)
           return;
 
-        crypto::KeyDerivation derivation;
-        if (!crypto::generate_key_derivation(txPubKey, ctx.viewKey, derivation))
-          return;
-
         crypto::Hash txHash;
         if (!getTxHash(tx, txHash))
           return;
+
+        // ── Fork: use new scanner for transactions with new output types ──
+        if (BoltCore::NewOutputScanner::hasNewOutputs(tx))
+        {
+          std::vector<uint32_t> indexes;
+          if (globalIndexes)
+            indexes = *globalIndexes;
+
+          BoltCore::NewOutputScanner::scanTransaction(
+              tx, txPubKey, indexes, blockHeight,
+              ctx.viewKey, ctx.spendPublicKey, ctx.spendKey, ctx.results);
+          return; // Skip legacy scanning for this tx
+        }
+
+        // ── Legacy scanning below (pre-fork outputs) ──
+
+        // Lazy-load filter record on first legacy transaction
+        if (!haveFilter)
+        {
+          haveFilter = ctx.storage.getBlockFilterRecord(h, filterRecord);
+          filterIdx = 0;
+        }
 
         size_t keyIndex = 0;
 
@@ -143,6 +166,13 @@ namespace BoltSync
             }
 
             // Full ECDH derivation
+            crypto::KeyDerivation derivation;
+            if (!crypto::generate_key_derivation(txPubKey, ctx.viewKey, derivation))
+            {
+              ++keyIndex;
+              continue;
+            }
+
             crypto::PublicKey derivedKey;
             if (crypto::derive_public_key(derivation, keyIndex, ctx.spendPublicKey, derivedKey) &&
                 derivedKey == keyOut.key)
@@ -170,6 +200,14 @@ namespace BoltSync
           else if (out.target.type() == typeid(cn::MultisignatureOutput))
           {
             const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
+
+            crypto::KeyDerivation derivation;
+            if (!crypto::generate_key_derivation(txPubKey, ctx.viewKey, derivation))
+            {
+              keyIndex += msigOut.keys.size();
+              continue;
+            }
+
             for (size_t ki = 0; ki < msigOut.keys.size(); ++ki)
             {
               crypto::PublicKey recoveredSpend;
@@ -196,10 +234,16 @@ namespace BoltSync
         }
       };
 
-      // transactions[0] is the coinbase — process all transactions
-      // through the same path so filterIdx stays aligned
-      for (auto &tx : transactions)
-        scanTx(tx, h);
+      // Scan base transaction and all block transactions
+      // transactions[0] is the coinbase — process it too
+      scanTx(block.baseTransaction, h, NULL);
+
+      for (size_t txIdx = 0; txIdx < transactions.size(); ++txIdx)
+      {
+        // We don't have global indexes in the current BlockEntry deserializer
+        // Pass NULL for now — global indexes are only needed for memo encryption
+        scanTx(transactions[txIdx], h, NULL);
+      }
     }
     catch (const std::exception &)
     {

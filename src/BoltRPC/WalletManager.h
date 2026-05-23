@@ -142,6 +142,9 @@ namespace BoltRPC
 
     void setDaemonRpcCallback(DaemonRpcCallback callback) { m_rpcCallback = std::move(callback); }
 
+    void setActiveWallet(const std::string &walletName);
+    std::vector<std::string> listWalletFiles() const;
+
   private:
     // ── Internal helpers ────────────────────────────────────────────────────
     void onSyncProgress(const SyncProgress &progress);
@@ -166,6 +169,8 @@ namespace BoltRPC
 
     std::string m_daemonHost;
     uint16_t m_daemonPort;
+
+    std::string m_activeWallet;
 
     WalletKeys m_keys;
     WalletState m_state;

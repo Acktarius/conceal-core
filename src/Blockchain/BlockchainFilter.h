@@ -15,25 +15,21 @@
 namespace cn
 {
 
-  // A single output's filter data for the two-pass recognition protocol.
+  // A single output's filter data for the view-tag recognition protocol.
   //
   // The daemon precomputes these for every KeyOutput in every block.
-  // Wallets download filter records, run the two-pass check locally, and
-  // only fetch full blocks for outputs that pass both filters.
+  // Wallets download filter records and run the view-tag check locally,
+  // only fetching full blocks for outputs that pass.
   //
-  // Pass 1 (view_tag):   H("view_tag" || txPubKey || varint(outputIndex))[0]
-  //                      1-byte filter — eliminates ~255/256 non-owned outputs.
-  // Pass 2 (nullifier):  H(outputKey || blockHeight)[0:4]
-  //                      4-byte filter — eliminates ~(2^32 - 1)/2^32 false positives
-  //                      from pass 1, giving a combined false positive rate of ~1/2^32.
+  // view_tag = H("view_tag" || txPubKey || varint(outputIndex))[0]
+  // 1-byte filter — eliminates ~255/256 non-owned outputs.
   //
   // The txPubKey is included so the wallet can recompute the view tag using
   // the key derivation (derivation = txPubKey * viewSecretKey) without
   // needing the full transaction data.
   struct FilterEntry
   {
-    uint8_t view_tag;           // 1 byte  - first-pass filter
-    uint8_t nullifier[4];       // 4 bytes - second-pass filter
+    uint8_t view_tag;           // 1 byte  - view tag filter
     uint8_t output_index;       // 1 byte  - position inside the transaction
     uint16_t tx_index;          // 2 bytes - position inside the block
     crypto::PublicKey txPubKey; // 32 bytes - tx public key (for wallet-side derivation)

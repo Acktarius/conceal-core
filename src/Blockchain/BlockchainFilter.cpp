@@ -18,7 +18,6 @@ namespace cn
   void serialize(FilterEntry &entry, ISerializer &s)
   {
     s.binary(&entry.view_tag, sizeof(entry.view_tag), "view_tag");
-    s.binary(entry.nullifier, sizeof(entry.nullifier), "nullifier");
     s(entry.output_index, "output_index");
     s(entry.tx_index, "tx_index");
     s.binary(&entry.txPubKey, sizeof(entry.txPubKey), "tx_pub_key");
@@ -101,8 +100,6 @@ namespace cn
       {
         if (output.target.type() == typeid(KeyOutput))
         {
-          const auto &ko = boost::get<KeyOutput>(output.target);
-
           FilterEntry entry;
           entry.view_tag = computeViewTag(txPubKey, outputIndex);
           entry.output_index = outputIndex;

@@ -7,8 +7,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <cstring>
 #include <sstream>
+#include <chrono>
+#include <thread>
 
 namespace BoltHttp
 {
@@ -28,7 +31,7 @@ namespace BoltHttp
 
   bool HttpClient::connect()
   {
-    m_socket = socket(AF_INET, SOCK_STREAM, 0);
+    m_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (m_socket < 0)
       return false;
 
@@ -37,12 +40,45 @@ namespace BoltHttp
     addr.sin_port = htons(m_port);
     inet_pton(AF_INET, m_host.c_str(), &addr.sin_addr);
 
-    if (::connect(m_socket, (sockaddr *)&addr, sizeof(addr)) < 0)
+    int result = ::connect(m_socket, (sockaddr *)&addr, sizeof(addr));
+    if (result < 0 && errno != EINPROGRESS)
     {
       close(m_socket);
       m_socket = -1;
       return false;
     }
+
+    // Wait for connection with 5-second timeout
+    if (result < 0) // EINPROGRESS
+    {
+      fd_set fdset;
+      FD_ZERO(&fdset);
+      FD_SET(m_socket, &fdset);
+      struct timeval tv = {5, 0}; // 5 second timeout
+
+      result = select(m_socket + 1, nullptr, &fdset, nullptr, &tv);
+      if (result <= 0)
+      {
+        close(m_socket);
+        m_socket = -1;
+        return false;
+      }
+
+      // Check if connection succeeded
+      int error = 0;
+      socklen_t len = sizeof(error);
+      getsockopt(m_socket, SOL_SOCKET, SO_ERROR, &error, &len);
+      if (error != 0)
+      {
+        close(m_socket);
+        m_socket = -1;
+        return false;
+      }
+    }
+
+    // Set back to blocking for recv/send
+    int flags = fcntl(m_socket, F_GETFL, 0);
+    fcntl(m_socket, F_SETFL, flags & ~O_NONBLOCK);
 
     return true;
   }
@@ -56,6 +92,10 @@ namespace BoltHttp
       resp.error = "Failed to connect to " + m_host + ":" + std::to_string(m_port);
       return resp;
     }
+
+    // Set receive timeout
+    struct timeval tv = {10, 0}; // 10 second recv timeout
+    setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::ostringstream request;
     request << "POST " << path << " HTTP/1.1\r\n"
@@ -74,7 +114,6 @@ namespace BoltHttp
       return resp;
     }
 
-    // Read response
     char buf[4096];
     std::string raw;
     while (true)
@@ -86,7 +125,6 @@ namespace BoltHttp
       raw += buf;
     }
 
-    // Parse response
     size_t headerEnd = raw.find("\r\n\r\n");
     if (headerEnd == std::string::npos)
     {
@@ -94,7 +132,6 @@ namespace BoltHttp
       return resp;
     }
 
-    // Parse status line
     std::string headers = raw.substr(0, headerEnd);
     std::istringstream headerStream(headers);
     std::string statusLine;
@@ -122,6 +159,9 @@ namespace BoltHttp
       resp.error = "Failed to connect to " + m_host + ":" + std::to_string(m_port);
       return resp;
     }
+
+    struct timeval tv = {10, 0}; // 10 second recv timeout
+    setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::ostringstream request;
     request << "GET " << path << " HTTP/1.1\r\n"
