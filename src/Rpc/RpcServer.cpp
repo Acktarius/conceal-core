@@ -2137,6 +2137,25 @@ bool RpcServer::on_get_domain(const COMMAND_RPC_GET_DOMAIN::request &req,
                                 "Domain not found: " + req.domain);
   }
 
+  if (req.include_proof)
+  {
+    crypto::Hash blockHash = m_core.getBlockIdByHeight(static_cast<uint32_t>(entry.registrationHeight));
+    Block blk;
+    if (m_core.getBlockByHash(blockHash, blk))
+    {
+      std::vector<crypto::Hash> txHashes;
+      txHashes.push_back(getObjectHash(blk.baseTransaction));
+      for (const auto &h : blk.transactionHashes)
+        txHashes.push_back(h);
+
+      MerkleProof proof = MerkleProof::build(txHashes, entry.transactionIndex);
+      res.merkle_root = common::podToHex(proof.rootHash);
+      res.merkle_branch.reserve(proof.branch.size());
+      for (const auto &b : proof.branch)
+        res.merkle_branch.push_back(common::podToHex(b));
+    }
+  }
+
   res.domain = entry.registration.domain;
   res.tier = entry.registration.tier;
   res.domain_pub = common::podToHex(entry.registration.domain_pub);

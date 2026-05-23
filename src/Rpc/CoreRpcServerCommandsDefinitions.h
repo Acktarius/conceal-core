@@ -1300,16 +1300,17 @@ struct COMMAND_RPC_GET_FILTER_RECORDS
     }
   };
 };
-
 struct COMMAND_RPC_GET_DOMAIN
 {
   struct request
   {
     std::string domain;
+    bool include_proof;
 
     void serialize(ISerializer &s)
     {
       KV_MEMBER(domain)
+      KV_MEMBER(include_proof)
     }
   };
 
@@ -1324,8 +1325,9 @@ struct COMMAND_RPC_GET_DOMAIN
     uint32_t registration_height;
     uint32_t transaction_index;
     uint32_t output_index;
-    std::string tx_hash;
     std::string status;
+    std::string merkle_root;
+    std::vector<std::string> merkle_branch;
 
     void serialize(ISerializer &s)
     {
@@ -1338,8 +1340,9 @@ struct COMMAND_RPC_GET_DOMAIN
       KV_MEMBER(registration_height)
       KV_MEMBER(transaction_index)
       KV_MEMBER(output_index)
-      KV_MEMBER(tx_hash)
       KV_MEMBER(status)
+      KV_MEMBER(merkle_root)
+      KV_MEMBER(merkle_branch)
     }
   };
 };
