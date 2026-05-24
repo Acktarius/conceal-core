@@ -1,7 +1,7 @@
 // Copyright (c) 2011-2017 The Cryptonote developers
 // Copyright (c) 2017-2018 The Circle Foundation & Conceal Devs
-// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 // Copyright (c) 2016-2019, The Karbo developers
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 //
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -17,18 +17,11 @@
 
 namespace cn
 {
-
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Construction
-  // ═══════════════════════════════════════════════════════════════════════════
-
   Checkpoints::Checkpoints(logging::ILogger &log)
       : logger(log, "checkpoints") {}
 
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Checkpoint management
-  // ═══════════════════════════════════════════════════════════════════════════
-
   bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str)
   {
     crypto::Hash h = NULL_HASH;
@@ -49,10 +42,7 @@ namespace cn
     return true;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Validation
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Validation
   bool Checkpoints::is_in_checkpoint_zone(uint32_t height) const
   {
     return !m_points.empty() && height <= m_points.rbegin()->first;
@@ -109,10 +99,7 @@ namespace cn
     return it->first < block_height;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Queries
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Queries
   std::vector<uint32_t> Checkpoints::getCheckpointHeights() const
   {
     std::vector<uint32_t> heights;
@@ -141,10 +128,7 @@ namespace cn
     return result;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Loading
-  // ═══════════════════════════════════════════════════════════════════════
-
+  // Loading
   bool Checkpoints::load_checkpoints()
   {
     const auto &checkpoints = m_testnet ? cn::TESTNET_CHECKPOINTS
@@ -247,10 +231,7 @@ namespace cn
     return true;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Saving
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Saving
   bool Checkpoints::save_checkpoints_to_file(const std::string &fileName) const
   {
     std::ofstream file(fileName);
@@ -274,10 +255,7 @@ namespace cn
     return true;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Configuration
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Configuration
   void Checkpoints::set_testnet(bool testnet)
   {
     m_testnet = testnet;

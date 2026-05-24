@@ -4,6 +4,7 @@
 
 #include "BoltRpcServer.h"
 #include "WalletManager.h"
+#include "MultiWalletManager.h"
 #include "SyncManager.h"
 #include "Common/StringTools.h"
 #include "Common/JsonValue.h"
@@ -28,9 +29,7 @@
 
 namespace BoltRPC
 {
-
-  // ─── Helper: Simple HTTP response builder ──────────────────────────────────
-
+  // Helper: Simple HTTP response builder
   namespace
   {
 
@@ -73,7 +72,7 @@ namespace BoltRPC
       return "";
     }
 
-    // Build a JSON-RPC error response string directly (avoids JsonValue bugs)
+    // Build a JSON-RPC error response string directly
     std::string buildJsonRpcError(int code, const std::string &message, const std::string &idJson)
     {
       std::ostringstream ss;
@@ -85,8 +84,7 @@ namespace BoltRPC
 
   } // anonymous namespace
 
-  // ─── Constructor / Destructor ──────────────────────────────────────────────
-
+  // Constructor — Single Wallet
   BoltRpcServer::BoltRpcServer(uint16_t port,
                                cn::INode &node,
                                const cn::Currency &currency,
@@ -94,12 +92,14 @@ namespace BoltRPC
                                const std::string &daemonHost,
                                uint16_t daemonPort)
       : m_port(port),
-        m_node(node),
+        m_node(&node),
         m_currency(currency),
         m_dataDir(dataDir),
         m_daemonHost(daemonHost),
         m_daemonPort(daemonPort),
-        m_walletManager(new WalletManager(node, currency, dataDir, daemonHost, daemonPort))
+        m_multiWalletMode(false),
+        m_walletManager(new WalletManager(node, currency, dataDir, daemonHost, daemonPort)),
+        m_multiWalletManager(nullptr)
   {
     m_walletManager->setDaemonRpcCallback(
         [this](const std::string &method, const std::string &paramsJson) -> std::string
@@ -113,13 +113,32 @@ namespace BoltRPC
     registerMethods();
   }
 
+  // Constructor — Multi Wallet
+  BoltRpcServer::BoltRpcServer(uint16_t port,
+                               MultiWalletManager &multiWallet,
+                               const cn::Currency &currency,
+                               const std::string &dataDir,
+                               const std::string &daemonHost,
+                               uint16_t daemonPort)
+      : m_port(port),
+        m_node(nullptr),
+        m_currency(currency),
+        m_dataDir(dataDir),
+        m_daemonHost(daemonHost),
+        m_daemonPort(daemonPort),
+        m_multiWalletMode(true),
+        m_walletManager(nullptr),
+        m_multiWalletManager(&multiWallet)
+  {
+    registerMultiMethods();
+  }
+
   BoltRpcServer::~BoltRpcServer()
   {
     stop();
   }
 
-  // ─── Lifecycle ─────────────────────────────────────────────────────────────
-
+  // Lifecycle
   bool BoltRpcServer::start()
   {
     if (m_running.exchange(true))
@@ -194,8 +213,7 @@ namespace BoltRPC
     m_corsDomain = domain;
   }
 
-  // ─── HTTP Listen Loop ─────────────────────────────────────────────────────
-
+  // HTTP Listen Loop
   void BoltRpcServer::httpListenLoop()
   {
     while (m_running.load())
@@ -274,12 +292,10 @@ namespace BoltRPC
     }
   }
 
-  // ─── Request Handling ─────────────────────────────────────────────────────
-
+  // Request Handling
   void BoltRpcServer::handleJsonRpc(const std::string &requestBody,
                                     std::string &responseBody)
   {
-    // Extract id from request for error responses
     std::string idStr = "null";
 
     try
@@ -290,7 +306,6 @@ namespace BoltRPC
         return;
       }
 
-      // Parse the request
       common::JsonValue request;
       try
       {
@@ -308,7 +323,6 @@ namespace BoltRPC
         return;
       }
 
-      // Extract id
       try
       {
         if (request.contains("id"))
@@ -321,7 +335,6 @@ namespace BoltRPC
       {
       }
 
-      // Extract method
       std::string method;
       try
       {
@@ -333,7 +346,6 @@ namespace BoltRPC
         return;
       }
 
-      // Extract params
       common::JsonValue params;
       try
       {
@@ -344,7 +356,6 @@ namespace BoltRPC
       {
       }
 
-      // Find handler
       auto handler = findMethod(method);
       if (!handler)
       {
@@ -353,7 +364,6 @@ namespace BoltRPC
         return;
       }
 
-      // Call handler and build response
       common::JsonValue result;
       try
       {
@@ -372,7 +382,6 @@ namespace BoltRPC
         return;
       }
 
-      // Build success response
       std::ostringstream ss;
       ss << R"({"jsonrpc":"2.0","id":)" << idStr << R"(,"result":)" << result.toString() << "}";
       responseBody = ss.str();
@@ -401,8 +410,7 @@ namespace BoltRPC
     responseBody = buildJsonRpcError(-32600, "Invalid Request", "null");
   }
 
-  // ─── Method Registration ──────────────────────────────────────────────────
-
+  // Method Registration — Single Wallet
   void BoltRpcServer::registerMethods()
   {
     m_methods["getStatus"] = [this](const common::JsonValue &p)
@@ -441,6 +449,62 @@ namespace BoltRPC
     { return rpc_setActiveWallet(p); };
   }
 
+  // Method Registration — Multi Wallet
+  void BoltRpcServer::registerMultiMethods()
+  {
+    // Query methods (require active wallet)
+    m_methods["getStatus"] = [this](const common::JsonValue &p)
+    { return rpc_multi_getStatus(p); };
+    m_methods["getBalance"] = [this](const common::JsonValue &p)
+    { return rpc_multi_getBalance(p); };
+    m_methods["getAddress"] = [this](const common::JsonValue &p)
+    { return rpc_multi_getAddress(p); };
+    m_methods["getOutputs"] = [this](const common::JsonValue &p)
+    { return rpc_multi_getOutputs(p); };
+    m_methods["getTransactions"] = [this](const common::JsonValue &p)
+    { return rpc_multi_getTransactions(p); };
+
+    // Wallet lifecycle
+    m_methods["createWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_createWallet(p); };
+    m_methods["importWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_importWallet(p); };
+    m_methods["loadWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_loadWallet(p); };
+    m_methods["unloadWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_unloadWallet(p); };
+    m_methods["deleteWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_deleteWallet(p); };
+    m_methods["listWallets"] = [this](const common::JsonValue &p)
+    { return rpc_multi_listWallets(p); };
+
+    // Transactions
+    m_methods["sendTransaction"] = [this](const common::JsonValue &p)
+    { return rpc_multi_sendTransaction(p); };
+    m_methods["sendDeposit"] = [this](const common::JsonValue &p)
+    { return rpc_multi_sendDeposit(p); };
+    m_methods["sendWithdrawal"] = [this](const common::JsonValue &p)
+    { return rpc_multi_sendWithdrawal(p); };
+
+    // Sync / Export / Admin
+    m_methods["syncNow"] = [this](const common::JsonValue &p)
+    { return rpc_multi_syncNow(p); };
+    m_methods["exportKeys"] = [this](const common::JsonValue &p)
+    { return rpc_multi_exportKeys(p); };
+    m_methods["exportState"] = [this](const common::JsonValue &p)
+    { return rpc_multi_exportState(p); };
+    m_methods["changePassword"] = [this](const common::JsonValue &p)
+    { return rpc_multi_changePassword(p); };
+    m_methods["importFromStateFile"] = [this](const common::JsonValue &p)
+    { return rpc_multi_importFromStateFile(p); };
+
+    // Legacy single-wallet aliases
+    m_methods["unlockWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_loadWallet(p); };
+    m_methods["lockWallet"] = [this](const common::JsonValue &p)
+    { return rpc_multi_unloadWallet(p); };
+  }
+
   RpcMethod BoltRpcServer::findMethod(const std::string &name) const
   {
     auto it = m_methods.find(name);
@@ -449,8 +513,19 @@ namespace BoltRPC
     return nullptr;
   }
 
-  // ─── RPC Method Implementations ───────────────────────────────────────────
+  // Wallet ID Extraction Helper
+  std::string BoltRpcServer::extractWalletId(const common::JsonValue &params) const
+  {
+    if (params.isObject() && params.contains("wallet_id"))
+      return params("wallet_id").getString();
 
+    if (m_multiWalletManager && m_multiWalletManager->hasActiveWallet())
+      return m_multiWalletManager->activeWalletId();
+
+    return "";
+  }
+
+  // Single-Wallet RPC Methods
   common::JsonValue BoltRpcServer::rpc_getStatus(const common::JsonValue &params)
   {
     WalletStatus status = m_walletManager->getStatus();
@@ -912,16 +987,6 @@ namespace BoltRPC
     return result;
   }
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────
-
-  common::JsonValue BoltRpcServer::makeErrorObj(int code, const std::string &message) const
-  {
-    common::JsonValue errObj(common::JsonValue::OBJECT);
-    errObj.insert("code", common::JsonValue(static_cast<int64_t>(code)));
-    errObj.insert("message", common::JsonValue(message));
-    return errObj;
-  }
-
   common::JsonValue BoltRpcServer::rpc_listWallets(const common::JsonValue &params)
   {
     auto wallets = m_walletManager->listWalletFiles();
@@ -956,4 +1021,266 @@ namespace BoltRPC
     result.insert("message", common::JsonValue(std::string("Active wallet set. Use unlockWallet to open.")));
     return result;
   }
+
+  // Multi-Wallet RPC Methods
+  common::JsonValue BoltRpcServer::rpc_multi_getStatus(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->getStatus();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_getBalance(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->getBalance();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_getAddress(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->getAddress();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_getOutputs(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->getOutputs(params);
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_getTransactions(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->getTransactions(params);
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_createWallet(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("wallet_id"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'wallet_id' parameter"));
+      return err;
+    }
+    if (!params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'password' parameter"));
+      return err;
+    }
+
+    std::string walletId = params("wallet_id").getString();
+    std::string password = params("password").getString();
+
+    return m_multiWalletManager->createWallet(walletId, password);
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_importWallet(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("wallet_id"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'wallet_id' parameter"));
+      return err;
+    }
+    if (!params.contains("viewKey") || !params.contains("spendKey") || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'viewKey', 'spendKey', or 'password'"));
+      return err;
+    }
+
+    return m_multiWalletManager->importWallet(
+        params("wallet_id").getString(),
+        params("viewKey").getString(),
+        params("spendKey").getString(),
+        params("password").getString());
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_loadWallet(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("wallet_id") || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'wallet_id' or 'password'"));
+      return err;
+    }
+
+    return m_multiWalletManager->loadWallet(
+        params("wallet_id").getString(),
+        params("password").getString());
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_unloadWallet(const common::JsonValue &params)
+  {
+    return m_multiWalletManager->unloadWallet();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_deleteWallet(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("wallet_id") || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'wallet_id' or 'password'"));
+      return err;
+    }
+
+    return m_multiWalletManager->deleteWallet(
+        params("wallet_id").getString(),
+        params("password").getString());
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_sendTransaction(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->sendTransfer(params);
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_sendDeposit(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->sendDeposit(params);
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_sendWithdrawal(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded. Use loadWallet first."));
+      return err;
+    }
+
+    return m_multiWalletManager->sendWithdrawal(params);
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_syncNow(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded."));
+      return err;
+    }
+
+    common::JsonValue result(common::JsonValue::OBJECT);
+    result.insert("message", common::JsonValue(std::string("Sync is automatic in multi-wallet mode. Wallet is syncing in background.")));
+    return result;
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_exportKeys(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded."));
+      return err;
+    }
+
+    return m_multiWalletManager->exportKeys();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_exportState(const common::JsonValue &params)
+  {
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded."));
+      return err;
+    }
+
+    return m_multiWalletManager->exportState();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_listWallets(const common::JsonValue &params)
+  {
+    return m_multiWalletManager->listWallets();
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_changePassword(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("old_password") || !params.contains("new_password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'old_password' or 'new_password'"));
+      return err;
+    }
+
+    if (!m_multiWalletManager->hasActiveWallet())
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(NO_WALLET_LOADED, "No wallet loaded."));
+      return err;
+    }
+
+    return m_multiWalletManager->changePassword(
+        params("old_password").getString(),
+        params("new_password").getString());
+  }
+
+  common::JsonValue BoltRpcServer::rpc_multi_importFromStateFile(const common::JsonValue &params)
+  {
+    if (!params.isObject() || !params.contains("wallet_id") || !params.contains("file_path") || !params.contains("password"))
+    {
+      common::JsonValue err(common::JsonValue::OBJECT);
+      err.insert("error", makeErrorObj(JSON_RPC_INVALID_PARAMS, "Missing 'wallet_id', 'file_path', or 'password'"));
+      return err;
+    }
+
+    return m_multiWalletManager->importFromStateFile(
+        params("wallet_id").getString(),
+        params("file_path").getString(),
+        params("password").getString());
+  }
+
+  // Helper
+  common::JsonValue BoltRpcServer::makeErrorObj(int code, const std::string &message) const
+  {
+    common::JsonValue errObj(common::JsonValue::OBJECT);
+    errObj.insert("code", common::JsonValue(static_cast<int64_t>(code)));
+    errObj.insert("message", common::JsonValue(message));
+    return errObj;
+  }
+
 } // namespace BoltRPC

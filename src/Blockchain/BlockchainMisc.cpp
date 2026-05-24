@@ -8,11 +8,7 @@
 
 namespace cn
 {
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Observer management
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Observer management
   bool Blockchain::addObserver(IBlockchainStorageObserver *observer)
   {
     return m_observerManager.add(observer);
@@ -23,10 +19,7 @@ namespace cn
     return m_observerManager.remove(observer);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Message queue
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Message queue
   bool Blockchain::addMessageQueue(MessageQueue<BlockchainMessage> &messageQueue)
   {
     return m_messageQueueList.insert(messageQueue);
@@ -43,7 +36,7 @@ namespace cn
       queue.push(message);
   }
 
-  //  Diagnostics
+  // Diagnostics
   std::string Blockchain::printDatabaseStats() const
   {
     if (m_mdbxStorage)
@@ -51,7 +44,7 @@ namespace cn
     return "MDBX not available";
   }
 
-  //  Checkpoint callback
+  // Checkpoint callback
   void Blockchain::setCheckpointGeneratedCallback(CheckpointGeneratedCallback callback)
   {
     m_checkpointGeneratedCallback = std::move(callback);

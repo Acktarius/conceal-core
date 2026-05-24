@@ -14,11 +14,7 @@
 
 namespace cn
 {
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Sparse chain building
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Sparse chain building
   std::vector<crypto::Hash> Blockchain::buildSparseChain()
   {
     uint32_t currentHeight;
@@ -63,10 +59,7 @@ namespace cn
     return doBuildSparseChain(startBlockId);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Sparse chain — MDBX path
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Sparse chain — MDBX path
   std::vector<crypto::Hash> Blockchain::doBuildSparseChainMdbx(const crypto::Hash &startBlockId) const
   {
     if (m_blockHashes.empty())
@@ -150,10 +143,7 @@ namespace cn
     return ancestor;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Sparse chain cache management
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Sparse chain cache management
   bool Blockchain::isSparseChainCacheValid(uint32_t currentHeight) const
   {
     std::lock_guard<std::mutex> cacheLock(m_sparseChainCacheMutex);
@@ -194,10 +184,7 @@ namespace cn
     return buildSparseChain();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Block retrieval for sync
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Block retrieval for sync
   bool Blockchain::getBlocks(uint32_t start_offset, uint32_t count,
                              std::list<Block> &blocks, std::list<Transaction> &txs)
   {
@@ -243,10 +230,7 @@ namespace cn
                                      m_blockHashes.begin() + end);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Chain supplement finding (sync divergence point)
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Chain supplement finding (sync divergence point)
   uint32_t Blockchain::findBlockchainSupplement(const std::vector<crypto::Hash> &qblock_ids)
   {
     assert(!qblock_ids.empty());
@@ -292,10 +276,7 @@ namespace cn
     return bestMatch;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Timestamp-based block lookup
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Timestamp-based block lookup
   bool Blockchain::getLowerBound(uint64_t timestamp, uint64_t startOffset, uint32_t &height)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -314,10 +295,7 @@ namespace cn
     return false;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  P2P getObjects handler
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // P2P getObjects handler
   bool Blockchain::handleGetObjects(NOTIFY_REQUEST_GET_OBJECTS::request &arg,
                                     NOTIFY_RESPONSE_GET_OBJECTS::request &rsp)
   {
@@ -359,10 +337,7 @@ namespace cn
     return true;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Block addition (entry point from P2P / miner)
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Block addition (entry point from P2P / miner)
   bool Blockchain::addNewBlock(const Block &bl_, block_verification_context &bvc)
   {
     try

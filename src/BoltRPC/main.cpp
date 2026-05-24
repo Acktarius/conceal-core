@@ -20,6 +20,7 @@
 #include <boost/program_options.hpp>
 
 #include "BoltRPC/BoltRpcServer.h"
+#include "BoltRPC/MultiWalletManager.h"
 #include "Common/PathTools.h"
 #include "Common/SignalHandler.h"
 #include "Common/Util.h"
@@ -32,8 +33,7 @@
 namespace po = boost::program_options;
 using namespace logging;
 
-// ─── Configuration ─────────────────────────────────────────────────────────
-
+// Configuration
 struct BoltConfig
 {
   uint16_t rpcPort = 8080;
@@ -47,10 +47,11 @@ struct BoltConfig
   bool autoUnlock = false;
   std::string password;
   bool offline = false;
+  bool multiWallet = false;
+  std::string walletsDir = ""; // Defaults to dataDir/wallets
 };
 
-// ─── Signal handling ───────────────────────────────────────────────────────
-
+// Signal handling
 static std::atomic<bool> g_shutdown{false};
 
 void signalHandler(int signal)
@@ -62,8 +63,7 @@ void signalHandler(int signal)
   }
 }
 
-// ─── Password prompt (no echo) ────────────────────────────────────────────
-
+// Password prompt (no echo)
 std::string promptPassword(const std::string &prompt)
 {
   std::cout << prompt;
@@ -92,8 +92,7 @@ std::string promptPassword(const std::string &prompt)
   return password;
 }
 
-// ─── Logger configuration ────────────────────────────────────────────────
-
+// Logger configuration
 common::JsonValue buildLoggerConfiguration(logging::Level level, const std::string &logfile)
 {
   common::JsonValue loggerConfiguration(common::JsonValue::OBJECT);
@@ -114,8 +113,7 @@ common::JsonValue buildLoggerConfiguration(logging::Level level, const std::stri
   return loggerConfiguration;
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────
-
+// Main
 int main(int argc, char *argv[])
 {
   std::signal(SIGINT, signalHandler);
@@ -149,6 +147,11 @@ int main(int argc, char *argv[])
       config.password = argv[++i];
     else if (arg == "--offline")
       config.offline = true;
+    else if (arg == "--multi-wallet") {
+      config.multiWallet = true;
+      if (i + 1 < argc && argv[i + 1][0] != '-')
+        config.walletsDir = argv[++i];
+    }
     else if (arg == "--help" || arg == "-h")
     {
       std::cout << "conceal-rpc " << CCX_RELEASE_VERSION << " - Conceal Wallet RPC Server\n\n"
@@ -165,9 +168,16 @@ int main(int argc, char *argv[])
                 << "  --unlock                Auto-unlock existing wallet\n"
                 << "  --password <pwd>        Password for wallet (or prompted if not set)\n"
                 << "  --offline               Start without daemon connection\n"
+                << "  --multi-wallet <dir>    Multi-wallet mode with optional wallets directory\n"
                 << "  --help, -h              Show this help\n";
       return 0;
     }
+  }
+
+  // In multi-wallet mode, walletsDir defaults to dataDir/wallets if not specified
+  if (config.multiWallet && config.walletsDir.empty())
+  {
+    config.walletsDir = config.dataDir + "/wallets";
   }
 
   // Ensure data directory exists
@@ -175,6 +185,16 @@ int main(int argc, char *argv[])
   {
     std::cerr << "Failed to create data directory: " << config.dataDir << "\n";
     return 1;
+  }
+
+  // In multi-wallet mode, also ensure wallets directory exists
+  if (config.multiWallet)
+  {
+    if (!tools::create_directories_if_necessary(config.walletsDir))
+    {
+      std::cerr << "Failed to create wallets directory: " << config.walletsDir << "\n";
+      return 1;
+    } 
   }
 
   // Setup logger
@@ -187,14 +207,16 @@ int main(int argc, char *argv[])
 
   logger(INFO, BRIGHT_YELLOW) << "conceal-rpc " << CCX_RELEASE_VERSION;
 
+  if (config.multiWallet)
+    logger(INFO) << "Running in multi-wallet mode. Wallets dir: " << config.walletsDir;
+
   // Create currency
   cn::CurrencyBuilder currencyBuilder(logManager);
   if (config.testnet)
     currencyBuilder.testnet(true);
   cn::Currency currency = currencyBuilder.currency();
 
-  // ── Daemon connection (unless offline) ──────────────────────────────────
-
+  // Daemon connection (unless offline)
   std::unique_ptr<cn::INode> nodePtr;
 
   if (!config.offline)
@@ -224,121 +246,158 @@ int main(int argc, char *argv[])
     logger(INFO) << "Connected to daemon.";
   }
 
-  // ── Create RPC server ───────────────────────────────────────────────────
-
+  // Create RPC server
   logger(INFO) << "Starting conceal-rpc server on port " << config.rpcPort;
 
-  BoltRPC::BoltRpcServer server(
-      config.rpcPort,
-      nodePtr ? *nodePtr : *static_cast<cn::INode *>(nullptr), // FIXME: BoltRpcServer should accept nullptr for offline
-      currency,
-      config.dataDir,
-      config.daemonHost,
-      config.daemonPort);
-
-  if (!config.corsDomain.empty())
-    server.setCorsDomain(config.corsDomain);
-
-  // ── Startup modes ──────────────────────────────────────────────────────
-
-  if (config.generateWallet)
+  if (config.multiWallet)
   {
-    std::string password = config.password.empty()
-                               ? promptPassword("Enter new wallet password: ")
-                               : config.password;
+    // Create MultiWalletManager
+    BoltRPC::MultiWalletManager multiWallet(
+        config.walletsDir,
+        nodePtr.get(),
+        currency);
 
-    if (!server.wallet().generateNewWallet(password))
+    // Wrap in BoltRpcServer (multi-wallet constructor)
+    BoltRPC::BoltRpcServer server(
+        config.rpcPort,
+        multiWallet,
+        currency,
+        config.dataDir,
+        config.daemonHost,
+        config.daemonPort);
+
+    if (!config.corsDomain.empty())
+      server.setCorsDomain(config.corsDomain);
+
+    // Start HTTP server
+    if (!server.start())
     {
-      logger(ERROR, BRIGHT_RED) << "Failed to create wallet";
+      logger(ERROR, BRIGHT_RED) << "Failed to start RPC server";
       goto shutdown;
-    }
-    logger(INFO, BRIGHT_GREEN) << "New wallet created: " << server.wallet().getAddress();
+    } 
 
-    if (!config.offline)
-    {
-      server.wallet().startSync([](const BoltRPC::WalletStatus &) {});
-      logger(INFO) << "Sync started in background";
-    }
-  }
-  else if (!config.importKeys.empty())
-  {
-    auto colon = config.importKeys.find(':');
-    if (colon == std::string::npos)
-    {
-      logger(ERROR, BRIGHT_RED) << "Invalid key format. Use spendkey:viewkey";
-      goto shutdown;
-    }
+    logger(INFO, BRIGHT_GREEN) << "Multi-wallet server running on http://127.0.0.1:" << config.rpcPort;
+    logger(INFO) << "Manage wallets via createWallet, loadWallet, listWallets RPC methods.";
 
-    std::string spendKey = config.importKeys.substr(0, colon);
-    std::string viewKey = config.importKeys.substr(colon + 1);
-    std::string password = config.password.empty()
-                               ? promptPassword("Enter new wallet password: ")
-                               : config.password;
+    // Wait for shutdown signal
+    while (!g_shutdown.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    if (!server.wallet().importFromKeys(viewKey, spendKey, password))
-    {
-      logger(ERROR, BRIGHT_RED) << "Failed to import wallet";
-      goto shutdown;
-    }
-    logger(INFO, BRIGHT_GREEN) << "Wallet imported: " << server.wallet().getAddress();
-
-    if (!config.offline)
-    {
-      server.wallet().startSync([](const BoltRPC::WalletStatus &) {});
-      logger(INFO) << "Sync started in background";
-    }
-  }
-  else if (config.autoUnlock && server.wallet().hasExistingWallet())
-  {
-    std::string password = config.password.empty()
-                               ? promptPassword("Enter wallet password: ")
-                               : config.password;
-
-    if (!server.wallet().unlock(password))
-    {
-      logger(ERROR, BRIGHT_RED) << "Failed to unlock wallet. Wrong password?";
-      goto shutdown;
-    }
-    logger(INFO, BRIGHT_GREEN) << "Wallet unlocked: " << server.wallet().getAddress();
-
-    if (!config.offline)
-    {
-      server.wallet().startSync([](const BoltRPC::WalletStatus &) {});
-      logger(INFO) << "Sync started in background";
-    }
-  }
-
-  // Start HTTP server
-  if (!server.start())
-  {
-    logger(ERROR, BRIGHT_RED) << "Failed to start RPC server";
     goto shutdown;
-  }
-
-  logger(INFO, BRIGHT_GREEN) << "conceal-rpc server running on http://127.0.0.1:" << config.rpcPort;
-  logger(INFO) << "Wallet data: " << config.dataDir;
-
-  if (server.wallet().getStatus().locked)
+  } // MULTI-WALLET PATH
+  else // SINGLE-WALLET PATH
   {
-    if (server.wallet().hasExistingWallet())
-      logger(INFO) << "Existing wallet found. Use 'unlockWallet' RPC or --unlock to open.";
-    else
-      logger(INFO) << "No wallet found. Use 'createWallet' or 'importWallet' RPC, or --generate-wallet/--import-keys.";
+    BoltRPC::BoltRpcServer server(
+        config.rpcPort,
+        nodePtr ? *nodePtr : *static_cast<cn::INode *>(nullptr),
+        currency,
+        config.dataDir,
+        config.daemonHost,
+        config.daemonPort);
+
+    if (!config.corsDomain.empty())
+      server.setCorsDomain(config.corsDomain);
+
+    // Startup modes
+    if (config.generateWallet)
+    {
+      std::string password = config.password.empty()
+                                 ? promptPassword("Enter new wallet password: ")
+                                 : config.password;
+
+      if (!server.wallet().generateNewWallet(password))
+      {
+        logger(ERROR, BRIGHT_RED) << "Failed to create wallet";
+        goto shutdown;
+      }
+      logger(INFO, BRIGHT_GREEN) << "New wallet created: " << server.wallet().getAddress();
+
+      if (!config.offline)
+      {
+        server.wallet().startSync([](const BoltRPC::WalletStatus &) {});
+        logger(INFO) << "Sync started in background";
+      }
+    }
+    else if (!config.importKeys.empty())
+    {
+      auto colon = config.importKeys.find(':');
+      if (colon == std::string::npos)
+      {
+        logger(ERROR, BRIGHT_RED) << "Invalid key format. Use spendkey:viewkey";
+        goto shutdown;
+      }
+
+      std::string spendKey = config.importKeys.substr(0, colon);
+      std::string viewKey = config.importKeys.substr(colon + 1);
+      std::string password = config.password.empty()
+                                 ? promptPassword("Enter new wallet password: ")
+                                 : config.password;
+
+      if (!server.wallet().importFromKeys(viewKey, spendKey, password))
+      {
+        logger(ERROR, BRIGHT_RED) << "Failed to import wallet";
+        goto shutdown;
+      }
+      logger(INFO, BRIGHT_GREEN) << "Wallet imported: " << server.wallet().getAddress();
+
+      if (!config.offline)
+      {
+        server.wallet().startSync([](const BoltRPC::WalletStatus &) {});
+        logger(INFO) << "Sync started in background";
+      }
+    }
+    else if (config.autoUnlock && server.wallet().hasExistingWallet())
+    {
+      std::string password = config.password.empty()
+                                 ? promptPassword("Enter wallet password: ")
+                                 : config.password;
+
+      if (!server.wallet().unlock(password))
+      {
+        logger(ERROR, BRIGHT_RED) << "Failed to unlock wallet. Wrong password?";
+        goto shutdown;
+      }
+      logger(INFO, BRIGHT_GREEN) << "Wallet unlocked: " << server.wallet().getAddress();
+
+      if (!config.offline)
+      {
+        server.wallet().startSync([](const BoltRPC::WalletStatus &) {});
+        logger(INFO) << "Sync started in background";
+      }
+    }
+
+    // Start HTTP server
+    if (!server.start())
+    {
+      logger(ERROR, BRIGHT_RED) << "Failed to start RPC server";
+      goto shutdown;
+    }
+
+    logger(INFO, BRIGHT_GREEN) << "conceal-rpc server running on http://127.0.0.1:" << config.rpcPort;
+    logger(INFO) << "Wallet data: " << config.dataDir;
+
+    if (server.wallet().getStatus().locked)
+    {
+      if (server.wallet().hasExistingWallet())
+        logger(INFO) << "Existing wallet found. Use 'unlockWallet' RPC or --unlock to open.";
+      else
+        logger(INFO) << "No wallet found. Use 'createWallet' or 'importWallet' RPC, or --generate-wallet/--import-keys.";
+    }
+
+    if (config.offline)
+      logger(INFO, BRIGHT_YELLOW) << "Running in offline mode. No sync available.";
+
+    logger(INFO) << "Press Ctrl+C to stop.";
+
+    // Wait for shutdown signal
+    while (!g_shutdown.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
-
-  if (config.offline)
-    logger(INFO, BRIGHT_YELLOW) << "Running in offline mode. No sync available.";
-
-  logger(INFO) << "Press Ctrl+C to stop.";
-
-  // Wait for shutdown signal
-  while (!g_shutdown.load())
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
 shutdown:
   logger(INFO) << "Shutting down...";
 
-  server.stop();
+  // server.stop() called in its own scope above; no need to call again
 
   if (nodePtr)
   {

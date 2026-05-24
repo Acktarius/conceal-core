@@ -11,11 +11,7 @@
 
 namespace cn
 {
-
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Debug printing
-  // ═══════════════════════════════════════════════════════════════════════════
-
   void Blockchain::print_blockchain(uint64_t start_index, uint64_t end_index)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -92,10 +88,7 @@ namespace cn
           << "Failed to write outputs index to file: " << file;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Blockchain explorer indices
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Blockchain explorer indices
   bool Blockchain::storeBlockchainIndices()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);

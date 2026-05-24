@@ -6,6 +6,7 @@
 #pragma once
 
 #include <string>
+
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/NewOutputTypes.h"
@@ -63,6 +64,7 @@ namespace cn
       }
       return true;
     }
+
     bool operator()(const StandardPaymentOutput &out) const
     {
       if (m_amount == 0)

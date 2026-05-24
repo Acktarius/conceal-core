@@ -12,11 +12,7 @@
 
 namespace cn
 {
-
-  // ═══════════════════════════════════════════════════════════════════════════
   //  Difficulty for next main-chain block
-  // ═══════════════════════════════════════════════════════════════════════════
-
   difficulty_type Blockchain::getDifficultyForNextBlock()
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -47,10 +43,7 @@ namespace cn
     return currentDifficulty == 0 ? 1 : currentDifficulty;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Difficulty for an alternative chain
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Difficulty for an alternative chain
   difficulty_type Blockchain::get_next_difficulty_for_alternative_chain(
       const std::list<crypto::Hash> &alt_chain, const BlockEntry &bei)
   {
@@ -77,10 +70,7 @@ namespace cn
                                timestamps, cumulative_difficulties);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Difficulty data collection helpers
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Difficulty data collection helpers
   void Blockchain::collectDifficultyDataMainChain(
       const std::list<crypto::Hash> &alt_chain, const BlockEntry &bei,
       size_t window, std::vector<uint64_t> &timestamps,
@@ -135,10 +125,7 @@ namespace cn
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Difficulty calculation dispatch
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Difficulty calculation dispatch
   difficulty_type Blockchain::calculateDifficulty(
       uint8_t majorVersion, uint64_t blockIndex,
       const std::vector<uint64_t> &timestamps,
@@ -151,10 +138,7 @@ namespace cn
     return m_currency.nextDifficulty(majorVersion, blockIndex, timestamps, cumulativeDifficulties);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Single block difficulty
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Single block difficulty
   uint64_t Blockchain::blockDifficulty(size_t i)
   {
     std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
@@ -186,10 +170,7 @@ namespace cn
     return entry.cumulative_difficulty - entry_prev.cumulative_difficulty;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  MDBX block entry loader helper
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // MDBX block entry loader helper
   bool Blockchain::loadBlockEntry(uint64_t height, BlockEntry &entry)
   {
     cn::BinaryArray ba;
@@ -198,10 +179,7 @@ namespace cn
     return fromBinaryArray(entry, ba);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Cumulative block size limit
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Cumulative block size limit
   uint64_t Blockchain::getCurrentCumulativeBlocksizeLimit() const
   {
     return m_current_block_cumul_sz_limit;
@@ -220,10 +198,7 @@ namespace cn
     return true;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  Block size helpers
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // Block size helpers
   bool Blockchain::getBackwardBlocksSize(size_t from_height, std::vector<size_t> &sz,
                                          size_t count)
   {
