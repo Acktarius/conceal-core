@@ -7,6 +7,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "Currency.h"
+#include "../pow/pow_service.hpp"
 #include <cctype>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/lexical_cast.hpp>
@@ -1256,13 +1257,13 @@ namespace cn
   /* ---------------------------------------------------------------------------------------------------- */
 
   bool Currency::checkProofOfWork(crypto::cn_context &context, const Block &block, difficulty_type currentDifficulty,
-                                  crypto::Hash &proofOfWork) const
+                                  crypto::Hash &proofOfWork, uint32_t blockHeight) const
   {
+    if (block.majorVersion >= 8)
+      return PowService::instance().verifyCnGpu(context, block, currentDifficulty, proofOfWork, blockHeight);
 
     if (!get_block_longhash(context, block, proofOfWork))
-    {
       return false;
-    }
 
     return check_hash(proofOfWork, currentDifficulty);
   }

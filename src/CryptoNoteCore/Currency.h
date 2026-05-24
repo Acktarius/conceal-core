@@ -191,7 +191,8 @@ namespace cn
     difficulty_type nextDifficultyLWMA3(std::vector<uint64_t> timestamps, std::vector<difficulty_type> cumulativeDifficulties) const;
     difficulty_type nextDifficultyLWMA1(std::vector<uint64_t> timestamps, std::vector<difficulty_type> cumulativeDifficulties, uint64_t height) const;
 
-    bool checkProofOfWork(crypto::cn_context &context, const Block &block, difficulty_type currentDifficulty, crypto::Hash &proofOfWork) const;
+    bool checkProofOfWork(crypto::cn_context &context, const Block &block, difficulty_type currentDifficulty,
+                          crypto::Hash &proofOfWork, uint32_t blockHeight) const;
 
     size_t getApproximateMaximumInputCount(size_t transactionSize, size_t outputCount, size_t mixinCount) const;
 

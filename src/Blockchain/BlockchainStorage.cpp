@@ -7,8 +7,11 @@
 #include "Blockchain/BlockchainFilter.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/TransactionExtra.h"
+#include "../pow/pow_service.hpp"
 
 #include "Common/PathHelpers.h"
+
+#include <chrono>
 
 #include "Logging/ILogger.h"
 
@@ -212,6 +215,7 @@ namespace cn
     }
 
     crypto::Hash proof_of_work = NULL_HASH;
+    const auto powStart = std::chrono::steady_clock::now();
     if (m_checkpoints.is_in_checkpoint_zone(getCurrentBlockchainHeight()))
     {
       if (!m_checkpoints.check_block(getCurrentBlockchainHeight(), blockHash))
@@ -220,12 +224,16 @@ namespace cn
         return false;
       }
     }
-    else if (!m_currency.checkProofOfWork(m_cn_context, blockData, currentDifficulty, proof_of_work))
+    else if (!m_currency.checkProofOfWork(m_cn_context, blockData, currentDifficulty, proof_of_work,
+                                          static_cast<uint32_t>(getCurrentBlockchainHeight())))
     {
       logger(logging::INFO, logging::BRIGHT_WHITE) << "Block " << blockHash << " has too weak proof of work";
       bvc.m_verification_failed = true;
       return false;
     }
+    const auto powEnd = std::chrono::steady_clock::now();
+    const uint64_t powNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(powEnd - powStart).count());
 
     // Miner transaction pre-validation
     if (!prevalidate_miner_transaction(blockData, static_cast<uint32_t>(blocksSize())))
@@ -246,6 +254,8 @@ namespace cn
 
     TransactionIndex transactionIndex = {block.height, 0};
     pushTransaction(block, minerTransactionHash, transactionIndex);
+
+    const auto txStart = std::chrono::steady_clock::now();
 
     // Process non-base transactions
     size_t cumulative_block_size = getObjectBinarySize(blockData.baseTransaction);
@@ -288,6 +298,10 @@ namespace cn
       return false;
     }
 
+    const auto txEnd = std::chrono::steady_clock::now();
+    const uint64_t txNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(txEnd - txStart).count());
+
     // Finalize and push
     block.block_cumulative_size = cumulative_block_size;
     block.cumulative_difficulty = currentDifficulty;
@@ -295,8 +309,24 @@ namespace cn
     if (block.height > 0)
       block.cumulative_difficulty += getBlockHeader(block.height - 1).cumulativeDifficulty;
 
+    const auto dbStart = std::chrono::steady_clock::now();
     pushBlock(block);
     pushToDepositIndex(block, interestSummary);
+    const auto dbEnd = std::chrono::steady_clock::now();
+    const uint64_t dbNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(dbEnd - dbStart).count());
+    PowService::instance().onBlockValidated(block.height);
+    PowService::instance().recordPushBlockTiming(powNs, txNs, dbNs);
+
+    if (blockData.majorVersion >= 8 && (block.height % 256) == 0 &&
+        PowService::instance().gpuPrefetchEnabled())
+    {
+      const PowVerifyMetrics& pm = PowService::instance().metrics();
+      logger(logging::INFO) << "CN-GPU PoW metrics @ height " << block.height << ": gpuHits=" << pm.gpuHits
+                            << " gpuMismatch=" << pm.gpuCacheMismatch << " cpuPowUsed=" << pm.cpuPowUsed << " jobsSubmitted=" << pm.jobsSubmitted
+                            << " batches=" << pm.batchesExecuted << " avgBatch=" << pm.avgBatchSize
+                            << " cpuFallback=" << pm.cpuFallbackCount;
+    }
 
     logger(logging::DEBUGGING) << "+++++ Block added id:\t" << blockHash
                                << " PoW:\t" << proof_of_work

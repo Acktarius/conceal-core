@@ -149,7 +149,7 @@ namespace cn
     virtual void getPoolChanges(const std::vector<crypto::Hash> &knownTxsIds, std::vector<Transaction> &addedTxs,
                                 std::vector<crypto::Hash> &deletedTxsIds) override;
 
-    uint64_t getNextBlockDifficulty();
+    uint64_t getNextBlockDifficulty() override;
     uint64_t getTotalGeneratedAmount();
     uint64_t fullDepositAmount() const;
     uint64_t depositAmountAtHeight(size_t height) const;

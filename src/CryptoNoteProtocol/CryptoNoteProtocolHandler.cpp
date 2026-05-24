@@ -9,6 +9,8 @@
 
 #include "CryptoNoteProtocolHandler.h"
 
+#include "../pow/pow_service.hpp"
+#include <algorithm>
 #include <future>
 #include <boost/scope_exit.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -563,10 +565,45 @@ int CryptoNoteProtocolHandler::handle_response_get_objects(int command, NOTIFY_R
 
 int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext& context, const std::vector<parsed_block_entry>& blocks) {
 
-  for (const parsed_block_entry& block_entry : blocks) {
+  // pushBlock PoW uses getCurrentBlockchainHeight() == blocksSize() == top index + 1.
+  const uint32_t batchBaseHeight = get_current_blockchain_height() + 1;
+  cn::PowService::instance().prefetch().setValidatedTip(get_current_blockchain_height());
+
+  if (!blocks.empty() && cn::PowService::instance().gpuPrefetchEnabled())
+  {
+    const uint32_t localHeight = get_current_blockchain_height();
+    const uint32_t catchupGap =
+        context.m_remote_blockchain_height > localHeight ? context.m_remote_blockchain_height - localHeight : 0;
+    const size_t effectiveBacklog = std::max(blocks.size(), static_cast<size_t>(catchupGap));
+    cn::PowService::instance().updateSyncContext(blocks.size(), catchupGap);
+
+    std::vector<Block> prefetchBlocks;
+    std::vector<uint32_t> prefetchHeights;
+    prefetchBlocks.reserve(blocks.size());
+    prefetchHeights.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i)
+    {
+      if (blocks[i].block.majorVersion < 8)
+        continue;
+      prefetchBlocks.push_back(blocks[i].block);
+      prefetchHeights.push_back(batchBaseHeight + static_cast<uint32_t>(i));
+    }
+    if (!prefetchBlocks.empty())
+      cn::PowService::instance().prefetch().enqueueUpcoming(prefetchBlocks.data(), prefetchHeights.data(),
+                                                            prefetchBlocks.size(), 0, effectiveBacklog);
+  }
+
+  for (size_t bi = 0; bi < blocks.size(); ++bi) {
+    const parsed_block_entry& block_entry = blocks[bi];
     if (m_stop) {
       break;
     }
+
+    const size_t batchRemainder = blocks.size() - bi - 1;
+    const uint32_t localHeight = get_current_blockchain_height();
+    const uint32_t catchupGap =
+        context.m_remote_blockchain_height > localHeight ? context.m_remote_blockchain_height - localHeight : 0;
+    cn::PowService::instance().updateSyncContext(batchRemainder, catchupGap);
 
     //process transactions
     for (size_t i = 0; i < block_entry.txs.size(); ++i) {
@@ -610,6 +647,24 @@ int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext& conte
       context.m_needed_objects.clear();
       context.m_requested_objects.clear();
       return 1;
+    } else if (bvc.m_added_to_main_chain && bi + 1 < blocks.size() &&
+               cn::PowService::instance().gpuPrefetchEnabled())
+    {
+      std::vector<Block> tail;
+      std::vector<uint32_t> tailHeights;
+      const size_t remaining = blocks.size() - (bi + 1);
+      tail.reserve(remaining);
+      tailHeights.reserve(remaining);
+      uint32_t nextHeight = get_current_blockchain_height() + 1;
+      for (size_t t = 0; t < remaining; ++t)
+      {
+        const size_t j = bi + 1 + t;
+        tail.push_back(blocks[j].block);
+        tailHeights.push_back(nextHeight + static_cast<uint32_t>(t));
+      }
+      const size_t effectiveBacklog = std::max(remaining, static_cast<size_t>(catchupGap));
+      cn::PowService::instance().prefetch().enqueueUpcoming(tail.data(), tailHeights.data(), tail.size(), 0,
+                                                            effectiveBacklog);
     }
 
     m_dispatcher.yield();
