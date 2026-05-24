@@ -1,6 +1,16 @@
 add_definitions(-DMINIUPNP_STATICLIB)
 
+<<<<<<< HEAD
 include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR} ../version ${MDBX_INCLUDE_DIR})
+=======
+include_directories(
+  ${gtest_SOURCE_DIR}/include
+  ${gtest_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/version
+  ${CMAKE_SOURCE_DIR}/src
+  ${MDBX_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/external/mdbx)
+>>>>>>> dd0c4103 (Add optional OpenCL CN-GPU PoW verify offload for sync)
 
 file(GLOB_RECURSE CoreTests CoreTests/*)
 file(GLOB_RECURSE CryptoTests crypto/*)
@@ -35,26 +45,48 @@ add_executable(UnitTests ${UnitTests})
 add_executable(DifficultyTests Difficulty/Difficulty.cpp)
 add_executable(HashTargetTests HashTarget.cpp)
 add_executable(HashTests Hash/main.cpp)
+add_executable(PowGpuEquivalenceTests pow_gpu_equivalence.cpp)
 
-target_link_libraries(CoreTests TestGenerator CryptoNoteCore Serialization System Logging Common crypto BlockchainExplorer ${Boost_LIBRARIES})
-target_link_libraries(IntegrationTests IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc Http Transfers Serialization System CryptoNoteCore Logging Common crypto BlockchainExplorer gtest libminiupnpc-static ${Boost_LIBRARIES})
-target_link_libraries(NodeRpcProxyTests NodeRpcProxy CryptoNoteCore Rpc Http Serialization System Logging Common crypto ${Boost_LIBRARIES})
-target_link_libraries(PerformanceTests CryptoNoteCore Serialization Logging Common crypto ${Boost_LIBRARIES})
+target_link_libraries(CoreTests
+  -Wl,--start-group
+  TestGenerator CryptoNoteCore Blockchain Storage
+  -Wl,--end-group
+  Serialization System Logging Common crypto BlockchainExplorer ${Boost_LIBRARIES})
+target_link_libraries(IntegrationTests
+  -Wl,--start-group
+  IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc HTTP Transfers
+  CryptoNoteCore Blockchain Storage
+  -Wl,--end-group
+  Serialization System Logging Common crypto BlockchainExplorer gtest libminiupnpc-static ${Boost_LIBRARIES})
+# pow/CryptoNoteCore are linked again via INTERFACE deps; Blockchain must follow.
+target_link_libraries(IntegrationTests Blockchain Storage)
+target_link_libraries(NodeRpcProxyTests NodeRpcProxy CryptoNoteCore Rpc HTTP Serialization System Logging Common crypto ${Boost_LIBRARIES})
+target_link_libraries(PerformanceTests
+  -Wl,--start-group
+  CryptoNoteCore Blockchain Storage
+  -Wl,--end-group
+  Serialization Logging Common crypto ${Boost_LIBRARIES})
 target_link_libraries(SystemTests System gtest_main)
 if (MSVC)
   target_link_libraries(SystemTests ws2_32)
   target_link_libraries(NodeRpcProxyTests ws2_32)
   target_link_libraries(CoreTests ws2_32)
 endif ()
-target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc Http BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Common crypto libminiupnpc-static ${Boost_LIBRARIES})
-target_link_libraries(UnitTests TestGenerator PaymentGate Wallet NodeRpcProxy InProcessNode P2P Rpc Http Transfers Serialization System CryptoNoteCore Logging Common crypto BlockchainExplorer gtest ${Boost_LIBRARIES})
+target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc HTTP BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Common crypto libminiupnpc-static ${Boost_LIBRARIES})
+target_link_libraries(UnitTests
+  -Wl,--start-group
+  TestGenerator PaymentGate Wallet NodeRpcProxy InProcessNode P2P Rpc HTTP Transfers
+  CryptoNoteCore Blockchain Storage
+  -Wl,--end-group
+  Serialization System Logging Common crypto BlockchainExplorer gtest ${Boost_LIBRARIES})
 
 target_link_libraries(DifficultyTests CryptoNoteCore Serialization crypto Logging Common ${Boost_LIBRARIES})
 target_link_libraries(HashTargetTests CryptoNoteCore crypto)
 target_link_libraries(HashTests crypto)
+target_link_libraries(PowGpuEquivalenceTests crypto pow CryptoNoteCore)
 
 
-add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests)
+add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests PowGpuEquivalenceTests)
 
 set_property(TARGET
   tests

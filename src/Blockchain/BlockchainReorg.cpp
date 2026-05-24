@@ -245,7 +245,7 @@ namespace cn
       }
 
       crypto::Hash proof_of_work = NULL_HASH;
-      if (!m_currency.checkProofOfWork(m_cn_context, bei.bl, current_diff, proof_of_work))
+      if (!m_currency.checkProofOfWork(m_cn_context, bei.bl, current_diff, proof_of_work, bei.height))
       {
         logger(logging::INFO, logging::BRIGHT_RED) << "Block with id: " << id
                                                    << " has insufficient proof of work: " << proof_of_work

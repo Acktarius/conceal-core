@@ -1,3 +1,5 @@
+add_subdirectory(pow)
+
 add_definitions(-DMINIUPNP_STATICLIB)
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/external/parallel_hashmap)
 include_directories(${MDBX_INCLUDE_DIR})
@@ -57,6 +59,7 @@ add_library(BlockchainExplorer STATIC ${BlockchainExplorer})
 add_library(Common STATIC ${Common})
 add_library(crypto STATIC ${crypto})
 add_library(CryptoNoteCore STATIC ${CryptoNoteCore})
+target_link_libraries(CryptoNoteCore PUBLIC pow Common crypto Serialization Logging)
 add_library(HTTP STATIC ${HTTP})
 add_library(InProcessNode STATIC ${InProcessNode})
 add_library(Logging STATIC ${Logging})
@@ -64,6 +67,7 @@ add_library(Mnemonics STATIC ${Mnemonics})
 add_library(NodeRpcProxy STATIC ${NodeRpcProxy})
 add_library(Rpc STATIC ${Rpc})
 add_library(P2P STATIC ${CryptoNoteProtocol} ${P2p})
+target_link_libraries(P2P PUBLIC pow CryptoNoteCore)
 add_library(Serialization STATIC ${Serialization})
 add_library(System STATIC ${System})
 add_library(Transfers STATIC ${Transfers})
@@ -126,7 +130,7 @@ target_link_libraries(BoltRpcLib PUBLIC
 add_dependencies(BoltRpcLib version)
 
 # ── Link dependencies ─────────────────────────────────────────────────────
-target_link_libraries(Blockchain PUBLIC CryptoNoteCore Storage Common crypto Serialization Logging ${Boost_LIBRARIES})
+target_link_libraries(Blockchain PUBLIC CryptoNoteCore Storage Common crypto Serialization Logging pow ${Boost_LIBRARIES})
 add_dependencies(Blockchain version)
 
 target_link_libraries(BoltSync PUBLIC BoltCore Blockchain CryptoNoteCore Storage Common crypto Serialization ${CMAKE_THREAD_LIBS_INIT})
@@ -161,7 +165,7 @@ endif ()
 
 macro(link_daemon TARGET_NAME)
   target_link_libraries(${TARGET_NAME}
-    CryptoNoteCore Blockchain Storage P2P Rpc System HTTP Logging Common crypto
+    CryptoNoteCore Blockchain Storage P2P Rpc System HTTP Logging Common crypto pow
     libminiupnpc-static BlockchainExplorer ${Boost_LIBRARIES} Serialization)
   if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
     target_link_libraries(${TARGET_NAME} -lresolv)

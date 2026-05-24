@@ -3,7 +3,7 @@ target_link_libraries(Sidechain
     BoltCore
     NodeRpcProxy
     Rpc
-    Http
+    HTTP
     System
     CryptoNoteCore
     Serialization
