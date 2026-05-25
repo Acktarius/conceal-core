@@ -38,6 +38,12 @@ public:
   /** @a batchRemainder: blocks left in current P2P batch; @a catchupGap: peer height minus local tip. */
   void updateSyncContext(size_t batchRemainder, uint32_t catchupGap);
 
+  /**
+   * Scale prefetch window/depth and worker min-batch/max-wait with outgoing P2P lanes unless overridden on CLI.
+   * Call after P2P init and when auto-scale changes the target connection count.
+   */
+  void updatePrefetchForConnections(size_t outgoingConnectionLanes);
+
   void onBlockValidated(uint32_t height);
 
   bool verifyCnGpu(crypto::cn_context& ctx, const Block& block, difficulty_type difficulty,
@@ -55,6 +61,20 @@ private:
   bool m_gpuPrefetchEnabled = false;
   bool m_trustGpuCache = true;
   uint32_t m_backlogThreshold = 128;
+  bool m_prefetchWindowUserSet = false;
+  bool m_prefetchDepthUserSet = false;
+  bool m_minBatchUserSet = false;
+  bool m_maxWaitUserSet = false;
+  uint32_t m_userPrefetchWindow = 0;
+  uint32_t m_userPrefetchDepth = 0;
+  uint32_t m_baseMinBatchSize = 32;
+  uint32_t m_baseMaxWaitUs = 9000;
+  uint32_t m_batchCap = 128;
+  size_t m_prefetchConnectionLanes = 0;
+  uint32_t m_effectivePrefetchWindow = 0;
+  uint32_t m_effectivePrefetchDepth = 0;
+  uint32_t m_effectiveMinBatchSize = 0;
+  uint32_t m_effectiveMaxWaitUs = 0;
   size_t m_syncBatchRemainder = 0;
   uint32_t m_syncCatchupGap = 0;
 };

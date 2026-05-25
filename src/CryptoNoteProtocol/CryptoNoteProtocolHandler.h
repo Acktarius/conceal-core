@@ -110,6 +110,8 @@ namespace cn
     p2p_endpoint_stub m_p2p_stub;
     IP2pEndpoint* m_p2p;
     std::atomic<bool> m_synchronized;
+    /** Suppress repeated INFO "Synchronization started" for each new peer during one catch-up. */
+    std::atomic<bool> m_catchupStartAnnounced{false};
     std::atomic<bool> m_stop;
     std::recursive_mutex m_sync_lock;    
 

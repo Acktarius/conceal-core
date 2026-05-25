@@ -197,12 +197,25 @@ bool CryptoNoteProtocolHandler::process_payload_sync_data(const CORE_SYNC_DATA &
   }
   else
   {
-    int64_t diff = static_cast<int64_t>(hshd.current_height) - static_cast<int64_t>(get_current_blockchain_height());
+    const uint32_t localHeight = get_current_blockchain_height();
+    int64_t diff = static_cast<int64_t>(hshd.current_height) - static_cast<int64_t>(localHeight);
+    const bool behindPeer = diff >= 0;
 
-    logger(diff >= 0 ? (is_inital ? logging::INFO : DEBUGGING) : logging::TRACE) << context << "Unknown top block: " << get_current_blockchain_height() << " -> " << hshd.current_height
-                                                                                 << std::endl
+    // Each new outgoing peer handshakes while we still lack its tip — not a new sync session.
+    const bool firstCatchupAnnounce =
+        behindPeer && is_inital && !m_catchupStartAnnounced.exchange(true, std::memory_order_relaxed);
 
-                                                                                 << "Synchronization started";
+    if (firstCatchupAnnounce)
+    {
+      logger(logging::INFO) << "Synchronization started (local height " << localHeight << ", network ~"
+                            << hshd.current_height << ") via " << context;
+    }
+    else
+    {
+      logger(behindPeer ? logging::DEBUGGING : logging::TRACE)
+          << context << "Unknown top block: " << localHeight << " -> " << hshd.current_height
+          << (behindPeer && is_inital ? " (peer joining catch-up)" : "");
+    }
 
     logger(DEBUGGING) << "Remote top block height: " << hshd.current_height << ", id: " << hshd.top_id;
     // let the socket to send response to handshake, but request callback, to let send request data after response
@@ -766,6 +779,7 @@ bool CryptoNoteProtocolHandler::on_connection_synchronized()
   bool val_expected = false;
   if (m_synchronized.compare_exchange_strong(val_expected, true))
   {
+    m_catchupStartAnnounced.store(false, std::memory_order_relaxed);
     logger(logging::INFO) << ENDL << "********************************************************************************" << ENDL
                           << "You are now synchronized with the Conceal network." << ENDL
                           << "Please note, that the blockchain will be saved only after you quit the daemon" << ENDL

@@ -55,6 +55,8 @@ public:
 
   void shutdown() override;
 
+  void setWorkerBatchPolicy(uint32_t minBatchSize, uint32_t maxWaitUs) override;
+
   const PowVerifyMetrics& metrics() const override { return m_metrics; }
 
   size_t pendingJobCount() override;

@@ -119,6 +119,8 @@ namespace cn
     bool log_connections() const;
     uint64_t get_connections_count() override;
     size_t get_outgoing_connections_count() const;
+    /** Target outgoing sync lanes (P2P auto-scale adjusts this). */
+    size_t getTargetOutgoingConnectionsCount() const { return m_config.m_net_config.connections_count; }
 
     cn::PeerlistManager& getPeerlistManager() { return m_peerlist; }
 

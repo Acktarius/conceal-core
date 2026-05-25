@@ -78,6 +78,13 @@ public:
   /** Drain pending work and stop async workers (daemon shutdown). */
   virtual void shutdown() {}
 
+  /** Update OpenCL worker batch aggregation (no-op on CPU backend). */
+  virtual void setWorkerBatchPolicy(uint32_t minBatchSize, uint32_t maxWaitUs)
+  {
+    (void)minBatchSize;
+    (void)maxWaitUs;
+  }
+
   /** True when OpenCL async offload is active (prefetch / GPU worker). */
   virtual bool gpuAsyncOffload() const { return false; }
 

@@ -528,10 +528,18 @@ int main(int argc, char *argv[])
       cn::PowService::instance().init(std::move(powBackend), gpuPowConfig, &powLogger);
       if (gpuPowConfig.deviceIndex >= 0) {
         logger(INFO) << "CN-GPU speculative policy: batch=" << gpuPowConfig.batchSize
-                     << " min_batch=" << gpuPowConfig.minBatchSize
-                     << " max_wait_us=" << gpuPowConfig.maxWaitUs
-                     << " prefetch depth=" << gpuPowConfig.prefetchQueueDepth
-                     << " window=" << gpuPowConfig.prefetchWindow
+                     << " min_batch="
+                     << (gpuPowConfig.minBatchSizeUserSet ? std::to_string(gpuPowConfig.minBatchSize)
+                                                          : std::string("auto"))
+                     << " max_wait_us="
+                     << (gpuPowConfig.maxWaitUsUserSet ? std::to_string(gpuPowConfig.maxWaitUs)
+                                                       : std::string("auto"))
+                     << " prefetch depth="
+                     << (gpuPowConfig.prefetchDepthUserSet ? std::to_string(gpuPowConfig.prefetchQueueDepth)
+                                                           : std::string("auto"))
+                     << " window="
+                     << (gpuPowConfig.prefetchWindowUserSet ? std::to_string(gpuPowConfig.prefetchWindow)
+                                                            : std::string("auto"))
                      << " backlog threshold=" << gpuPowConfig.backlogThreshold
                      << " trust_gpu_cache=" << (gpuPowConfig.trustGpuCache ? "yes" : "no");
       }
@@ -587,6 +595,9 @@ int main(int argc, char *argv[])
       return 1;
     }
     logger(INFO) << "P2p server initialized OK";
+
+    if (gpuPowConfig.deviceIndex >= 0)
+      cn::PowService::instance().updatePrefetchForConnections(p2psrv.getTargetOutgoingConnectionsCount());
 
     // Initialize core
     logger(INFO) << "Initializing core...";
