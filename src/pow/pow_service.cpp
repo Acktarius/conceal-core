@@ -6,6 +6,8 @@
 #include <cstring>
 #include <sstream>
 
+#include "../CryptoNoteConfig.h"
+
 #include "../CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "../CryptoNoteCore/Difficulty.h"
 #include "pow_sync_log.hpp"
@@ -26,11 +28,55 @@ void PowService::init(std::unique_ptr<PowVerifyBackend> backend, const GpuPowCon
   m_gpuPrefetchEnabled = m_backend && m_backend->gpuAsyncOffload();
   m_backlogThreshold = gpuConfig.backlogThreshold;
   m_trustGpuCache = gpuConfig.trustGpuCache;
-  m_prefetch.configure(m_gpuPrefetchEnabled ? gpuConfig.prefetchQueueDepth : 0,
-                       m_gpuPrefetchEnabled ? gpuConfig.prefetchWindow : 0,
-                       m_gpuPrefetchEnabled ? gpuConfig.backlogThreshold : 0,
-                       m_gpuPrefetchEnabled ? m_backend.get() : nullptr);
+  m_prefetchWindowUserSet = gpuConfig.prefetchWindowUserSet;
+  m_prefetchDepthUserSet = gpuConfig.prefetchDepthUserSet;
+  m_minBatchUserSet = gpuConfig.minBatchSizeUserSet;
+  m_maxWaitUserSet = gpuConfig.maxWaitUsUserSet;
+  m_userPrefetchWindow = gpuConfig.prefetchWindow;
+  m_userPrefetchDepth = gpuConfig.prefetchQueueDepth;
+  m_baseMinBatchSize = gpuConfig.minBatchSize;
+  m_baseMaxWaitUs = gpuConfig.maxWaitUs;
+  m_batchCap = gpuConfig.batchSize;
   setPowSyncLogger(m_gpuPrefetchEnabled ? syncLogger : nullptr);
+  updatePrefetchForConnections(P2P_DEFAULT_CONNECTIONS_COUNT);
+}
+
+void PowService::updatePrefetchForConnections(size_t outgoingConnectionLanes)
+{
+  if (!m_gpuPrefetchEnabled || !m_backend)
+    return;
+
+  const uint32_t window = m_prefetchWindowUserSet ? m_userPrefetchWindow
+                                                  : GpuPowConfig::prefetchWindowForConnections(outgoingConnectionLanes);
+  const uint32_t depth = m_prefetchDepthUserSet ? m_userPrefetchDepth
+                                                : GpuPowConfig::prefetchDepthForConnections(outgoingConnectionLanes);
+  uint32_t minBatch = m_minBatchUserSet ? m_baseMinBatchSize
+                                        : GpuPowConfig::scaledMinBatchSize(outgoingConnectionLanes);
+  if (minBatch > m_batchCap)
+    minBatch = m_batchCap;
+  const uint32_t maxWait = m_maxWaitUserSet ? m_baseMaxWaitUs
+                                            : GpuPowConfig::scaledMaxWaitUs(outgoingConnectionLanes);
+
+  if (outgoingConnectionLanes == m_prefetchConnectionLanes && window == m_effectivePrefetchWindow &&
+      depth == m_effectivePrefetchDepth && minBatch == m_effectiveMinBatchSize &&
+      maxWait == m_effectiveMaxWaitUs)
+    return;
+
+  m_prefetchConnectionLanes = outgoingConnectionLanes;
+  m_effectivePrefetchWindow = window;
+  m_effectivePrefetchDepth = depth;
+  m_effectiveMinBatchSize = minBatch;
+  m_effectiveMaxWaitUs = maxWait;
+  m_prefetch.configure(depth, window, m_backlogThreshold, m_backend.get());
+  m_backend->setWorkerBatchPolicy(minBatch, maxWait);
+
+  std::ostringstream oss;
+  oss << "CN-GPU scale: outgoing=" << outgoingConnectionLanes << " window=" << window
+      << (m_prefetchWindowUserSet ? " (user)" : " (auto)") << " depth=" << depth
+      << (m_prefetchDepthUserSet ? " (user)" : " (auto)") << " min_batch=" << minBatch
+      << (m_minBatchUserSet ? " (user)" : " (auto)") << " max_wait_us=" << maxWait
+      << (m_maxWaitUserSet ? " (user)" : " (auto)");
+  powSyncLogInfo(oss.str());
 }
 
 void PowService::shutdown()

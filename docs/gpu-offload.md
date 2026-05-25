@@ -67,10 +67,10 @@ GPU tuning flags apply only when OpenCL init and self-test succeed.
 | `--gpu-device N` | Enable GPU; `N` = index from `--gpu-list` | off (`-1`) |
 | `--gpu-list` | List devices and exit | — |
 | `--gpu-batch-size` | Max hashes per OpenCL dispatch | `128` |
-| `--gpu-min-batch-size` | Min queued jobs before dispatch (unless wait expires) | `64` |
-| `--gpu-max-wait-us` | Max wait (µs) to fill a batch before partial flush | `9000` |
-| `--gpu-prefetch-window` | Max height ahead of tip allowed for prefetch | `1024` |
-| `--gpu-prefetch-depth` | Max PoW jobs queued/in-flight | `256` |
+| `--gpu-min-batch-size` | Min queued jobs before dispatch (unless wait expires) | auto: `peers × 4` |
+| `--gpu-max-wait-us` | Max wait (µs) to fill a batch before partial flush | auto: `peers × 2500` |
+| `--gpu-prefetch-window` | Max height ahead of tip allowed for prefetch | auto: `peers × 128` |
+| `--gpu-prefetch-depth` | Max PoW jobs queued/in-flight | auto: `peers × 64` |
 | `--gpu-backlog-threshold` | Min catch-up gap or batch size to use GPU | `16` |
 | `--gpu-cpu-verify` | Always CPU longhash at verify (paranoid) | off |
 | `--gpu-debug-crosscheck` | CPU re-check every GPU result on worker | off |
@@ -118,7 +118,9 @@ Use when the GPU is fast but driver overhead per launch is high — sometimes lo
 ./build/src/conceald --gpu-device 0 --gpu-min-batch-size 0 --data-dir ~/.conceal
 ```
 
-Good if metrics show tiny `avgBatch` and many cache misses. Default `64` with `batch-size 128` is aimed at bulk sync.
+Good if metrics show tiny `avgBatch` and many cache misses. Default **32** with `batch-size 128` is aimed at bulk sync.
+
+**Default (auto):** `peers × 4`, capped by `--gpu-batch-size` (8 peers → **32**, 12 → **48**). Rises with P2P auto-scale so the worker waits for larger dispatches when jobs arrive in smaller bursts per connection. Set the flag to pin a fixed floor.
 
 ### e) `--gpu-max-wait-us`
 
@@ -128,7 +130,9 @@ How long (microseconds) the oldest queued job may wait before the worker flushes
 ./build/src/conceald --gpu-device 0 --gpu-max-wait-us 15000 --data-dir ~/.conceal
 ```
 
-Increase if prefetch is bursty and batches stay undersized; decrease if the GPU sits idle while the CPU catches up.
+**Default (auto):** `peers × 2500` µs (8 peers → **20000**, 12 → **30000**).
+
+Increase further if prefetch is bursty and batches stay undersized; decrease if the GPU sits idle while the CPU catches up.
 
 ### f) `--gpu-prefetch-window`
 
@@ -136,11 +140,13 @@ Increase if prefetch is bursty and batches stay undersized; decrease if the GPU 
 
 Does **not** require P2P to send that many blocks. You only prefetch blocks you already have (usually a smaller P2P batch). The window only limits how far ahead GPU work is allowed during large catch-up.
 
+**Default (auto):** `peers × 128` (8 peers → **1024**, 10 → **1280**).
+
 ```bash
 ./build/src/conceald --gpu-device 0 --gpu-prefetch-window 512 --data-dir ~/.conceal
 ```
 
-Rarely needs tuning unless memory or wasted GPU work is a concern.
+Omit the flag to keep auto scaling; set it explicitly to pin a fixed window.
 
 ### g) `--gpu-backlog-threshold`
 
@@ -156,11 +162,13 @@ Higher → GPU used only on heavier catch-up. Lower → GPU used sooner (may hur
 
 Max PoW jobs **in the GPU pipeline** at once (queued + in flight). Usually matters more than `prefetch-window` for typical P2P batch sizes.
 
+**Default (auto):** `peers × 64` (8 peers → **512**, 10 → **640**), updated when P2P auto-scale changes the target connection count.
+
 ```bash
 ./build/src/conceald --gpu-device 0 --gpu-prefetch-depth 512 --data-dir ~/.conceal
 ```
 
-Raise if `jobsSubmitted` grows but `gpuHits` stay low (GPU busy but CPU not consuming results in time).
+Raise if `jobsSubmitted` grows but `gpuHits` stay low (GPU busy but CPU not consuming results in time). Omit the flag to scale with outgoing peers.
 
 ### i) `--gpu-cpu-verify`
 
@@ -218,5 +226,5 @@ Counters are **cumulative since daemon start**.
 - **Broken GPU path:** `cpuFallback` > 0 → driver/OpenCL errors; check logs.
 - **Wrong hash:** `gpuMismatch` > 0 with `--gpu-cpu-verify` → treat as a bug.
 
-**Example:** `gpuHits=180`, `cpuPowUsed=76` → about **70%** of verifies used the GPU cache at that point in the run. `avgBatch=64` matches default `min-batch-size` (worker often flushes at the floor).
+**Example:** `gpuHits=180`, `cpuPowUsed=76` → about **70%** of verifies used the GPU cache at that point in the run. `avgBatch=32` matches default `min-batch-size` (worker often flushes at the floor).
 

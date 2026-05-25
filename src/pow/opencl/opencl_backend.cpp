@@ -268,6 +268,18 @@ void OpenclPowBackend::dropWorkAtOrBelow(uint32_t validatedHeight)
   m_cv.notify_all();
 }
 
+void OpenclPowBackend::setWorkerBatchPolicy(uint32_t minBatchSize, uint32_t maxWaitUs)
+{
+  if (!m_ready)
+    return;
+  {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_minBatchSize = minBatchSize;
+    m_maxWaitUs = maxWaitUs;
+  }
+  m_cv.notify_all();
+}
+
 void OpenclPowBackend::shutdown()
 {
   stopWorker();
