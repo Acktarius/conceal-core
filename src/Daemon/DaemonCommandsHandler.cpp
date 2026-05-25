@@ -11,6 +11,8 @@
 #include "CryptoNoteCore/Core.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/Miner.h"
+#include "pow/mining/GpuMiner.hpp"
+#include "pow/mining/GpuMinerConfig.hpp"
 #include "CryptoNoteProtocol/CryptoNoteProtocolHandler.h"
 #include "P2p/NetNode.h"
 #include "Serialization/SerializationTools.h"
@@ -61,6 +63,12 @@ DaemonCommandsHandler::DaemonCommandsHandler(cn::core &core, cn::NodeServer &srv
                               "Start mining for specified address, start_mining <addr> [threads=1]");
   m_consoleHandler.setHandler("stop_mining", boost::bind(&DaemonCommandsHandler::stop_mining, this, boost::arg<1>()),
                               "Stop mining");
+  m_consoleHandler.setHandler("start_gpu_mining",
+                              boost::bind(&DaemonCommandsHandler::start_gpu_mining, this, boost::arg<1>()),
+                              "Start GPU mining, start_gpu_mining <addr> <dev:intensity>[,<dev:intensity>...]");
+  m_consoleHandler.setHandler("stop_gpu_mining",
+                              boost::bind(&DaemonCommandsHandler::stop_gpu_mining, this, boost::arg<1>()),
+                              "Stop GPU mining");
   m_consoleHandler.setHandler("print_pool", boost::bind(&DaemonCommandsHandler::print_pool, this, boost::arg<1>()),
                               "Print transaction pool (long format)");
   m_consoleHandler.setHandler("print_pool_sh", boost::bind(&DaemonCommandsHandler::print_pool_sh, this, boost::arg<1>()),
@@ -155,10 +163,13 @@ bool DaemonCommandsHandler::show_hr(const std::vector<std::string> &args)
     logger(logging::ERROR) << "Usage: \"show_hr\"";
     return true;
   }
-  if (!m_core.get_miner().is_mining())
+  if (!m_core.get_miner().is_mining() && !m_core.get_gpu_miner().is_mining())
     logger(logging::WARNING) << "Mining is not started. Start mining first.";
   else
+  {
     m_core.get_miner().do_print_hashrate(true);
+    m_core.get_gpu_miner().do_print_hashrate(true);
+  }
   return true;
 }
 
@@ -170,6 +181,7 @@ bool DaemonCommandsHandler::hide_hr(const std::vector<std::string> &args)
     return true;
   }
   m_core.get_miner().do_print_hashrate(false);
+  m_core.get_gpu_miner().do_print_hashrate(false);
   return true;
 }
 
@@ -436,6 +448,12 @@ bool DaemonCommandsHandler::start_mining(const std::vector<std::string> &args)
     return true;
   }
 
+  if (m_core.get_gpu_miner().is_mining())
+  {
+    logger(logging::ERROR) << "GPU mining is active; stop it before starting CPU mining";
+    return true;
+  }
+
   cn::AccountPublicAddress adr;
   if (!m_core.currency().parseAccountAddressString(args.front(), adr))
   {
@@ -462,6 +480,56 @@ bool DaemonCommandsHandler::stop_mining(const std::vector<std::string> &args)
     return true;
   }
   m_core.get_miner().stop();
+  return true;
+}
+
+bool DaemonCommandsHandler::start_gpu_mining(const std::vector<std::string> &args)
+{
+  if (args.size() < 2)
+  {
+    logger(logging::ERROR) << "Usage: start_gpu_mining <addr> <dev:intensity>[,<dev:intensity>...]";
+    return true;
+  }
+
+  if (m_core.get_miner().is_mining())
+  {
+    logger(logging::ERROR) << "CPU mining is active; stop it before starting GPU mining";
+    return true;
+  }
+
+  cn::AccountPublicAddress adr;
+  if (!m_core.currency().parseAccountAddressString(args[0], adr))
+  {
+    logger(logging::ERROR) << "Invalid wallet address!";
+    return true;
+  }
+
+  std::string value = args[0];
+  for (size_t i = 1; i < args.size(); ++i)
+    value += "," + args[i];
+
+  std::string reward;
+  std::vector<cn::GpuDeviceSpec> devices;
+  std::string err;
+  if (!cn::GpuMinerConfig::parseValue(value, reward, devices, err))
+  {
+    logger(logging::ERROR) << "Invalid GPU mining spec: " << err;
+    return true;
+  }
+
+  if (!m_core.get_gpu_miner().start(adr, devices))
+    logger(logging::ERROR) << "Failed to start GPU mining";
+  return true;
+}
+
+bool DaemonCommandsHandler::stop_gpu_mining(const std::vector<std::string> &args)
+{
+  if (!args.empty())
+  {
+    logger(logging::ERROR) << "Usage: \"stop_gpu_mining\"";
+    return true;
+  }
+  m_core.get_gpu_miner().stop();
   return true;
 }
 

@@ -71,11 +71,11 @@ void PowService::updatePrefetchForConnections(size_t outgoingConnectionLanes)
   m_backend->setWorkerBatchPolicy(minBatch, maxWait);
 
   std::ostringstream oss;
-  oss << "CN-GPU scale: outgoing=" << outgoingConnectionLanes << " window=" << window
-      << (m_prefetchWindowUserSet ? " (user)" : " (auto)") << " depth=" << depth
-      << (m_prefetchDepthUserSet ? " (user)" : " (auto)") << " min_batch=" << minBatch
-      << (m_minBatchUserSet ? " (user)" : " (auto)") << " max_wait_us=" << maxWait
-      << (m_maxWaitUserSet ? " (user)" : " (auto)");
+  oss << "GPU OFFLOAD auto-scale: peer count=" << outgoingConnectionLanes << " window=" << window
+      << (m_prefetchWindowUserSet ? " (user)," : ",") << " depth=" << depth
+      << (m_prefetchDepthUserSet ? " (user)," : ",") << " min_batch=" << minBatch
+      << (m_minBatchUserSet ? " (user)," : ",") << " max_wait_us=" << maxWait
+      << (m_maxWaitUserSet ? " (user)" : "");
   powSyncLogInfo(oss.str());
 }
 

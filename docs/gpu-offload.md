@@ -52,6 +52,14 @@ sudo usermod -aG render,video $USER
 
 Prints OpenCL compute devices with a **global index** (use that index with `--gpu-device`). Exits without starting the daemon. If OpenCL sees nothing, sysfs PCI hints may still be listed.
 
+### Offload tuning flags
+
+```bash
+./build/src/conceald --gpu-offload-help
+```
+
+Prints batch/prefetch/debug options (omitted from main `--help`). Tuning flags still work on the command line and in the config file.
+
 ### Run with GPU (typical)
 
 ```bash
@@ -66,6 +74,7 @@ GPU tuning flags apply only when OpenCL init and self-test succeed.
 |------|------|---------|
 | `--gpu-device N` | Enable GPU; `N` = index from `--gpu-list` | off (`-1`) |
 | `--gpu-list` | List devices and exit | — |
+| `--gpu-offload-help` | List tuning/debug flags and exit | — |
 | `--gpu-batch-size` | Max hashes per OpenCL dispatch | `128` |
 | `--gpu-min-batch-size` | Min queued jobs before dispatch (unless wait expires) | auto: `peers × 4` |
 | `--gpu-max-wait-us` | Max wait (µs) to fill a batch before partial flush | auto: `peers × 2500` |

@@ -42,6 +42,11 @@ add_executable(DifficultyTests Difficulty/Difficulty.cpp)
 add_executable(HashTargetTests HashTarget.cpp)
 add_executable(HashTests Hash/main.cpp)
 add_executable(PowGpuEquivalenceTests pow_gpu_equivalence.cpp)
+add_executable(PowGpuMineEquivalenceTests pow_gpu_mine_equivalence.cpp)
+
+if(WITH_OPENCL AND OpenCL_FOUND)
+  add_executable(GpuVsCpuMiningHashTests gpu_vs_cpu_mining_hash.cpp)
+endif()
 
 target_link_libraries(CoreTests
   -Wl,--start-group
@@ -80,9 +85,20 @@ target_link_libraries(DifficultyTests CryptoNoteCore Serialization crypto Loggin
 target_link_libraries(HashTargetTests CryptoNoteCore crypto)
 target_link_libraries(HashTests crypto)
 target_link_libraries(PowGpuEquivalenceTests crypto pow CryptoNoteCore)
+target_link_libraries(PowGpuMineEquivalenceTests pow CryptoNoteCore ${Boost_LIBRARIES})
 
+if(WITH_OPENCL AND OpenCL_FOUND)
+  target_link_libraries(GpuVsCpuMiningHashTests
+    -Wl,--start-group
+    pow CryptoNoteCore ${Boost_LIBRARIES}
+    -Wl,--end-group)
+endif()
 
-add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests PowGpuEquivalenceTests)
+add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests PowGpuEquivalenceTests PowGpuMineEquivalenceTests)
+
+if(WITH_OPENCL AND OpenCL_FOUND)
+  add_dependencies(tests GpuVsCpuMiningHashTests)
+endif()
 
 set_property(TARGET
   tests
@@ -115,6 +131,9 @@ set_property(TARGET UnitTests PROPERTY OUTPUT_NAME "unit_tests")
 set_property(TARGET DifficultyTests PROPERTY OUTPUT_NAME "difficulty_tests")
 set_property(TARGET HashTargetTests PROPERTY OUTPUT_NAME "hash_target_tests")
 set_property(TARGET HashTests PROPERTY OUTPUT_NAME "hash_tests")
+if(WITH_OPENCL AND OpenCL_FOUND)
+  set_property(TARGET GpuVsCpuMiningHashTests PROPERTY OUTPUT_NAME "gpu_vs_cpu_mining_hash_tests")
+endif()
 
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)

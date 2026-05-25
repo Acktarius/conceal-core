@@ -11,7 +11,10 @@ namespace cn
 
 struct GpuPowConfig
 {
+  /** --gpu-device, --gpu-list, --gpu-offload-help (included in main --help). */
   static void initOptions(boost::program_options::options_description& desc);
+  /** Batch/prefetch/debug flags; use --gpu-offload-help to list. */
+  static void initOffloadOptions(boost::program_options::options_description& desc);
 
   void init(const boost::program_options::variables_map& vm);
 
@@ -27,6 +30,7 @@ struct GpuPowConfig
   /** -1 = disabled; >=0 selects global device index from ranked GPU list */
   int deviceIndex = -1;
   bool listDevices = false;
+  bool showOffloadHelp = false;
   /** Max hashes per OpenCL dispatch (hard cap). */
   uint32_t batchSize = 128;
   /** Min jobs before dispatch unless oldest queued job age exceeds maxWaitUs (0 = no floor). */

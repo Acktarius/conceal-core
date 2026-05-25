@@ -27,6 +27,7 @@
 #include "CryptoNoteTools.h"
 #include "CryptoNoteStatInfo.h"
 #include "Miner.h"
+#include "../pow/mining/GpuMiner.hpp"
 #include "TransactionExtra.h"
 #include "CryptoNoteCore/IBlock.h"
 
@@ -72,6 +73,7 @@ namespace cn
         m_mempool(currency, m_blockchain, m_timeProvider, logger),
         m_blockchain(currency, m_mempool, logger, blockchainIndexesEnabled),
         m_miner(new Miner(currency, *this, logger)),
+        m_gpuMiner(new GpuMiner(currency, *this, logger)),
         m_starter_message_showed(false)
   {
     set_cryptonote_protocol(pprotocol);
@@ -174,7 +176,8 @@ namespace cn
     return m_blockchain.getAlternativeBlocksCount();
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::init(const CoreConfig &config, const MinerConfig &minerConfig, bool load_existing)
+  bool core::init(const CoreConfig &config, const MinerConfig &minerConfig,
+                  const GpuMinerConfig &gpuMinerConfig, int gpuVerifyOffloadDevice, bool load_existing)
   {
     m_config_folder = config.configFolder;
     bool r = m_mempool.init(m_config_folder);
@@ -195,7 +198,14 @@ namespace cn
     r = m_miner->init(minerConfig);
     if (!(r))
     {
-      logger(ERROR, BRIGHT_RED) << "Failed to initialize blockchain storage";
+      logger(ERROR, BRIGHT_RED) << "Failed to initialize miner";
+      return false;
+    }
+
+    r = m_gpuMiner->init(gpuMinerConfig, gpuVerifyOffloadDevice);
+    if (!(r))
+    {
+      logger(ERROR, BRIGHT_RED) << "Failed to initialize GPU miner";
       return false;
     }
 
@@ -216,6 +226,7 @@ namespace cn
   bool core::deinit()
   {
     m_miner->stop();
+    m_gpuMiner->stop();
     m_mempool.deinit();
     m_blockchain.deinit();
     return true;
@@ -300,7 +311,7 @@ namespace cn
 
   bool core::get_stat_info(core_stat_info &st_inf)
   {
-    st_inf.mining_speed = m_miner->get_speed();
+    st_inf.mining_speed = m_miner->get_speed() + m_gpuMiner->get_speed();
     st_inf.alternative_blocks = m_blockchain.getAlternativeBlocksCount();
     st_inf.blockchain_height = m_blockchain.getCurrentBlockchainHeight();
     st_inf.tx_pool_size = m_mempool.get_transactions_count();
@@ -588,12 +599,14 @@ namespace cn
   void core::pause_mining()
   {
     m_miner->pause();
+    m_gpuMiner->pause();
   }
 
   void core::update_block_template_and_resume_mining()
   {
     update_miner_block_template();
     m_miner->resume();
+    m_gpuMiner->resume();
   }
 
   bool core::saveBlockchain()
@@ -617,6 +630,7 @@ namespace cn
   void core::on_synchronized()
   {
     m_miner->on_synchronized();
+    m_gpuMiner->on_synchronized();
   }
 
   bool core::getPoolChanges(const crypto::Hash &tailBlockId, const std::vector<crypto::Hash> &knownTxsIds,
@@ -839,6 +853,7 @@ namespace cn
   bool core::update_miner_block_template()
   {
     m_miner->on_block_chain_update();
+    m_gpuMiner->on_block_chain_update();
     return true;
   }
 
@@ -856,6 +871,7 @@ namespace cn
     }
 
     m_miner->on_idle();
+    m_gpuMiner->on_idle();
     m_mempool.on_idle();
     return true;
   }
