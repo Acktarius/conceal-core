@@ -32,6 +32,7 @@ public:
   ~GpuMiner();
 
   bool init(const GpuMinerConfig& config, int verifyOffloadDeviceIndex);
+  void releaseVerifyOffloadDevice(int deviceIndex);
   bool set_block_template(const Block& bl, const difficulty_type& diffic);
   bool on_block_chain_update();
   bool start(const AccountPublicAddress& adr, const std::vector<GpuDeviceSpec>& devices);
@@ -86,6 +87,7 @@ private:
   bool m_do_print_hashrate = false;
   bool m_do_mining = false;
   GpuMinerConfig m_config;
+  int m_verifyOffloadDeviceIndex = -1;
   uint32_t m_total_host_threads = 0;
   uint32_t m_global_thread_base = 0;
 };

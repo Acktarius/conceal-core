@@ -28,6 +28,7 @@
 #include "CryptoNoteStatInfo.h"
 #include "Miner.h"
 #include "../pow/mining/GpuMiner.hpp"
+#include "../pow/pow_service.hpp"
 #include "TransactionExtra.h"
 #include "CryptoNoteCore/IBlock.h"
 
@@ -629,6 +630,12 @@ namespace cn
 
   void core::on_synchronized()
   {
+    const int releasedDevice = cn::PowService::instance().deactivateGpuOffloadOnSynchronized();
+    if (releasedDevice >= 0)
+    {
+      m_gpuMiner->releaseVerifyOffloadDevice(releasedDevice);
+      logger(INFO) << "GPU OFFLOAD deactivated, gpu released from duty";
+    }
     m_miner->on_synchronized();
     m_gpuMiner->on_synchronized();
   }
