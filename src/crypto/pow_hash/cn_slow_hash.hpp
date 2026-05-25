@@ -204,6 +204,7 @@ class cn_slow_hash
 
 	/** CN-GPU (VERSION==2): staged path for optional GPU inner-loop offload */
 	void cn_gpu_prepare_inner(const void* in, size_t len);
+	void cn_gpu_prepare_mining(const void* in, size_t len, uint32_t nonce);
 	void cn_gpu_run_inner();
 	void cn_gpu_run_inner_reference();
 	void cn_gpu_run_inner_reference_iters(size_t iters);

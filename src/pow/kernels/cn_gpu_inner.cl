@@ -1,3 +1,6 @@
+// Copyright (c) 2018-2026 Conceal Network & Conceal Devs
+// MIT
+//
 // Conceal CN-GPU inner loop — semantic match for inner_hash_3_avx (cn_slow_hash_intel_avx2.cpp).
 // 256-bit AVX state is modeled as (lo, hi) float4/int4 pairs in AVX memory order.
 #pragma OPENCL FP_CONTRACT OFF

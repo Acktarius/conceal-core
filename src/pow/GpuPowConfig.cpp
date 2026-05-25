@@ -14,9 +14,13 @@ namespace
 {
 // Name must not be a prefix of gpu-list / gpu-batch-size (boost parses --gpu-list as --gpu list).
 const command_line::arg_descriptor<int> arg_gpu_device = {
-    "gpu-device", "Enable CN-GPU PoW offload on OpenCL global device index (e.g. 0). Omit to disable.", -1};
+    "gpu-device",
+    "Enable CN-GPU PoW offload on OpenCL global device index (e.g. 0). Omit to disable. See --gpu-offload-help",
+    -1};
 const command_line::arg_descriptor<bool> arg_gpu_list = {
     "gpu-list", "List OpenCL platforms/GPU devices and exit", false};
+const command_line::arg_descriptor<bool> arg_gpu_offload_help = {
+    "gpu-offload-help", "List GPU PoW offload tuning/debug options and exit", false};
 const command_line::arg_descriptor<uint32_t> arg_gpu_batch_size = {
     "gpu-batch-size", "Max CN-GPU hashes per OpenCL batch", 128};
 const command_line::arg_descriptor<uint32_t> arg_gpu_min_batch_size = {
@@ -57,6 +61,11 @@ void GpuPowConfig::initOptions(boost::program_options::options_description& desc
 {
   command_line::add_arg(desc, arg_gpu_device);
   command_line::add_arg(desc, arg_gpu_list);
+  command_line::add_arg(desc, arg_gpu_offload_help);
+}
+
+void GpuPowConfig::initOffloadOptions(boost::program_options::options_description& desc)
+{
   command_line::add_arg(desc, arg_gpu_batch_size);
   command_line::add_arg(desc, arg_gpu_min_batch_size);
   command_line::add_arg(desc, arg_gpu_max_wait_us);
@@ -96,6 +105,7 @@ void GpuPowConfig::init(const boost::program_options::variables_map& vm)
 {
   deviceIndex = command_line::get_arg(vm, arg_gpu_device);
   listDevices = command_line::get_arg(vm, arg_gpu_list);
+  showOffloadHelp = command_line::get_arg(vm, arg_gpu_offload_help);
   batchSize = command_line::get_arg(vm, arg_gpu_batch_size);
   minBatchSize = command_line::get_arg(vm, arg_gpu_min_batch_size);
   maxWaitUs = command_line::get_arg(vm, arg_gpu_max_wait_us);

@@ -68,6 +68,10 @@ void cn_gpu_prepare_inner(cn_context &context, const void *data, size_t length) 
   context.cn_gpu_state.cn_gpu_prepare_inner(data, length);
 }
 
+void cn_gpu_prepare_mining(cn_context &context, const void *data, size_t length, uint32_t nonce) {
+  context.cn_gpu_state.cn_gpu_prepare_mining(data, length, nonce);
+}
+
 void cn_gpu_run_inner(cn_context &context) {
   context.cn_gpu_state.cn_gpu_run_inner();
 }

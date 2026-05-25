@@ -26,6 +26,9 @@
 #include "aux_hash.h"
 #include "cn_slow_hash.hpp"
 
+#include <algorithm>
+#include <cstring>
+
 #include <cstdio>
 
 #ifdef HAS_INTEL_HW
@@ -653,6 +656,36 @@ void cn_slow_hash<MEMORY, ITER, CN_SLOW_HASH_VERSION>::cn_gpu_prepare_inner(cons
 	if(CN_SLOW_HASH_VERSION != 2)
 		return;
 	keccak((const uint8_t*)in, len, spad.as_byte(), 200);
+	explode_scratchpad_3();
+}
+
+template <size_t MEMORY, size_t ITER, size_t CN_SLOW_HASH_VERSION>
+void cn_slow_hash<MEMORY, ITER, CN_SLOW_HASH_VERSION>::cn_gpu_prepare_mining(const void* in, size_t len,
+                                                                              uint32_t nonce)
+{
+	if(CN_SLOW_HASH_VERSION != 2)
+		return;
+
+	constexpr size_t kInputUlongs = 11;
+	uint64_t input[kInputUlongs] = {};
+	memcpy(input, in, std::min(len, kInputUlongs * sizeof(uint64_t)));
+
+	uint64_t state[25] = {};
+	memcpy(state, input, 8 * sizeof(uint64_t));
+	state[8] = input[8];
+	state[9] = input[9];
+	state[10] = input[10];
+
+	uint32_t* st32 = reinterpret_cast<uint32_t*>(state);
+	st32[9] = (st32[9] & 0x00FFFFFFu) | ((nonce & 0xFFu) << 24);
+	st32[10] = (st32[10] & 0xFF000000u) | (nonce >> 8);
+
+	for (int i = 11; i < 25; ++i)
+		state[i] = 0;
+	state[16] = 0x8000000000000000UL;
+
+	keccakf(state, 24);
+	memcpy(spad.as_byte(), state, 200);
 	explode_scratchpad_3();
 }
 

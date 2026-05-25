@@ -74,6 +74,8 @@ namespace crypto {
   void cn_conceal_slow_hash_v0(cn_context &context, const void *data, size_t length, Hash &hash);  
   void cn_gpu_hash_v0(cn_context &context, const void *data, size_t length, Hash &hash);
   void cn_gpu_prepare_inner(cn_context &context, const void *data, size_t length);
+  /** Mining path: cn0 (keccak state + nonce inject) + cn00 (explode); matches OpenCL cn0_cn_gpu/cn00_cn_gpu. */
+  void cn_gpu_prepare_mining(cn_context &context, const void *data, size_t length, uint32_t nonce);
   void cn_gpu_run_inner(cn_context &context);
   void cn_gpu_run_inner_reference(cn_context &context);
   void cn_gpu_run_inner_reference_iters(cn_context &context, size_t iters);

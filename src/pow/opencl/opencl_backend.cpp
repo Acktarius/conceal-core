@@ -8,16 +8,14 @@
 #include <cstdint>
 #include <cstring>
 #include <sstream>
-#include <fstream>
-#include <sstream>
-#include <utility>
-#include <vector>
+#include "../mining/kernel_loader.hpp"
 
 #include "../../crypto/cryptonight.hpp"
 #include "../../crypto/pow_hash/hw_detect.hpp"
 #include "../cpu_backend.hpp"
 #include "../pow_sync_log.hpp"
 #include "../../CryptoNoteCore/Difficulty.h"
+#include "opencl_program_cache.hpp"
 #include "raii.hpp"
 
 #include <iostream>
@@ -47,17 +45,7 @@ std::string readKernelFile()
       "../../src/pow/kernels/cn_gpu_inner.cl",
       "../../../src/pow/kernels/cn_gpu_inner.cl",
   };
-  for (const char* p : paths)
-  {
-    std::ifstream f(p);
-    if (f)
-    {
-      std::ostringstream ss;
-      ss << f.rdbuf();
-      return ss.str();
-    }
-  }
-  return {};
+  return loadOpenclKernelSource(std::vector<const char*>(paths, paths + 7));
 }
 } // namespace
 
@@ -547,24 +535,17 @@ bool OpenclPowBackend::initOpencl(int deviceIndex)
     return false;
   }
 
-  const char* srcPtr = source.c_str();
-  size_t srcLen = source.size();
-  m_ocl->program = clCreateProgramWithSource(m_ocl->context, 1, &srcPtr, &srcLen, &err);
-  if (!m_ocl->program || err != CL_SUCCESS)
-    return false;
-
   /* No -cl-fast-relaxed-math: inner_hash_3 must match CPU SSE ordering and rounding. */
   const char* buildOpts =
       "-cl-single-precision-constant -cl-fp32-correctly-rounded-divide-sqrt";
-  err = clBuildProgram(m_ocl->program, 1, &m_ocl->device, buildOpts, nullptr, nullptr);
-  if (err != CL_SUCCESS)
   {
-    size_t logSize = 0;
-    clGetProgramBuildInfo(m_ocl->program, m_ocl->device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &logSize);
-    std::vector<char> log(logSize + 1, 0);
-    clGetProgramBuildInfo(m_ocl->program, m_ocl->device, CL_PROGRAM_BUILD_LOG, logSize, log.data(), nullptr);
-    powLog(std::string("OpenCL build log:\n") + log.data());
-    return false;
+    std::string buildErr;
+    if (!buildOpenclProgramCached(m_ocl->context, m_ocl->device, deviceIndex, "inner", source,
+                                  buildOpts, m_ocl->program, buildErr))
+    {
+      powLog(buildErr.empty() ? "OpenCL program build failed" : buildErr);
+      return false;
+    }
   }
 
   m_ocl->innerKernel = clCreateKernel(m_ocl->program, "cn_gpu_inner", &err);

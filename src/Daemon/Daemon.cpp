@@ -37,6 +37,7 @@
 #include "Blockchain/Blockchain.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "pow/GpuPowConfig.h"
+#include "pow/mining/GpuMinerConfig.hpp"
 #include "pow/backend.hpp"
 #include "pow/pow_service.hpp"
 #include "pow/pow_sync_log.hpp"
@@ -401,10 +402,13 @@ int main(int argc, char *argv[])
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
     MinerConfig::initOptions(desc_cmd_sett);
+    GpuMinerConfig::initOptions(desc_cmd_sett);
     GpuPowConfig::initOptions(desc_cmd_sett);
+    po::options_description desc_gpu_offload("GPU PoW offload tuning");
+    GpuPowConfig::initOffloadOptions(desc_gpu_offload);
 
     po::options_description desc_options("Allowed options");
-    desc_options.add(desc_cmd_only).add(desc_cmd_sett);
+    desc_options.add(desc_cmd_only).add(desc_cmd_sett).add(desc_gpu_offload);
 
     po::variables_map vm;
     CoreConfig coreConfig;
@@ -419,7 +423,7 @@ int main(int argc, char *argv[])
       if (command_line::get_arg(vm, command_line::arg_help))
       {
         std::cout << CCX_RELEASE_VERSION << std::endl << std::endl;
-        std::cout << desc_options;
+        std::cout << desc_cmd_only << std::endl << desc_cmd_sett;
         return false;
       }
       else if (command_line::get_arg(vm, command_line::arg_version))
@@ -446,6 +450,11 @@ int main(int argc, char *argv[])
 #endif
         return false;
       }
+      if (gpuPowConfig.showOffloadHelp)
+      {
+        std::cout << desc_gpu_offload;
+        return false;
+      }
 
       std::string data_dir = command_line::get_arg(vm, command_line::arg_data_dir);
       std::string config = command_line::get_arg(vm, arg_config_file);
@@ -457,10 +466,15 @@ int main(int argc, char *argv[])
 
       boost::system::error_code ec;
       if (boost::filesystem::exists(config_path, ec))
+      {
+        po::options_description desc_config(desc_cmd_sett);
+        desc_config.add(desc_gpu_offload);
         po::store(po::parse_config_file<char>(config_path.string<std::string>().c_str(),
-                                               desc_cmd_sett), vm);
+                                               desc_config), vm);
+      }
 
       po::notify(vm);
+      gpuPowConfig.init(vm);
       return true; });
 
     if (!r)
@@ -562,6 +576,11 @@ int main(int argc, char *argv[])
     MinerConfig minerConfig;
     minerConfig.init(vm);
 
+    GpuMinerConfig gpuMinerConfig;
+    gpuMinerConfig.init(vm);
+    applyMiningModeExclusivity(minerConfig.startMining, gpuMinerConfig,
+                               [&](const std::string& msg) { logger(WARNING, BRIGHT_YELLOW) << msg; });
+
     RpcServerConfig rpcConfig;
     rpcConfig.init(vm);
 
@@ -601,12 +620,22 @@ int main(int argc, char *argv[])
 
     // Initialize core
     logger(INFO) << "Initializing core...";
-    if (!ccore.init(coreConfig, minerConfig, true))
+    if (!ccore.init(coreConfig, minerConfig, gpuMinerConfig, gpuPowConfig.deviceIndex, true))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to initialize core";
       return 1;
     }
     logger(INFO) << "Core initialized OK";
+
+    if (gpuMinerConfig.enabled())
+    {
+      logger(INFO) << "GPU mining configured for address " << gpuMinerConfig.rewardAddress;
+      for (const auto& dev : gpuMinerConfig.devices)
+      {
+        logger(INFO) << "  GPU " << dev.deviceIndex << ": intensity " << dev.userIntensity << " -> 3x"
+                     << dev.perThreadIntensity << " (worksize " << GpuMinerConfig::kWorkSize << ")";
+      }
+    }
 
     // Start console handler
     if (!command_line::has_arg(vm, arg_console))
