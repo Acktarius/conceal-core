@@ -80,10 +80,16 @@ At runtime, `start_mining` and `start_gpu_mining` reject starting if the other m
 ## Console commands
 
 ```text
-start_gpu_mining <addr> <dev:intensity>[,<dev:intensity>...]
+start_gpu_mining <addr,deviceId:intensity[,deviceId:intensity...]>
 stop_gpu_mining
 show_hr          # shows CPU and/or GPU hashrate when mining
 hide_hr
+```
+
+Console `start_gpu_mining` uses the **same comma-separated value** as `--start-gpu-mining` (one argument, no spaces between address and device spec):
+
+```text
+start_gpu_mining ccx1YourAddress...,0:1920
 ```
 
 ## Conflicts with verify offload

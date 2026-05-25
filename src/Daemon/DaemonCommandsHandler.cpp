@@ -65,7 +65,7 @@ DaemonCommandsHandler::DaemonCommandsHandler(cn::core &core, cn::NodeServer &srv
                               "Stop mining");
   m_consoleHandler.setHandler("start_gpu_mining",
                               boost::bind(&DaemonCommandsHandler::start_gpu_mining, this, boost::arg<1>()),
-                              "Start GPU mining, start_gpu_mining <addr> <dev:intensity>[,<dev:intensity>...]");
+                              "Start GPU mining, start_gpu_mining <addr,deviceId:intensity[,deviceId:intensity...]>");
   m_consoleHandler.setHandler("stop_gpu_mining",
                               boost::bind(&DaemonCommandsHandler::stop_gpu_mining, this, boost::arg<1>()),
                               "Stop GPU mining");
@@ -448,6 +448,12 @@ bool DaemonCommandsHandler::start_mining(const std::vector<std::string> &args)
     return true;
   }
 
+  if (!m_core.currency().isTestnet() && !m_srv.get_payload_object().isSynchronized())
+  {
+    logger(logging::ERROR) << "Cannot mine while synchronizing; wait until the chain is caught up";
+    return true;
+  }
+
   if (m_core.get_gpu_miner().is_mining())
   {
     logger(logging::ERROR) << "GPU mining is active; stop it before starting CPU mining";
@@ -485,9 +491,16 @@ bool DaemonCommandsHandler::stop_mining(const std::vector<std::string> &args)
 
 bool DaemonCommandsHandler::start_gpu_mining(const std::vector<std::string> &args)
 {
-  if (args.size() < 2)
+  if (args.size() != 1)
   {
-    logger(logging::ERROR) << "Usage: start_gpu_mining <addr> <dev:intensity>[,<dev:intensity>...]";
+    logger(logging::ERROR) << "Usage: start_gpu_mining <addr,deviceId:intensity[,deviceId:intensity...]> "
+                              "(same format as --start-gpu-mining)";
+    return true;
+  }
+
+  if (!m_core.currency().isTestnet() && !m_srv.get_payload_object().isSynchronized())
+  {
+    logger(logging::ERROR) << "Cannot mine while synchronizing; wait until the chain is caught up";
     return true;
   }
 
@@ -497,23 +510,19 @@ bool DaemonCommandsHandler::start_gpu_mining(const std::vector<std::string> &arg
     return true;
   }
 
-  cn::AccountPublicAddress adr;
-  if (!m_core.currency().parseAccountAddressString(args[0], adr))
-  {
-    logger(logging::ERROR) << "Invalid wallet address!";
-    return true;
-  }
-
-  std::string value = args[0];
-  for (size_t i = 1; i < args.size(); ++i)
-    value += "," + args[i];
-
   std::string reward;
   std::vector<cn::GpuDeviceSpec> devices;
   std::string err;
-  if (!cn::GpuMinerConfig::parseValue(value, reward, devices, err))
+  if (!cn::GpuMinerConfig::parseValue(args[0], reward, devices, err))
   {
     logger(logging::ERROR) << "Invalid GPU mining spec: " << err;
+    return true;
+  }
+
+  cn::AccountPublicAddress adr;
+  if (!m_core.currency().parseAccountAddressString(reward, adr))
+  {
+    logger(logging::ERROR) << "Invalid wallet address!";
     return true;
   }
 

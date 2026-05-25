@@ -53,6 +53,7 @@ bool GpuMiner::init(const GpuMinerConfig& config, int verifyOffloadDeviceIndex)
 #else
   m_config = config;
   m_do_mining = config.enabled();
+  m_verifyOffloadDeviceIndex = verifyOffloadDeviceIndex;
 
   if (!m_do_mining)
     return true;
@@ -65,7 +66,7 @@ bool GpuMiner::init(const GpuMinerConfig& config, int verifyOffloadDeviceIndex)
 
   for (const auto& spec : config.devices)
   {
-    if (verifyOffloadDeviceIndex >= 0 && spec.deviceIndex == verifyOffloadDeviceIndex)
+    if (m_verifyOffloadDeviceIndex >= 0 && spec.deviceIndex == m_verifyOffloadDeviceIndex)
     {
       logger(ERROR) << "GPU device " << spec.deviceIndex
                     << " is already used by --gpu-device verify offload; cannot mine on same device";
@@ -75,6 +76,12 @@ bool GpuMiner::init(const GpuMinerConfig& config, int verifyOffloadDeviceIndex)
 
   return true;
 #endif
+}
+
+void GpuMiner::releaseVerifyOffloadDevice(int deviceIndex)
+{
+  if (m_verifyOffloadDeviceIndex == deviceIndex)
+    m_verifyOffloadDeviceIndex = -1;
 }
 
 bool GpuMiner::set_block_template(const Block& bl, const difficulty_type& diffic)
@@ -125,6 +132,16 @@ bool GpuMiner::start(const AccountPublicAddress& adr, const std::vector<GpuDevic
 
   if (!m_template_no)
     request_block_template();
+
+  for (const auto& spec : devices)
+  {
+    if (m_verifyOffloadDeviceIndex >= 0 && spec.deviceIndex == m_verifyOffloadDeviceIndex)
+    {
+      logger(ERROR) << "GPU device " << spec.deviceIndex
+                    << " is still used by verify offload; wait until synchronized or use another device";
+      return false;
+    }
+  }
 
   uint32_t threadBase = 0;
   for (const auto& spec : devices)

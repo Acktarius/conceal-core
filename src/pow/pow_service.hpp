@@ -26,6 +26,9 @@ public:
   /** Stop prefetch, drain GPU queue, and join the OpenCL worker. */
   void shutdown();
 
+  /** After chain sync: stop GPU verify offload, release OpenCL, fall back to CPU verify. */
+  int deactivateGpuOffloadOnSynchronized();
+
   PowVerifyBackend& backend();
   PowPrefetchCache& prefetch();
 
@@ -59,6 +62,7 @@ private:
   PowPrefetchCache m_prefetch;
   PowVerifyMetrics m_profileMetrics;
   bool m_gpuPrefetchEnabled = false;
+  int m_offloadDeviceIndex = -1;
   bool m_trustGpuCache = true;
   uint32_t m_backlogThreshold = 128;
   bool m_prefetchWindowUserSet = false;

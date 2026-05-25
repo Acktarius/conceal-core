@@ -10,6 +10,7 @@
 
 #include "../CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "../CryptoNoteCore/Difficulty.h"
+#include "cpu_backend.hpp"
 #include "pow_sync_log.hpp"
 
 namespace cn
@@ -26,6 +27,7 @@ void PowService::init(std::unique_ptr<PowVerifyBackend> backend, const GpuPowCon
 {
   m_backend = std::move(backend);
   m_gpuPrefetchEnabled = m_backend && m_backend->gpuAsyncOffload();
+  m_offloadDeviceIndex = m_gpuPrefetchEnabled ? gpuConfig.deviceIndex : -1;
   m_backlogThreshold = gpuConfig.backlogThreshold;
   m_trustGpuCache = gpuConfig.trustGpuCache;
   m_prefetchWindowUserSet = gpuConfig.prefetchWindowUserSet;
@@ -82,10 +84,31 @@ void PowService::updatePrefetchForConnections(size_t outgoingConnectionLanes)
 void PowService::shutdown()
 {
   m_gpuPrefetchEnabled = false;
+  m_offloadDeviceIndex = -1;
   setPowSyncLogger(nullptr);
   m_prefetch.configure(0, 0, 0, nullptr);
   if (m_backend)
     m_backend->shutdown();
+}
+
+int PowService::deactivateGpuOffloadOnSynchronized()
+{
+  if (!m_gpuPrefetchEnabled || !m_backend || !m_backend->gpuAsyncOffload())
+    return -1;
+
+  const int deviceIndex = m_offloadDeviceIndex;
+
+  m_gpuPrefetchEnabled = false;
+  m_offloadDeviceIndex = -1;
+  setPowSyncLogger(nullptr);
+  m_prefetch.configure(0, 0, 0, nullptr);
+  m_syncBatchRemainder = 0;
+  m_syncCatchupGap = 0;
+
+  m_backend->shutdown();
+  m_backend.reset(new CpuPowBackend());
+
+  return deviceIndex;
 }
 
 PowVerifyBackend& PowService::backend()
