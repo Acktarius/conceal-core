@@ -11,6 +11,8 @@
 #include <thread>
 #include <vector>
 
+#include "../../CryptoNoteCore/CryptoNoteBasic.h"
+#include "../../CryptoNoteCore/Difficulty.h"
 #include "../mining/GpuMinerConfig.hpp"
 
 namespace cn
@@ -38,8 +40,8 @@ public:
 
 private:
   void workerLoop(uint32_t hostThreadIndex);
-  bool runMiningBatch(uint32_t hostThreadIndex, uint32_t nonceBase, uint32_t jobCount,
-                      bool& found, uint32_t& foundNonce);
+  bool runMiningBatch(uint32_t hostThreadIndex, const Block& block, difficulty_type diff,
+                      uint32_t nonceBase, uint32_t jobCount, bool& found, uint32_t& foundNonce);
 
   GpuMiner& m_owner;
   GpuDeviceSpec m_spec;

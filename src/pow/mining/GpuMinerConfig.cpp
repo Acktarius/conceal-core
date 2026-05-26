@@ -2,6 +2,7 @@
 // MIT
 
 #include "GpuMinerConfig.hpp"
+#include "gpu_mine_intensity.hpp"
 
 #include <set>
 #include <sstream>
@@ -15,8 +16,8 @@ namespace
 {
 const command_line::arg_descriptor<std::string> arg_start_gpu_mining = {
     "start-gpu-mining",
-    "Mine with OpenCL GPUs: <addr,deviceId:intensity[,deviceId:intensity...]> "
-    "(total GPU intensity, split across 3 host threads; OpenCL worksize is fixed at 8)",
+    "Mine with OpenCL GPUs: <addr,deviceId:intensity[,...]> intensity = number, safe, or boost "
+    "(total per GPU, 3 pipelines; capped to min(40% VRAM, 80xCU); worksize fixed at 8)",
     "",
     true};
 } // namespace
@@ -60,11 +61,10 @@ bool GpuMinerConfig::parseDeviceSpec(const std::string& spec, GpuDeviceSpec& out
   try
   {
     out.deviceIndex = std::stoi(spec.substr(0, colon));
-    out.userIntensity = static_cast<uint32_t>(std::stoul(spec.substr(colon + 1)));
   }
   catch (const std::exception&)
   {
-    err = "invalid deviceId:intensity in \"" + spec + "\"";
+    err = "invalid device index in \"" + spec + "\"";
     return false;
   }
 
@@ -73,23 +73,31 @@ bool GpuMinerConfig::parseDeviceSpec(const std::string& spec, GpuDeviceSpec& out
     err = "device index must be >= 0";
     return false;
   }
-  if (out.userIntensity == 0)
-  {
-    err = "intensity must be > 0";
+
+  out.intensityToken = spec.substr(colon + 1);
+  uint32_t numeric = 0;
+  if (!parseIntensityToken(out.intensityToken, out.intensityMode, numeric, err))
     return false;
+
+  out.requestedIntensity = numeric;
+  out.userIntensity = 0;
+  out.alignedIntensity = 0;
+  out.perThreadIntensity = 0;
+
+  if (out.intensityMode == GpuIntensityMode::Numeric)
+  {
+    out.alignedIntensity = alignTotalIntensity(numeric);
+    if (out.alignedIntensity < kMinTotalIntensity)
+    {
+      err = "intensity " + std::to_string(numeric) + " too small after alignment (minimum " +
+            std::to_string(kMinTotalIntensity) + ", must be a multiple of 3 × worksize " +
+            std::to_string(kThreadsPerGpu) + " × " + std::to_string(kWorkSize) + ")";
+      return false;
+    }
+    out.perThreadIntensity = out.alignedIntensity / kThreadsPerGpu;
+    out.userIntensity = out.alignedIntensity;
   }
 
-  out.alignedIntensity = alignTotalIntensity(out.userIntensity);
-  if (out.alignedIntensity < kMinTotalIntensity)
-  {
-    err = "intensity " + std::to_string(out.userIntensity) +
-          " too small after alignment (minimum " + std::to_string(kMinTotalIntensity) +
-          ", must be a multiple of 3 × worksize " + std::to_string(kThreadsPerGpu) + " × " +
-          std::to_string(kWorkSize) + ")";
-    return false;
-  }
-
-  out.perThreadIntensity = out.alignedIntensity / kThreadsPerGpu;
   return true;
 }
 

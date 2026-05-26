@@ -13,15 +13,25 @@
 namespace cn
 {
 
+enum class GpuIntensityMode
+{
+  Numeric,
+  Safe,
+  Boost,
+};
+
 struct GpuDeviceSpec
 {
   int deviceIndex = -1;
-  /** Total intensity for the GPU (user input). */
+  GpuIntensityMode intensityMode = GpuIntensityMode::Numeric;
+  /** Numeric request before device limits (0 for safe/boost/max until resolved). */
+  uint32_t requestedIntensity = 0;
+  /** Total after limits and alignment (effective intensity). */
   uint32_t userIntensity = 0;
-  /** Total after rounding down to a multiple of 3 × worksize (24). */
   uint32_t alignedIntensity = 0;
   /** Per host thread: alignedIntensity / 3 (OpenCL Threads / numThreads). */
   uint32_t perThreadIntensity = 0;
+  std::string intensityToken;
 };
 
 struct GpuMinerConfig

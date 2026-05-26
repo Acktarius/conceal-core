@@ -11,6 +11,8 @@
 #include <numeric>
 
 #include "../../CryptoNoteCore/CryptoNoteFormatUtils.h"
+#include "../../CryptoNoteCore/Difficulty.h"
+#include "../../crypto/cryptonight.hpp"
 
 using namespace logging;
 
@@ -276,7 +278,22 @@ bool GpuMiner::worker_wait_template(Block& outBlock, difficulty_type& outDiff, u
 
 void GpuMiner::worker_report_found(const Block& block)
 {
-  logger(INFO, GREEN) << "GPU found block for difficulty: " << m_diffic;
+  difficulty_type diff = 0;
+  {
+    std::lock_guard<std::mutex> lk(m_template_lock);
+    diff = m_diffic;
+  }
+
+  crypto::cn_context ctx;
+  crypto::Hash h;
+  if (!get_block_longhash(ctx, block, h) || !check_hash(h, diff))
+  {
+    logger(WARNING) << "GPU block candidate rejected before submit (nonce " << block.nonce
+                    << ", template may have changed)";
+    return;
+  }
+
+  logger(INFO, GREEN) << "GPU found block for difficulty: " << diff;
   Block b = block;
   if (!m_handler.handle_block_found(b))
     logger(WARNING) << "GPU found block but handle_block_found failed";

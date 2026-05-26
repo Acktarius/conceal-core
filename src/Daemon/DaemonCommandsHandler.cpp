@@ -65,7 +65,7 @@ DaemonCommandsHandler::DaemonCommandsHandler(cn::core &core, cn::NodeServer &srv
                               "Stop mining");
   m_consoleHandler.setHandler("start_gpu_mining",
                               boost::bind(&DaemonCommandsHandler::start_gpu_mining, this, boost::arg<1>()),
-                              "Start GPU mining, start_gpu_mining <addr,deviceId:intensity[,deviceId:intensity...]>");
+                              "Start GPU mining, start_gpu_mining <addr,deviceId:intensity|safe|boost[,...]>");
   m_consoleHandler.setHandler("stop_gpu_mining",
                               boost::bind(&DaemonCommandsHandler::stop_gpu_mining, this, boost::arg<1>()),
                               "Stop GPU mining");
@@ -493,7 +493,7 @@ bool DaemonCommandsHandler::start_gpu_mining(const std::vector<std::string> &arg
 {
   if (args.size() != 1)
   {
-    logger(logging::ERROR) << "Usage: start_gpu_mining <addr,deviceId:intensity[,deviceId:intensity...]> "
+    logger(logging::ERROR) << "Usage: start_gpu_mining <addr,deviceId:intensity|safe|boost[,...]> "
                               "(same format as --start-gpu-mining)";
     return true;
   }

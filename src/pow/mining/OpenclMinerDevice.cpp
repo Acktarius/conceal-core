@@ -4,9 +4,11 @@
 #include "OpenclMinerDevice.hpp"
 
 #include "GpuMiner.hpp"
+#include "gpu_mine_intensity.hpp"
 #include "kernel_loader.hpp"
 
 #include "../../CryptoNoteCore/CryptoNoteFormatUtils.h"
+#include "../../CryptoNoteCore/Difficulty.h"
 #include "../../crypto/cryptonight.hpp"
 
 #include "../opencl/raii.hpp"
@@ -130,6 +132,13 @@ bool OpenclMinerDevice::init(std::string& err)
   }
   mineLog(info);
 
+  std::string intensityLog;
+  GpuDeviceSpec resolved = m_spec;
+  if (!resolveDeviceIntensity(resolved, m_ocl->device, intensityLog, err))
+    return false;
+  m_spec = resolved;
+  mineLog(intensityLog);
+
   cl_int clErr = CL_SUCCESS;
   cl_context rawCtx = clCreateContext(nullptr, 1, &m_ocl->device, nullptr, nullptr, &clErr);
   if (!rawCtx || clErr != CL_SUCCESS)
@@ -208,10 +217,6 @@ bool OpenclMinerDevice::init(std::string& err)
   if (!selfTest(err))
     return false;
 
-  mineLog("GPU " + std::to_string(m_spec.deviceIndex) + ": intensity " +
-          std::to_string(m_spec.userIntensity) + " -> 3x" +
-          std::to_string(m_spec.perThreadIntensity) + " (worksize " + std::to_string(workSize) +
-          ", " + std::to_string(GpuMinerConfig::kThreadsPerGpu) + " independent pipelines)");
   return true;
 #endif
 }
@@ -394,7 +399,7 @@ void OpenclMinerDevice::workerLoop(uint32_t hostThreadIndex)
     const uint32_t jobs = m_spec.perThreadIntensity;
     bool found = false;
     uint32_t foundNonce = 0;
-    if (runMiningBatch(hostThreadIndex, nonce, jobs, found, foundNonce))
+    if (runMiningBatch(hostThreadIndex, block, diff, nonce, jobs, found, foundNonce))
     {
       m_owner.add_hashes(jobs);
       if (found)
@@ -410,11 +415,14 @@ void OpenclMinerDevice::workerLoop(uint32_t hostThreadIndex)
 #endif
 }
 
-bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, uint32_t nonceBase,
-                                       uint32_t jobCount, bool& found, uint32_t& foundNonce)
+bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, const Block& block,
+                                       difficulty_type diff, uint32_t nonceBase, uint32_t jobCount,
+                                       bool& found, uint32_t& foundNonce)
 {
 #ifndef CONCEAL_WITH_OPENCL
   (void)hostThreadIndex;
+  (void)block;
+  (void)diff;
   (void)nonceBase;
   (void)jobCount;
   found = false;
@@ -429,15 +437,10 @@ bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, uint32_t nonceB
 
   OclState::Pipeline& pipe = m_ocl->pipelines[hostThreadIndex];
 
-  Block block;
-  difficulty_type diff = 0;
-  uint32_t templateVer = 0;
-  if (!m_owner.worker_wait_template(block, diff, templateVer))
-    return false;
-
   BinaryArray blob;
-  block.nonce = 0;
-  if (!get_block_hashing_blob(block, blob))
+  Block workBlock = block;
+  workBlock.nonce = 0;
+  if (!get_block_hashing_blob(workBlock, blob))
     return false;
 
   uint64_t input[kInputUlongs] = {};
@@ -503,14 +506,26 @@ bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, uint32_t nonceB
     memcpy(crypto::cn_gpu_state_ptr(ctx), pipe.hostStates.data() + j * kStateUlongs, 200);
     memcpy(crypto::cn_gpu_scratchpad_ptr(ctx), pipe.hostScratch.data() + j * kCnGpuMemory,
            kCnGpuMemory);
-    crypto::Hash h;
-    crypto::cn_gpu_finish_hash(ctx, h);
-    if (check_hash(h, diff))
+    crypto::Hash gpuHash;
+    crypto::cn_gpu_finish_hash(ctx, gpuHash);
+    if (!check_hash(gpuHash, diff))
+      continue;
+
+    const uint32_t candidateNonce = nonceBase + j * stride;
+    Block candidate = block;
+    candidate.nonce = candidateNonce;
+    crypto::cn_context verifyCtx;
+    crypto::Hash refHash;
+    if (!get_block_longhash(verifyCtx, candidate, refHash) || !check_hash(refHash, diff))
     {
-      found = true;
-      foundNonce = nonceBase + j * stride;
-      return true;
+      mineLog("GPU candidate nonce " + std::to_string(candidateNonce) +
+              " failed CPU longhash verify (stale template or hash mismatch)");
+      continue;
     }
+
+    found = true;
+    foundNonce = candidateNonce;
+    return true;
   }
   return true;
 #endif
