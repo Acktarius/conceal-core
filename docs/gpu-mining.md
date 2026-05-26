@@ -119,7 +119,9 @@ start_gpu_mining ccx1YourAddress...,0:1920
 
 ## Block submission
 
-When a GPU batch reports a hit, the miner checks the candidate with the same path the network uses (`get_block_longhash` on the **same block template** that was hashed on the GPU, with the winning nonce). That avoids false submits when the template was refreshed while a batch was running (the daemon updates the template every few seconds). Only candidates that pass that CPU check are passed to `handle_block_found`.
+Same model as CPU mining: the daemon’s block template already includes the miner reward address and the rest of the header. The GPU only searches nonces; on a hit the miner sets `block.nonce` on that template and calls `handle_block_found` (chain verification happens there, as for CPU).
+
+`runMiningBatch` uses the **same** `block` snapshot as the worker thread (no second template fetch per batch).
 
 ## Conflicts with verify offload
 
