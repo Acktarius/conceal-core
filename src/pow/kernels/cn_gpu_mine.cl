@@ -171,16 +171,16 @@ __kernel void cn1_cn_gpu(__global int* lpad_in, __global int* spad, uint numThre
 
   for (size_t i = 0; i < ITERATIONS; i++)
   {
-    mem_fence(CLK_LOCAL_MEM_FENCE);
+    barrier(CLK_LOCAL_MEM_FENCE);
     int tmp = ((__global int*)scratchpad_ptr(s, tidd, lpad))[tidm];
     ((__local int*)(smem->out))[tid] = tmp;
-    mem_fence(CLK_LOCAL_MEM_FENCE);
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     single_compute_wrap(tidm, *(smem->out + look[tid][0]), *(smem->out + look[tid][1]),
                         *(smem->out + look[tid][2]), *(smem->out + look[tid][3]), ccnt[tid], vs,
                         smem->va + tid, smem->out + tid);
 
-    mem_fence(CLK_LOCAL_MEM_FENCE);
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     int outXor = ((__local int*)smem->out)[block];
     for (uint dd = block + 4; dd < (tidd + 1) * 16; dd += 4)
@@ -193,7 +193,7 @@ __kernel void cn1_cn_gpu(__global int* lpad_in, __global int* spad, uint numThre
     float va_tmp2 = ((__local float*)smem->va)[block + 8] + ((__local float*)smem->va)[block + 12];
     ((__local float*)smem->va)[tid] = va_tmp1 + va_tmp2;
 
-    mem_fence(CLK_LOCAL_MEM_FENCE);
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     int out2 = ((__local int*)smem->out)[tid] ^ ((__local int*)smem->out)[tid + 4] ^
                ((__local int*)smem->out)[tid + 8] ^ ((__local int*)smem->out)[tid + 12];
@@ -207,7 +207,7 @@ __kernel void cn1_cn_gpu(__global int* lpad_in, __global int* spad, uint numThre
     ((__local int*)smem->out)[tid] = out2 ^ xx_int;
     ((__local float*)smem->va)[tid] = va_tmp1 / 64.0f;
 
-    mem_fence(CLK_LOCAL_MEM_FENCE);
+    barrier(CLK_LOCAL_MEM_FENCE);
 
     vs = smem->va[0];
     s = smem->out[0].x ^ smem->out[0].y ^ smem->out[0].z ^ smem->out[0].w;
