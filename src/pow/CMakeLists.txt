@@ -14,6 +14,7 @@ set(POW_SOURCES
   opencl/opencl_program_cache.cpp
   opencl/opencl_backend.cpp
   mining/GpuMinerConfig.cpp
+  mining/gpu_mine_intensity.cpp
   mining/kernel_loader.cpp
   mining/GpuMiner.cpp
   mining/OpenclMinerDevice.cpp

@@ -27,13 +27,38 @@ Use the **global index** in `--start-gpu-mining`.
 --start-gpu-mining <addr,deviceId:intensity[,deviceId:intensity...]>
 ```
 
-Example (one GPU, total intensity 1920 → 3 host threads × 640 each):
+`intensity` is either a **number** (total for that GPU) or a preset:
+
+| Preset | Formula (total intensity) | Notes |
+|--------|---------------------------|--------|
+| `safe` | `64 × CU` | Conservative default for new setups |
+| `boost` | `72 × CU` | Higher throughput; log suggests stable OC/cooling |
+
+(`CU` = OpenCL compute units on that device.)
+
+Examples:
 
 ```bash
 ./build/src/conceald --start-gpu-mining ccx1YourAddress...,0:1920 --data-dir /path/to/data
+./build/src/conceald --start-gpu-mining ccx1YourAddress...,0:safe --data-dir /path/to/data
+./build/src/conceald --start-gpu-mining ccx1YourAddress...,0:boost --data-dir /path/to/data
 ```
 
+On a 30-CU GPU, `0:boost` resolves to total **2160** → **3×720** (worksize 8, 3 pipelines), unless the device cap is lower.
+
 **Intensity is the total for the GPU**, split evenly across **3 host threads** (like three xmr-stak `gpu_threads_conf` entries with the same `"index"`). OpenCL **worksize is fixed at 8**; it is not a CLI parameter.
+
+### Intensity limits (GPU protection)
+
+When the device is opened, numeric and preset intensities are **clamped** to:
+
+```text
+cap = min( floor(40% of VRAM / 2 MiB per job), 80 × CU )
+```
+
+(also limited by the driver’s max single-buffer allocation, then aligned down to a multiple of 24).
+
+If you request `5000` but the cap is `2160`, the miner logs the clamp and uses `2160`. Presets `safe` and `boost` are computed from CU first, then clamped the same way if VRAM is tight.
 
 Each host thread owns an **independent OpenCL pipeline**: its own command **queue**, buffer set, and kernel objects. All three queues run on the same GPU in parallel (no shared queue mutex), which keeps the device fed more continuously.
 
@@ -91,6 +116,10 @@ Console `start_gpu_mining` uses the **same comma-separated value** as `--start-g
 ```text
 start_gpu_mining ccx1YourAddress...,0:1920
 ```
+
+## Block submission
+
+When a GPU batch reports a hit, the miner checks the candidate with the same path the network uses (`get_block_longhash` on the **same block template** that was hashed on the GPU, with the winning nonce). That avoids false submits when the template was refreshed while a batch was running (the daemon updates the template every few seconds). Only candidates that pass that CPU check are passed to `handle_block_found`.
 
 ## Conflicts with verify offload
 

@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "../src/pow/mining/GpuMinerConfig.hpp"
+#include "../src/pow/mining/gpu_mine_intensity.hpp"
 
 using namespace cn;
 
@@ -41,6 +42,28 @@ static int testParseValue()
   return 0;
 }
 
+static int testParseModes()
+{
+  std::string addr;
+  std::vector<GpuDeviceSpec> devices;
+  std::string err;
+  if (!GpuMinerConfig::parseValue("ccx1abc,0:safe,1:boost", addr, devices, err))
+  {
+    std::fprintf(stderr, "parse modes failed: %s\n", err.c_str());
+    return 1;
+  }
+  if (devices[0].intensityMode != GpuIntensityMode::Safe || devices[0].alignedIntensity != 0)
+    return 2;
+  if (devices[1].intensityMode != GpuIntensityMode::Boost || devices[1].intensityToken != "boost")
+    return 3;
+
+  GpuIntensityMode mode = GpuIntensityMode::Numeric;
+  uint32_t num = 0;
+  if (parseIntensityToken("max", mode, num, err))
+    return 4;
+  return 0;
+}
+
 static int testExclusivity()
 {
   GpuMinerConfig gpu;
@@ -57,6 +80,7 @@ int main()
   int failures = 0;
   failures += testAlignTotalIntensity();
   failures += testParseValue();
+  failures += testParseModes();
   failures += testExclusivity();
   if (failures)
   {
