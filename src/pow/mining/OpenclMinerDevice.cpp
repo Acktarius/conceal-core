@@ -506,25 +506,13 @@ bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, const Block& bl
     memcpy(crypto::cn_gpu_state_ptr(ctx), pipe.hostStates.data() + j * kStateUlongs, 200);
     memcpy(crypto::cn_gpu_scratchpad_ptr(ctx), pipe.hostScratch.data() + j * kCnGpuMemory,
            kCnGpuMemory);
-    crypto::Hash gpuHash;
-    crypto::cn_gpu_finish_hash(ctx, gpuHash);
-    if (!check_hash(gpuHash, diff))
+    crypto::Hash h;
+    crypto::cn_gpu_finish_hash(ctx, h);
+    if (!check_hash(h, diff))
       continue;
-
-    const uint32_t candidateNonce = nonceBase + j * stride;
-    Block candidate = block;
-    candidate.nonce = candidateNonce;
-    crypto::cn_context verifyCtx;
-    crypto::Hash refHash;
-    if (!get_block_longhash(verifyCtx, candidate, refHash) || !check_hash(refHash, diff))
-    {
-      mineLog("GPU candidate nonce " + std::to_string(candidateNonce) +
-              " failed CPU longhash verify (stale template or hash mismatch)");
-      continue;
-    }
 
     found = true;
-    foundNonce = candidateNonce;
+    foundNonce = nonceBase + j * stride;
     return true;
   }
   return true;
