@@ -488,6 +488,39 @@ bool get_block_hashing_blob(const Block& b, BinaryArray& ba) {
   return true;
 }
 
+bool get_hashing_blob_nonce_offset(const Block& headerTemplate, size_t& offset)
+{
+  Block b0 = headerTemplate;
+  b0.nonce = 0;
+  BinaryArray blob0;
+  if (!get_block_hashing_blob(b0, blob0))
+    return false;
+
+  Block b1 = headerTemplate;
+  b1.nonce = 1;
+  BinaryArray blob1;
+  if (!get_block_hashing_blob(b1, blob1))
+    return false;
+
+  if (blob0.size() != blob1.size())
+    return false;
+
+  offset = blob0.size();
+  for (size_t i = 0; i < blob0.size(); ++i)
+  {
+    if (blob0[i] != blob1[i])
+    {
+      offset = i;
+      break;
+    }
+  }
+
+  if (offset + sizeof(uint32_t) > blob0.size())
+    return false;
+
+  return true;
+}
+
 bool get_block_hash(const Block& b, Hash& res) {
   BinaryArray ba;
   if (!get_block_hashing_blob(b, ba)) {
