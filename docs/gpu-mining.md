@@ -119,9 +119,7 @@ start_gpu_mining ccx1YourAddress...,0:1920
 
 ## Block submission
 
-Same model as CPU mining: the daemon’s block template already includes the miner reward address and the rest of the header. The GPU only searches nonces; on a hit the miner sets `block.nonce` on that template and calls `handle_block_found` (chain verification happens there, as for CPU).
-
-`runMiningBatch` uses the **same** `block` snapshot as the worker thread (no second template fetch per batch).
+GPU `cn0` runs the same Keccak absorb as `get_block_longhash` on the full hashing blob, patching `nonce` at the byte offset from the serialized header (not the old xmr-stak 88-byte shortcut).
 
 ## Conflicts with verify offload
 

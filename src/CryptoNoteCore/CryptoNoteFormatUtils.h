@@ -75,6 +75,8 @@ bool generate_key_image_helper(const AccountKeys& ack, const crypto::PublicKey& 
 std::string short_hash_str(const crypto::Hash& h);
 
 bool get_block_hashing_blob(const Block& b, BinaryArray& blob);
+/** Byte offset of BlockHeader::nonce inside get_block_hashing_blob (template with nonce 0). */
+bool get_hashing_blob_nonce_offset(const Block& headerTemplate, size_t& offset);
 bool get_aux_block_header_hash(const Block& b, crypto::Hash& res);
 bool get_block_hash(const Block& b, crypto::Hash& res);
 crypto::Hash get_block_hash(const Block& b);

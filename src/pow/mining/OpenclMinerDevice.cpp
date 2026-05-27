@@ -32,7 +32,7 @@ void mineLog(const std::string& msg)
 
 constexpr size_t kCnGpuMemory = 2u * 1024u * 1024u;
 constexpr size_t kStateUlongs = 25;
-constexpr size_t kInputUlongs = 11;
+constexpr size_t kMaxHashingBlobBytes = 128;
 } // namespace
 
 #ifdef CONCEAL_WITH_OPENCL
@@ -199,7 +199,7 @@ bool OpenclMinerDevice::init(std::string& err)
     pipe.queue = ocl::ClQueue(rawQ);
 
     pipe.inputBuf = ocl::ClMem(clCreateBuffer(m_ocl->context.get(), CL_MEM_READ_ONLY,
-                                              kInputUlongs * sizeof(uint64_t), nullptr, &clErr));
+                                              kMaxHashingBlobBytes, nullptr, &clErr));
     pipe.statesBuf =
         ocl::ClMem(clCreateBuffer(m_ocl->context.get(), CL_MEM_READ_WRITE, stateBytes, nullptr, &clErr));
     pipe.scratchBuf =
@@ -252,18 +252,33 @@ bool OpenclMinerDevice::selfTest(std::string& err) const
 
   crypto::Hash refHash;
   crypto::cn_context refCtx;
-  crypto::cn_gpu_prepare_mining(refCtx, blob.data(), blob.size(), 0);
-  crypto::cn_gpu_run_inner_reference(refCtx);
-  crypto::cn_gpu_finish_hash(refCtx, refHash);
+  if (!get_block_longhash(refCtx, block, refHash))
+  {
+    err = "self-test get_block_longhash failed";
+    return false;
+  }
 
-  uint64_t input[kInputUlongs] = {};
-  memcpy(input, blob.data(), std::min(blob.size(), kInputUlongs * sizeof(uint64_t)));
+  size_t nonceOffset = 0;
+  if (!get_hashing_blob_nonce_offset(block, nonceOffset))
+  {
+    err = "self-test get_hashing_blob_nonce_offset failed";
+    return false;
+  }
+
+  if (blob.size() > kMaxHashingBlobBytes)
+  {
+    err = "self-test hashing blob too large";
+    return false;
+  }
+
+  std::vector<uint8_t> blobUpload(kMaxHashingBlobBytes, 0);
+  memcpy(blobUpload.data(), blob.data(), blob.size());
 
   OpenclMinerDevice* mut = const_cast<OpenclMinerDevice*>(this);
   OclState::Pipeline& pipe = mut->m_ocl->pipelines[0];
 
   cl_int clErr = clEnqueueWriteBuffer(pipe.queue.get(), pipe.inputBuf.get(), CL_TRUE, 0,
-                                      kInputUlongs * sizeof(uint64_t), input, 0, nullptr, nullptr);
+                                      kMaxHashingBlobBytes, blobUpload.data(), 0, nullptr, nullptr);
   if (clErr != CL_SUCCESS)
   {
     err = "self-test input upload failed";
@@ -273,12 +288,16 @@ bool OpenclMinerDevice::selfTest(std::string& err) const
   const cl_uint threads = 1;
   const cl_uint nb = 0;
   const cl_uint ns = 1;
-  clSetKernelArg(pipe.cn0.get(), 3, sizeof(cl_uint), &threads);
-  clSetKernelArg(pipe.cn0.get(), 4, sizeof(cl_uint), &nb);
-  clSetKernelArg(pipe.cn0.get(), 5, sizeof(cl_uint), &ns);
+  const cl_uint blobLen = static_cast<cl_uint>(blob.size());
+  const cl_uint nonceOff = static_cast<cl_uint>(nonceOffset);
   setKernelMem(pipe.cn0.get(), 0, pipe.inputBuf);
   setKernelMem(pipe.cn0.get(), 1, pipe.scratchBuf);
   setKernelMem(pipe.cn0.get(), 2, pipe.statesBuf);
+  clSetKernelArg(pipe.cn0.get(), 3, sizeof(cl_uint), &threads);
+  clSetKernelArg(pipe.cn0.get(), 4, sizeof(cl_uint), &nb);
+  clSetKernelArg(pipe.cn0.get(), 5, sizeof(cl_uint), &ns);
+  clSetKernelArg(pipe.cn0.get(), 6, sizeof(cl_uint), &blobLen);
+  clSetKernelArg(pipe.cn0.get(), 7, sizeof(cl_uint), &nonceOff);
 
   size_t g0[2] = {8, 8};
   size_t l0[2] = {8, 8};
@@ -329,7 +348,7 @@ bool OpenclMinerDevice::selfTest(std::string& err) const
 
   if (memcmp(refHash.data, gpuHash.data, sizeof(refHash.data)) != 0)
   {
-    err = "GPU mine hash mismatch vs CPU reference";
+    err = "GPU mine hash mismatch vs get_block_longhash";
     return false;
   }
   return true;
@@ -443,13 +462,20 @@ bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, const Block& bl
   if (!get_block_hashing_blob(workBlock, blob))
     return false;
 
-  uint64_t input[kInputUlongs] = {};
-  memcpy(input, blob.data(), std::min(blob.size(), kInputUlongs * sizeof(uint64_t)));
+  size_t nonceOffset = 0;
+  if (!get_hashing_blob_nonce_offset(workBlock, nonceOffset))
+    return false;
+
+  if (blob.size() > kMaxHashingBlobBytes)
+    return false;
+
+  std::vector<uint8_t> blobUpload(kMaxHashingBlobBytes, 0);
+  memcpy(blobUpload.data(), blob.data(), blob.size());
 
   cl_int clErr = CL_SUCCESS;
 
   clErr = clEnqueueWriteBuffer(pipe.queue.get(), pipe.inputBuf.get(), CL_TRUE, 0,
-                               kInputUlongs * sizeof(uint64_t), input, 0, nullptr, nullptr);
+                               kMaxHashingBlobBytes, blobUpload.data(), 0, nullptr, nullptr);
   if (clErr != CL_SUCCESS)
     return false;
 
@@ -460,12 +486,16 @@ bool OpenclMinerDevice::runMiningBatch(uint32_t hostThreadIndex, const Block& bl
   cl_uint threads = jobCount;
   cl_uint nb = nonceBase;
   cl_uint ns = stride;
+  const cl_uint blobLen = static_cast<cl_uint>(blob.size());
+  const cl_uint nonceOff = static_cast<cl_uint>(nonceOffset);
   setKernelMem(pipe.cn0.get(), 0, pipe.inputBuf);
   setKernelMem(pipe.cn0.get(), 1, pipe.scratchBuf);
   setKernelMem(pipe.cn0.get(), 2, pipe.statesBuf);
   clSetKernelArg(pipe.cn0.get(), 3, sizeof(cl_uint), &threads);
   clSetKernelArg(pipe.cn0.get(), 4, sizeof(cl_uint), &nb);
   clSetKernelArg(pipe.cn0.get(), 5, sizeof(cl_uint), &ns);
+  clSetKernelArg(pipe.cn0.get(), 6, sizeof(cl_uint), &blobLen);
+  clSetKernelArg(pipe.cn0.get(), 7, sizeof(cl_uint), &nonceOff);
 
   size_t g0[2] = {jobCount, 8};
   size_t l0[2] = {8, 8};

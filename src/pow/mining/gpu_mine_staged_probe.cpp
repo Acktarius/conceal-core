@@ -27,7 +27,7 @@ namespace
 constexpr size_t kCnGpuMemory = 2u * 1024u * 1024u;
 constexpr size_t kStateUlongs = 25;
 constexpr size_t kStateBytes = 200;
-constexpr size_t kInputUlongs = 11;
+constexpr size_t kMaxHashingBlobBytes = 128;
 
 size_t firstByteDiff(const uint8_t* a, const uint8_t* b, size_t n)
 {
@@ -185,8 +185,8 @@ bool initOcl(int deviceIndex, OclMineCtx& ocl, std::string& err)
     return false;
   }
 
-  ocl.inputBuf = ocl::ClMem(clCreateBuffer(ocl.context.get(), CL_MEM_READ_ONLY,
-                                           kInputUlongs * sizeof(uint64_t), nullptr, &clErr));
+  ocl.inputBuf = ocl::ClMem(clCreateBuffer(ocl.context.get(), CL_MEM_READ_ONLY, kMaxHashingBlobBytes,
+                                           nullptr, &clErr));
   ocl.statesBuf = ocl::ClMem(clCreateBuffer(ocl.context.get(), CL_MEM_READ_WRITE,
                                             kStateUlongs * sizeof(uint64_t), nullptr, &clErr));
   ocl.scratchBuf =
@@ -202,10 +202,20 @@ bool initOcl(int deviceIndex, OclMineCtx& ocl, std::string& err)
   return true;
 }
 
-bool gpuRunPrepare(OclMineCtx& ocl, const uint64_t* input, uint32_t nonce, std::string& err)
+bool gpuRunPrepare(OclMineCtx& ocl, const uint8_t* blob, size_t blobLen, size_t nonceOffset,
+                   uint32_t nonce, std::string& err)
 {
+  if (blobLen > kMaxHashingBlobBytes)
+  {
+    err = "blob too large";
+    return false;
+  }
+
+  std::vector<uint8_t> upload(kMaxHashingBlobBytes, 0);
+  memcpy(upload.data(), blob, blobLen);
+
   cl_int clErr = clEnqueueWriteBuffer(ocl.queue.get(), ocl.inputBuf.get(), CL_TRUE, 0,
-                                      kInputUlongs * sizeof(uint64_t), input, 0, nullptr, nullptr);
+                                      kMaxHashingBlobBytes, upload.data(), 0, nullptr, nullptr);
   if (clErr != CL_SUCCESS)
   {
     err = "input upload failed";
@@ -215,12 +225,16 @@ bool gpuRunPrepare(OclMineCtx& ocl, const uint64_t* input, uint32_t nonce, std::
   const cl_uint threads = 1;
   const cl_uint nb = nonce;
   const cl_uint ns = 1;
+  const cl_uint blobLenArg = static_cast<cl_uint>(blobLen);
+  const cl_uint nonceOff = static_cast<cl_uint>(nonceOffset);
   setKernelMem(ocl.cn0.get(), 0, ocl.inputBuf.get());
   setKernelMem(ocl.cn0.get(), 1, ocl.scratchBuf.get());
   setKernelMem(ocl.cn0.get(), 2, ocl.statesBuf.get());
   clSetKernelArg(ocl.cn0.get(), 3, sizeof(cl_uint), &threads);
   clSetKernelArg(ocl.cn0.get(), 4, sizeof(cl_uint), &nb);
   clSetKernelArg(ocl.cn0.get(), 5, sizeof(cl_uint), &ns);
+  clSetKernelArg(ocl.cn0.get(), 6, sizeof(cl_uint), &blobLenArg);
+  clSetKernelArg(ocl.cn0.get(), 7, sizeof(cl_uint), &nonceOff);
 
   size_t g0[2] = {8, 8};
   size_t l0[2] = {8, 8};
@@ -331,20 +345,28 @@ bool runGpuMineStagedProbe(const GpuMineStagedProbeConfig& cfg, std::ostream& ou
   return false;
 #else
   Block block = makeProbeBlock();
+  Block hashBlock = block;
+  hashBlock.nonce = cfg.nonce;
+
   BinaryArray blob;
+  block.nonce = 0;
   if (!get_block_hashing_blob(block, blob))
   {
     err = "get_block_hashing_blob failed";
     return false;
   }
 
-  uint64_t input[kInputUlongs] = {};
-  memcpy(input, blob.data(), std::min(blob.size(), kInputUlongs * sizeof(uint64_t)));
+  size_t nonceOffset = 0;
+  if (!get_hashing_blob_nonce_offset(block, nonceOffset))
+  {
+    err = "get_hashing_blob_nonce_offset failed";
+    return false;
+  }
 
   out << "GpuVsCpuMiningHash staged probe\n";
   out << "  device: " << cfg.deviceIndex << "\n";
   out << "  nonce:  " << cfg.nonce << "\n";
-  out << "  blob:   " << blob.size() << " bytes\n";
+  out << "  blob:   " << blob.size() << " bytes (nonce offset " << nonceOffset << ")\n";
   hexLine(out, "  blob hex: ", blob.data(), blob.size(), 48);
   out << "\n";
 
@@ -352,17 +374,25 @@ bool runGpuMineStagedProbe(const GpuMineStagedProbeConfig& cfg, std::ostream& ou
   if (!initOcl(cfg.deviceIndex, ocl, err))
     return false;
 
+  BinaryArray nonceBlob = blob;
+  if (nonceOffset + sizeof(uint32_t) <= nonceBlob.size())
+  {
+    const uint32_t n = cfg.nonce;
+    nonceBlob[nonceOffset] = static_cast<uint8_t>(n & 0xFF);
+    nonceBlob[nonceOffset + 1] = static_cast<uint8_t>((n >> 8) & 0xFF);
+    nonceBlob[nonceOffset + 2] = static_cast<uint8_t>((n >> 16) & 0xFF);
+    nonceBlob[nonceOffset + 3] = static_cast<uint8_t>((n >> 24) & 0xFF);
+  }
+
   crypto::cn_context cpuPrep;
   crypto::cn_context cpuOne;
   crypto::cn_context cpuFull;
-  crypto::cn_context cpuLegacy;
 
-  crypto::cn_gpu_prepare_mining(cpuPrep, blob.data(), blob.size(), cfg.nonce);
-  crypto::cn_gpu_prepare_mining(cpuOne, blob.data(), blob.size(), cfg.nonce);
-  crypto::cn_gpu_prepare_mining(cpuFull, blob.data(), blob.size(), cfg.nonce);
-  crypto::cn_gpu_prepare_inner(cpuLegacy, blob.data(), blob.size());
+  crypto::cn_gpu_prepare_inner(cpuPrep, nonceBlob.data(), nonceBlob.size());
+  crypto::cn_gpu_prepare_inner(cpuOne, nonceBlob.data(), nonceBlob.size());
+  crypto::cn_gpu_prepare_inner(cpuFull, nonceBlob.data(), nonceBlob.size());
 
-  if (!gpuRunPrepare(ocl, input, cfg.nonce, err))
+  if (!gpuRunPrepare(ocl, blob.data(), blob.size(), nonceOffset, cfg.nonce, err))
     return false;
 
   bool allOk = true;
@@ -372,17 +402,8 @@ bool runGpuMineStagedProbe(const GpuMineStagedProbeConfig& cfg, std::ostream& ou
                         crypto::cn_gpu_state_ptr(cpuPrep), reinterpret_cast<uint8_t*>(ocl.hostStates.data()),
                         crypto::cn_gpu_scratchpad_ptr(cpuPrep), ocl.hostScratch.data(), 0);
 
-  if (cfg.nonce == 0)
-  {
-    const size_t legacyStateDiff =
-        firstByteDiff(crypto::cn_gpu_state_ptr(cpuLegacy), crypto::cn_gpu_state_ptr(cpuPrep), kStateBytes);
-    out << "=== CPU sanity: prepare_inner vs prepare_mining (nonce 0) ===\n";
-    out << "  state diff byte: " << (legacyStateDiff == kStateBytes ? "none (MATCH)" : std::to_string(legacyStateDiff))
-        << "\n\n";
-  }
-
   crypto::cn_gpu_run_inner_reference_iters(cpuOne, 1);
-  if (!gpuRunPrepare(ocl, input, cfg.nonce, err))
+  if (!gpuRunPrepare(ocl, blob.data(), blob.size(), nonceOffset, cfg.nonce, err))
     return false;
   if (!gpuRunCn1(ocl, ocl.cn1One.get(), err))
     return false;
@@ -392,7 +413,7 @@ bool runGpuMineStagedProbe(const GpuMineStagedProbeConfig& cfg, std::ostream& ou
                         crypto::cn_gpu_scratchpad_ptr(cpuOne), ocl.hostScratch.data(), kInnerHintOff);
 
   crypto::cn_gpu_run_inner_reference(cpuFull);
-  if (!gpuRunPrepare(ocl, input, cfg.nonce, err))
+  if (!gpuRunPrepare(ocl, blob.data(), blob.size(), nonceOffset, cfg.nonce, err))
     return false;
   if (!gpuRunCn1(ocl, ocl.cn1Full.get(), err))
     return false;
@@ -417,16 +438,21 @@ bool runGpuMineStagedProbe(const GpuMineStagedProbeConfig& cfg, std::ostream& ou
   hexLine(out, "  gpu: ", gpuHash.data, 32, 32);
   out << "\n";
 
-  crypto::Hash refHash;
-  crypto::cn_context refCtx;
-  crypto::cn_gpu_prepare_mining(refCtx, blob.data(), blob.size(), cfg.nonce);
-  crypto::cn_gpu_run_inner_reference(refCtx);
-  crypto::cn_gpu_finish_hash(refCtx, refHash);
-  out << "=== reference full mining pipeline (CPU prepare_mining + inner + finish) ===\n";
-  hexLine(out, "  mining ref hash: ", refHash.data, 32, 32);
-  out << "\n";
+  crypto::Hash networkHash;
+  crypto::cn_context networkCtx;
+  if (!get_block_longhash(networkCtx, hashBlock, networkHash))
+  {
+    err = "get_block_longhash failed";
+    return false;
+  }
+
+  out << "=== network longhash (get_block_longhash) ===\n";
+  hexLine(out, "  network: ", networkHash.data, 32, 32);
+  const bool networkOk = memcmp(cpuHash.data, networkHash.data, sizeof(cpuHash.data)) == 0;
+  out << "  mining vs network: " << (networkOk ? "MATCH" : "MISMATCH") << "\n\n";
 
   allOk &= hashOk;
+  allOk &= networkOk;
   if (!allOk)
     err = "one or more stages mismatched (see report above)";
   return allOk;

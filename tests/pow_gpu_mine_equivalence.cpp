@@ -4,8 +4,12 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../src/CryptoNoteCore/CryptoNoteFormatUtils.h"
+#include "../src/crypto/cryptonight.hpp"
 #include "../src/pow/mining/GpuMinerConfig.hpp"
 #include "../src/pow/mining/gpu_mine_intensity.hpp"
+
+#include <boost/utility/value_init.hpp>
 
 using namespace cn;
 
@@ -64,6 +68,53 @@ static int testParseModes()
   return 0;
 }
 
+static int testMiningInnerMatchesLonghash()
+{
+  const uint32_t nonces[] = {0, 1, 42, 65535, 2569132405u};
+  for (uint32_t nonce : nonces)
+  {
+    Block block = boost::value_initialized<Block>();
+    block.majorVersion = 8;
+    block.minorVersion = 0;
+    block.timestamp = 1700000000;
+    block.previousBlockHash.data[0] = 0xab;
+    block.nonce = nonce;
+
+    BinaryArray blob;
+    if (!get_block_hashing_blob(block, blob))
+      return 2;
+
+    crypto::Hash networkHash;
+    crypto::cn_context networkCtx;
+    if (!get_block_longhash(networkCtx, block, networkHash))
+      return 3;
+
+    crypto::Hash miningHash;
+    crypto::cn_context miningCtx;
+    crypto::cn_gpu_hash_v0(miningCtx, blob.data(), blob.size(), miningHash);
+
+    if (std::memcmp(networkHash.data, miningHash.data, sizeof(networkHash.data)) != 0)
+    {
+      std::fprintf(stderr, "cn_gpu_hash_v0 != longhash (nonce %u, blob %zu B)\n", nonce,
+                   blob.size());
+      return 4;
+    }
+
+    crypto::Hash stagedHash;
+    crypto::cn_context stagedCtx;
+    crypto::cn_gpu_prepare_inner(stagedCtx, blob.data(), blob.size());
+    crypto::cn_gpu_run_inner_reference(stagedCtx);
+    crypto::cn_gpu_finish_hash(stagedCtx, stagedHash);
+
+    if (std::memcmp(networkHash.data, stagedHash.data, sizeof(networkHash.data)) != 0)
+    {
+      std::fprintf(stderr, "staged != longhash (nonce %u, blob %zu B)\n", nonce, blob.size());
+      return 5;
+    }
+  }
+  return 0;
+}
+
 static int testExclusivity()
 {
   GpuMinerConfig gpu;
@@ -81,6 +132,7 @@ int main()
   failures += testAlignTotalIntensity();
   failures += testParseValue();
   failures += testParseModes();
+  failures += testMiningInnerMatchesLonghash();
   failures += testExclusivity();
   if (failures)
   {

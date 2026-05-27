@@ -234,8 +234,9 @@ inline void generate_512(uint idx, __local ulong* in, __global ulong* out)
 }
 
 __attribute__((reqd_work_group_size(8, 8, 1)))
-__kernel void cn0_cn_gpu(__global ulong* input, __global int* Scratchpad, __global ulong* states,
-                       uint Threads, uint nonceBase, uint nonceStride)
+__kernel void cn0_cn_gpu(__global uchar* blob, __global int* Scratchpad, __global ulong* states,
+                       uint Threads, uint nonceBase, uint nonceStride, uint blobLen,
+                       uint nonceOffset)
 {
   const uint gIdx = getIdx();
   __local ulong State_buf[8 * 25];
@@ -254,27 +255,18 @@ __kernel void cn0_cn_gpu(__global ulong* input, __global int* Scratchpad, __glob
     if (get_local_id(1) == 0)
     {
       const uint nonce = nonceBase + gIdx * nonceStride;
-#ifdef __NV_CL_C_VERSION
-      for (uint i = 0; i < 8; ++i)
-        State[i] = input[i];
-#else
-      ((__local ulong8*)State)[0] = vload8(0, input);
-#endif
-      State[8] = input[8];
-      State[9] = input[9];
-      State[10] = input[10];
+      uchar localBlob[128];
+      for (uint i = 0; i < blobLen; ++i)
+        localBlob[i] = blob[i];
+      localBlob[nonceOffset] = (uchar)(nonce & 0xFFU);
+      localBlob[nonceOffset + 1] = (uchar)((nonce >> 8) & 0xFFU);
+      localBlob[nonceOffset + 2] = (uchar)((nonce >> 16) & 0xFFU);
+      localBlob[nonceOffset + 3] = (uchar)((nonce >> 24) & 0xFFU);
 
-      ((__local uint*)State)[9] &= 0x00FFFFFFU;
-      ((__local uint*)State)[9] |= ((nonce)&0xFFU) << 24;
-      ((__local uint*)State)[10] &= 0xFF000000U;
-      ((__local uint*)State)[10] |= ((nonce >> 8));
+      for (int i = 0; i < 25; ++i)
+        State[i] = 0;
 
-      for (int i = 11; i < 25; ++i)
-        State[i] = 0x00UL;
-
-      State[16] = 0x8000000000000000UL;
-
-      keccakf1600_2(State);
+      keccak1600_absorb(State, localBlob, blobLen);
 
       for (int i = 0; i < 25; ++i)
         states[i] = State[i];

@@ -137,3 +137,31 @@ inline void keccakf1600_2(__local ulong* st)
     st[0] ^= keccakf_rndc[round];
   }
 }
+
+#define KECCAK1600_RATE 136
+
+inline void keccak1600_absorb(__local ulong* st, const uchar* in, const uint inlen)
+{
+  uchar temp[KECCAK1600_RATE];
+  for (uint i = 0; i < inlen; ++i)
+    temp[i] = in[i];
+  temp[inlen] = 1;
+  for (uint i = inlen + 1; i < KECCAK1600_RATE; ++i)
+    temp[i] = 0;
+  temp[KECCAK1600_RATE - 1] |= 0x80;
+
+  for (uint i = 0; i < KECCAK1600_RATE / 8; ++i)
+  {
+    ulong w = (ulong)temp[i * 8];
+    w |= (ulong)temp[i * 8 + 1] << 8;
+    w |= (ulong)temp[i * 8 + 2] << 16;
+    w |= (ulong)temp[i * 8 + 3] << 24;
+    w |= (ulong)temp[i * 8 + 4] << 32;
+    w |= (ulong)temp[i * 8 + 5] << 40;
+    w |= (ulong)temp[i * 8 + 6] << 48;
+    w |= (ulong)temp[i * 8 + 7] << 56;
+    st[i] ^= w;
+  }
+
+  keccakf1600_2(st);
+}
