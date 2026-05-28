@@ -302,13 +302,13 @@ int CryptoNoteProtocolHandler::handle_notify_new_block(int command, NOTIFY_NEW_B
     return 1;
   }
 
+  size_t txCount = 0; // ADD THIS
+
   for (auto tx_blob_it = arg.b.txs.begin(); tx_blob_it != arg.b.txs.end(); tx_blob_it++)
   {
     cn::tx_verification_context tvc = boost::value_initialized<decltype(tvc)>();
 
     auto transactionBinary = asBinaryArray(*tx_blob_it);
-    //crypto::Hash transactionHash = crypto::cn_fast_hash(transactionBinary.data(), transactionBinary.size());
-    //logger(DEBUGGING) << "transaction " << transactionHash << " came in NOTIFY_NEW_BLOCK";
 
     m_core.handle_incoming_tx(transactionBinary, tvc, true);
     if (tvc.m_verification_failed)
@@ -316,6 +316,12 @@ int CryptoNoteProtocolHandler::handle_notify_new_block(int command, NOTIFY_NEW_B
       logger(logging::INFO) << context << "Block verification failed: transaction verification failed, dropping connection";
       m_p2p->drop_connection(context, true);
       return 1;
+    }
+
+    // ADD THIS - yield every 100 transactions
+    if (++txCount % 100 == 0)
+    {
+      m_dispatcher.yield();
     }
   }
 
@@ -330,10 +336,7 @@ int CryptoNoteProtocolHandler::handle_notify_new_block(int command, NOTIFY_NEW_B
   if (bvc.m_added_to_main_chain)
   {
     ++arg.hop;
-    //TODO: Add here announce protocol usage
-    //relay_post_notify<NOTIFY_NEW_BLOCK>(*m_p2p, arg, &context.m_connection_id);
     relay_block(arg);
-    // relay_block(arg, context);
 
     if (bvc.m_switched_to_alt_chain)
     {
@@ -364,7 +367,7 @@ int CryptoNoteProtocolHandler::handle_notify_new_transactions(int command, NOTIF
     logger(logging::TRACE) << context
                            << " Pending lite block detected, handling request as missing lite block transactions response";
     std::vector<BinaryArray> _txs;
-    for (const auto& tx : arg.txs)
+    for (const auto &tx : arg.txs)
     {
       _txs.push_back(asBinaryArray(tx));
     }
@@ -372,6 +375,8 @@ int CryptoNoteProtocolHandler::handle_notify_new_transactions(int command, NOTIF
   }
   else
   {
+    size_t txCount = 0;
+
     for (auto tx_blob_it = arg.txs.begin(); tx_blob_it != arg.txs.end();)
     {
       auto transactionBinary = asBinaryArray(*tx_blob_it);
@@ -392,11 +397,17 @@ int CryptoNoteProtocolHandler::handle_notify_new_transactions(int command, NOTIF
       {
         tx_blob_it = arg.txs.erase(tx_blob_it);
       }
+
+      // yield every 100 transactions to keep connections alive
+      if (++txCount % 100 == 0)
+      {
+        m_dispatcher.yield();
+      }
     }
 
     if (arg.txs.size())
     {
-      //TODO: add announce usage here
+      // TODO: add announce usage here
       relay_post_notify<NOTIFY_NEW_TRANSACTIONS>(*m_p2p, arg, &context.m_connection_id);
     }
   }
@@ -561,32 +572,38 @@ int CryptoNoteProtocolHandler::handle_response_get_objects(int command, NOTIFY_R
   return 1;
 }
 
-int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext& context, const std::vector<parsed_block_entry>& blocks) {
+int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext &context, const std::vector<parsed_block_entry> &blocks)
+{
 
-  for (const parsed_block_entry& block_entry : blocks) {
-    if (m_stop) {
+  for (const parsed_block_entry &block_entry : blocks)
+  {
+    if (m_stop)
+    {
       break;
     }
 
-    //process transactions
-    for (size_t i = 0; i < block_entry.txs.size(); ++i) {
+    // process transactions
+    for (size_t i = 0; i < block_entry.txs.size(); ++i)
+    {
       auto transactionBinary = block_entry.txs[i];
       crypto::Hash transactionHash = crypto::cn_fast_hash(transactionBinary.data(), transactionBinary.size());
       logger(DEBUGGING) << "transaction " << transactionHash << " came in processObjects";
 
       // check if tx hashes match
-      if (transactionHash != block_entry.block.transactionHashes[i]) {
+      if (transactionHash != block_entry.block.transactionHashes[i])
+      {
         logger(DEBUGGING) << context << "transaction mismatch on NOTIFY_RESPONSE_GET_OBJECTS, \r\ntx_id = "
-          << common::podToHex(transactionHash) << ", dropping connection";
+                          << common::podToHex(transactionHash) << ", dropping connection";
         context.m_state = CryptoNoteConnectionContext::state_shutdown;
         return 1;
       }
 
       tx_verification_context tvc = boost::value_initialized<decltype(tvc)>();
       m_core.handle_incoming_tx(transactionBinary, tvc, true);
-      if (tvc.m_verification_failed) {
+      if (tvc.m_verification_failed)
+      {
         logger(DEBUGGING) << context << "transaction verification failed on NOTIFY_RESPONSE_GET_OBJECTS, \r\ntx_id = "
-          << common::podToHex(transactionHash) << ", dropping connection";
+                          << common::podToHex(transactionHash) << ", dropping connection";
         context.m_state = CryptoNoteConnectionContext::state_shutdown;
         return 1;
       }
@@ -596,15 +613,20 @@ int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext& conte
     block_verification_context bvc = boost::value_initialized<block_verification_context>();
     m_core.handle_incoming_block(block_entry.block, bvc, false, false);
 
-    if (bvc.m_verification_failed) {
+    if (bvc.m_verification_failed)
+    {
       logger(DEBUGGING) << context << "Block verification failed, dropping connection";
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
-    } else if (bvc.m_marked_as_orphaned) {
+    }
+    else if (bvc.m_marked_as_orphaned)
+    {
       logger(logging::INFO) << context << "Block received at sync phase was marked as orphaned, dropping connection";
       context.m_state = CryptoNoteConnectionContext::state_shutdown;
       return 1;
-    } else if (bvc.m_already_exists) {
+    }
+    else if (bvc.m_already_exists)
+    {
       logger(DEBUGGING) << context << "Block already exists, switching to idle state";
       context.m_state = CryptoNoteConnectionContext::state_idle;
       context.m_needed_objects.clear();
@@ -612,11 +634,10 @@ int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext& conte
       return 1;
     }
 
-    m_dispatcher.yield();
+    m_dispatcher.yield(); // let other fibers run (timers, keepalives)
   }
 
   return 0;
-
 }
 
 bool CryptoNoteProtocolHandler::on_idle()
