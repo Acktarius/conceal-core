@@ -1,8 +1,5 @@
 add_definitions(-DMINIUPNP_STATICLIB)
 
-<<<<<<< HEAD
-include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR} ../version ${MDBX_INCLUDE_DIR})
-=======
 include_directories(
   ${gtest_SOURCE_DIR}/include
   ${gtest_SOURCE_DIR}
@@ -10,7 +7,7 @@ include_directories(
   ${CMAKE_SOURCE_DIR}/src
   ${MDBX_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/external/mdbx)
->>>>>>> dd0c4103 (Add optional OpenCL CN-GPU PoW verify offload for sync)
+
 
 file(GLOB_RECURSE CoreTests CoreTests/*)
 file(GLOB_RECURSE CryptoTests crypto/*)

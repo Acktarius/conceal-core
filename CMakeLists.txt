@@ -162,9 +162,6 @@ elseif(NOT MSVC)
   set(Boost_LIBRARIES "${Boost_LIBRARIES};rt")
 endif()
 
-<<<<<<< HEAD
-#option(BUILD_TESTS "Build tests." ON)
-=======
 # option(BUILD_TESTS "Build tests." ON)
 option(WITH_OPENCL "Enable OpenCL CN-GPU PoW verification offload" ON)
 if(WITH_OPENCL)
@@ -174,7 +171,6 @@ if(WITH_OPENCL)
   endif()
 endif()
 
->>>>>>> dd0c4103 (Add optional OpenCL CN-GPU PoW verify offload for sync)
 option(BUILD_MIGRATION_GUI "Build wxWidgets migration GUI (conceald-migrate-gui)" OFF)
 
 if(BUILD_TESTS)

@@ -590,18 +590,6 @@ int CryptoNoteProtocolHandler::handle_response_get_objects(int command, NOTIFY_R
 int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext &context, const std::vector<parsed_block_entry> &blocks)
 {
 
-<<<<<<< HEAD
-  for (const parsed_block_entry &block_entry : blocks)
-  {
-    if (m_stop)
-    {
-      break;
-    }
-
-    // process transactions
-    for (size_t i = 0; i < block_entry.txs.size(); ++i)
-    {
-=======
   // pushBlock PoW uses getCurrentBlockchainHeight() == blocksSize() == top index + 1.
   const uint32_t batchBaseHeight = get_current_blockchain_height() + 1;
   cn::PowService::instance().prefetch().setValidatedTip(get_current_blockchain_height());
@@ -644,7 +632,7 @@ int CryptoNoteProtocolHandler::processObjects(CryptoNoteConnectionContext &conte
 
     //process transactions
     for (size_t i = 0; i < block_entry.txs.size(); ++i) {
->>>>>>> dd0c4103 (Add optional OpenCL CN-GPU PoW verify offload for sync)
+
       auto transactionBinary = block_entry.txs[i];
       crypto::Hash transactionHash = crypto::cn_fast_hash(transactionBinary.data(), transactionBinary.size());
       logger(DEBUGGING) << "transaction " << transactionHash << " came in processObjects";
