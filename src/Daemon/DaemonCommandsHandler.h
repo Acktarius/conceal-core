@@ -65,6 +65,8 @@ private:
   bool save(const std::vector<std::string> &args);
   bool start_mining(const std::vector<std::string> &args);
   bool stop_mining(const std::vector<std::string> &args);
+  bool start_gpu_mining(const std::vector<std::string> &args);
+  bool stop_gpu_mining(const std::vector<std::string> &args);
   bool export_snapshot(const std::vector<std::string> &args);
   bool export_headers(const std::vector<std::string> &args);
 };

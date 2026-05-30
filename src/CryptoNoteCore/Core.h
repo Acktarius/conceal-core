@@ -17,6 +17,7 @@
 #include "Blockchain/Blockchain.h"
 #include "CryptoNoteCore/IMinerHandler.h"
 #include "CryptoNoteCore/MinerConfig.h"
+#include "../pow/mining/GpuMinerConfig.hpp"
 #include "ICore.h"
 #include "ICoreObserver.h"
 #include "Common/ObserverManager.h"
@@ -34,6 +35,7 @@ namespace cn
 
   struct core_stat_info;
   class Miner;
+  class GpuMiner;
   class CoreConfig;
 
   class core : public ICore, public IMinerHandler, public IBlockchainStorageObserver, public ITxPoolObserver
@@ -56,8 +58,10 @@ namespace cn
     bool removeObserver(ICoreObserver *observer) override;
 
     Miner &get_miner() { return *m_miner; }
+    GpuMiner &get_gpu_miner() { return *m_gpuMiner; }
     static void init_options(boost::program_options::options_description &desc);
-    bool init(const CoreConfig &config, const MinerConfig &minerConfig, bool load_existing);
+    bool init(const CoreConfig &config, const MinerConfig &minerConfig,
+              const GpuMinerConfig &gpuMinerConfig, int gpuVerifyOffloadDevice, bool load_existing);
     bool set_genesis_block(const Block &b);
     bool deinit();
 
@@ -151,7 +155,7 @@ namespace cn
     virtual void getPoolChanges(const std::vector<crypto::Hash> &knownTxsIds, std::vector<Transaction> &addedTxs,
                                 std::vector<crypto::Hash> &deletedTxsIds) override;
 
-    uint64_t getNextBlockDifficulty();
+    uint64_t getNextBlockDifficulty() override;
     uint64_t getTotalGeneratedAmount();
     uint64_t fullDepositAmount() const;
     uint64_t depositAmountAtHeight(size_t height) const;
@@ -215,6 +219,7 @@ namespace cn
     Blockchain m_blockchain;
     i_cryptonote_protocol *m_pprotocol;
     std::unique_ptr<Miner> m_miner;
+    std::unique_ptr<GpuMiner> m_gpuMiner;
     std::string m_config_folder;
     cryptonote_protocol_stub m_protocol_stub;
     friend class tx_validate_inputs;

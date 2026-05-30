@@ -9,6 +9,8 @@
 
 #include "NetNode.h"
 
+#include "../pow/pow_service.hpp"
+
 #include <algorithm>
 #include <fstream>
 
@@ -639,6 +641,8 @@ namespace cn
       logger(INFO) << "Auto-scale: decreasing target connections from "
                    << currentTarget << " to " << m_config.m_net_config.connections_count;
     }
+
+    cn::PowService::instance().updatePrefetchForConnections(m_config.m_net_config.connections_count);
   }
 
   //-----------------------------------------------------------------------------------

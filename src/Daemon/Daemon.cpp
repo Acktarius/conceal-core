@@ -36,6 +36,15 @@
 
 #include "Blockchain/Blockchain.h"
 #include "CryptoNoteCore/TransactionExtra.h"
+#include "pow/GpuPowConfig.h"
+#include "pow/mining/GpuMinerConfig.hpp"
+#include "pow/backend.hpp"
+#include "pow/pow_service.hpp"
+#include "pow/pow_sync_log.hpp"
+
+#ifdef CONCEAL_WITH_OPENCL
+#include "pow/opencl/raii.hpp"
+#endif
 
 #if defined(WIN32)
 #include <crtdbg.h>
@@ -364,6 +373,7 @@ int main(int argc, char *argv[])
 
   LoggerManager logManager;
   LoggerRef logger(logManager, "daemon");
+  LoggerRef powLogger(logManager, "pow");
 
   try
   {
@@ -392,22 +402,28 @@ int main(int argc, char *argv[])
     RpcServerConfig::initOptions(desc_cmd_sett);
     NetNodeConfig::initOptions(desc_cmd_sett);
     MinerConfig::initOptions(desc_cmd_sett);
+    GpuMinerConfig::initOptions(desc_cmd_sett);
+    GpuPowConfig::initOptions(desc_cmd_sett);
+    po::options_description desc_gpu_offload("GPU PoW offload tuning");
+    GpuPowConfig::initOffloadOptions(desc_gpu_offload);
 
     po::options_description desc_options("Allowed options");
-    desc_options.add(desc_cmd_only).add(desc_cmd_sett);
+    desc_options.add(desc_cmd_only).add(desc_cmd_sett).add(desc_gpu_offload);
 
     po::variables_map vm;
     CoreConfig coreConfig;
+    GpuPowConfig gpuPowConfig;
 
     bool r = command_line::handle_error_helper(desc_options, [&]()
                                                {
       po::store(po::parse_command_line(argc, argv, desc_options), vm);
       coreConfig.init(vm);
+      gpuPowConfig.init(vm);
 
       if (command_line::get_arg(vm, command_line::arg_help))
       {
         std::cout << CCX_RELEASE_VERSION << std::endl << std::endl;
-        std::cout << desc_options;
+        std::cout << desc_cmd_only << std::endl << desc_cmd_sett;
         return false;
       }
       else if (command_line::get_arg(vm, command_line::arg_version))
@@ -425,6 +441,20 @@ int main(int argc, char *argv[])
         print_genesis_tx_hex();
         return false;
       }
+      if (gpuPowConfig.listDevices)
+      {
+#ifdef CONCEAL_WITH_OPENCL
+        std::cout << cn::ocl::getDeviceListText();
+#else
+        std::cout << "OpenCL not enabled at build time (rebuild with -DWITH_OPENCL=ON and OpenCL installed).\n";
+#endif
+        return false;
+      }
+      if (gpuPowConfig.showOffloadHelp)
+      {
+        std::cout << desc_gpu_offload;
+        return false;
+      }
 
       std::string data_dir = command_line::get_arg(vm, command_line::arg_data_dir);
       std::string config = command_line::get_arg(vm, arg_config_file);
@@ -436,10 +466,15 @@ int main(int argc, char *argv[])
 
       boost::system::error_code ec;
       if (boost::filesystem::exists(config_path, ec))
+      {
+        po::options_description desc_config(desc_cmd_sett);
+        desc_config.add(desc_gpu_offload);
         po::store(po::parse_config_file<char>(config_path.string<std::string>().c_str(),
-                                               desc_cmd_sett), vm);
+                                               desc_config), vm);
+      }
 
       po::notify(vm);
+      gpuPowConfig.init(vm);
       return true; });
 
     if (!r)
@@ -500,6 +535,30 @@ int main(int argc, char *argv[])
 
     cn::Currency currency = currencyBuilder.currency();
 
+    {
+      auto powBackend = cn::createPowVerifyBackend(gpuPowConfig.deviceIndex, gpuPowConfig.batchSize,
+                                                   gpuPowConfig.minBatchSize, gpuPowConfig.maxWaitUs,
+                                                   gpuPowConfig.debugCrossCheck, gpuPowConfig.debugInnerTrace);
+      cn::PowService::instance().init(std::move(powBackend), gpuPowConfig, &powLogger);
+      if (gpuPowConfig.deviceIndex >= 0) {
+        logger(INFO) << "CN-GPU speculative policy: batch=" << gpuPowConfig.batchSize
+                     << " min_batch="
+                     << (gpuPowConfig.minBatchSizeUserSet ? std::to_string(gpuPowConfig.minBatchSize)
+                                                          : std::string("auto"))
+                     << " max_wait_us="
+                     << (gpuPowConfig.maxWaitUsUserSet ? std::to_string(gpuPowConfig.maxWaitUs)
+                                                       : std::string("auto"))
+                     << " prefetch depth="
+                     << (gpuPowConfig.prefetchDepthUserSet ? std::to_string(gpuPowConfig.prefetchQueueDepth)
+                                                           : std::string("auto"))
+                     << " window="
+                     << (gpuPowConfig.prefetchWindowUserSet ? std::to_string(gpuPowConfig.prefetchWindow)
+                                                            : std::string("auto"))
+                     << " backlog threshold=" << gpuPowConfig.backlogThreshold
+                     << " trust_gpu_cache=" << (gpuPowConfig.trustGpuCache ? "yes" : "no");
+      }
+    }
+
     cn::core ccore(currency, nullptr, logManager,
                    vm["enable-blockchain-indexes"].as<bool>());
 
@@ -516,6 +575,11 @@ int main(int argc, char *argv[])
 
     MinerConfig minerConfig;
     minerConfig.init(vm);
+
+    GpuMinerConfig gpuMinerConfig;
+    gpuMinerConfig.init(vm);
+    applyMiningModeExclusivity(minerConfig.startMining, gpuMinerConfig,
+                               [&](const std::string& msg) { logger(WARNING, BRIGHT_YELLOW) << msg; });
 
     RpcServerConfig rpcConfig;
     rpcConfig.init(vm);
@@ -551,14 +615,27 @@ int main(int argc, char *argv[])
     }
     logger(INFO) << "P2p server initialized OK";
 
+    if (gpuPowConfig.deviceIndex >= 0)
+      cn::PowService::instance().updatePrefetchForConnections(p2psrv.getTargetOutgoingConnectionsCount());
+
     // Initialize core
     logger(INFO) << "Initializing core...";
-    if (!ccore.init(coreConfig, minerConfig, true))
+    if (!ccore.init(coreConfig, minerConfig, gpuMinerConfig, gpuPowConfig.deviceIndex, true))
     {
       logger(ERROR, BRIGHT_RED) << "Failed to initialize core";
       return 1;
     }
     logger(INFO) << "Core initialized OK";
+
+    if (gpuMinerConfig.enabled())
+    {
+      logger(INFO) << "GPU mining configured for address " << gpuMinerConfig.rewardAddress;
+      for (const auto& dev : gpuMinerConfig.devices)
+      {
+        logger(INFO) << "  GPU " << dev.deviceIndex << ": intensity " << dev.userIntensity << " -> 3x"
+                     << dev.perThreadIntensity << " (worksize " << GpuMinerConfig::kWorkSize << ")";
+      }
+    }
 
     // Start console handler
     if (!command_line::has_arg(vm, arg_console))
@@ -612,6 +689,8 @@ int main(int argc, char *argv[])
     dch.stop_handling();
     logger(INFO) << "Stopping core rpc server...";
     rpcServer.stop();
+    logger(INFO) << "Stopping PoW GPU worker...";
+    cn::PowService::instance().shutdown();
     logger(INFO) << "Deinitializing core...";
     ccore.deinit();
     logger(INFO) << "Deinitializing p2p...";

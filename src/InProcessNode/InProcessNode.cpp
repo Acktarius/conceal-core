@@ -1055,4 +1055,19 @@ void InProcessNode::isSynchronizedAsync(bool& syncStatus, const Callback& callba
   callback(std::error_code());
 }
 
+std::vector<crypto::Hash> InProcessNode::getPoolTransactions()
+{
+  std::vector<crypto::Hash> result;
+  const auto pool = core.getPoolTransactions();
+  result.reserve(pool.size());
+  for (const Transaction& tx : pool)
+    result.push_back(getObjectHash(tx));
+  return result;
+}
+
+bool InProcessNode::getTransactionSync(const crypto::Hash& txHash, cn::Transaction& tx)
+{
+  return !doGetTransaction(txHash, tx);
+}
+
 } //namespace cn
