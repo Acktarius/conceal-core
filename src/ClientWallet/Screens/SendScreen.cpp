@@ -109,7 +109,7 @@ namespace ClientWallet
         else
         {
           auto balance = m_wallet->getBalance();
-          if (m_amount > balance.actual)
+          if (m_amount > BoltCore::spendableAmount(balance))
           {
             m_error = "Insufficient balance";
           }
@@ -193,7 +193,7 @@ namespace ClientWallet
     }
 
     auto balance = m_wallet->getBalance();
-    drawHeader(buf, title(), balance.currentHeight, balance.actual, "");
+    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmount(balance), "");
 
     int termW = Tui::terminalWidth();
     int boxW = std::min(70, termW - 4);
@@ -222,7 +222,7 @@ namespace ClientWallet
       buf.write(Tui::drawBox(boxTop, 2, 10, boxW, "Confirm Transaction"));
       buf.writeAt(boxTop + 1, 4, Tui::dim() + "To:     " + Tui::reset() + m_address.substr(0, 55));
       buf.writeAt(boxTop + 2, 4, Tui::dim() + "Amount: " + Tui::reset() + Tui::brightGreen() + m_amountStr + " CCX" + Tui::reset());
-      buf.writeAt(boxTop + 4, 4, Tui::dim() + "Available: " + Tui::reset() + formatAmount(balance.actual) + " CCX");
+      buf.writeAt(boxTop + 4, 4, Tui::dim() + "Available: " + Tui::reset() + formatAmount(BoltCore::spendableAmount(balance)) + " CCX");
       buf.writeAt(boxTop + 6, 4, Tui::brightYellow() + "Send this transaction? [Y/N]" + Tui::reset());
       break;
     }

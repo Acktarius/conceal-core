@@ -41,6 +41,7 @@ namespace BoltCore
     uint64_t fee;
     std::string error;
     cn::Transaction transaction;
+    std::vector<OutputInfo> spentInputs;
   };
 
   struct Balance
@@ -50,8 +51,14 @@ namespace BoltCore
     uint64_t lockedDeposit;
     uint64_t unlockedDeposit;
     uint64_t accruedInterest; // Interest earned on deposits not yet withdrawn
+    uint64_t dust;            // Un-mixable outputs below the dust threshold
     uint32_t currentHeight;   // Current blockchain height for this balance
   };
+
+  inline uint64_t spendableAmount(const Balance &balance)
+  {
+    return balance.actual > balance.dust ? balance.actual - balance.dust : 0;
+  }
 
   struct DepositInfo
   {

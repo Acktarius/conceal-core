@@ -79,6 +79,7 @@ namespace BoltCore
     }
 
     // The caller handles signing and relaying
+    result.spentInputs = selection.outputs;
     result.txHash = common::podToHex(tx->getTransactionHash());
     result.fee = fee;
     result.success = true;

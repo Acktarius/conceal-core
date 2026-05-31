@@ -112,7 +112,7 @@ namespace ClientWallet
   void HistoryScreen::render(Tui::ScreenBuffer &buf)
   {
     auto balance = m_wallet->getBalance();
-    drawHeader(buf, title(), balance.currentHeight, balance.actual,
+    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmount(balance),
                std::to_string(m_transactions.size()) + " total | " +
                    "R:received S:sent D:deposits");
 

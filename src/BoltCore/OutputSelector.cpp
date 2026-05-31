@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license
 
 #include "OutputSelector.h"
+#include "OutputUtils.h"
 #include "CryptoNoteCore/Currency.h"
 #include <algorithm>
 #include <cmath>
@@ -24,11 +25,11 @@ namespace BoltCore
     if (available.empty())
       return result;
 
-    // Filter unspent only
+    // Filter to spendable key outputs only (deposits excluded, same as WalletGreen)
     std::vector<const OutputInfo *> unspent;
     for (const auto &out : available)
     {
-      if (!out.spent)
+      if (isSpendableKeyOutput(out, 0))
         unspent.push_back(&out);
     }
 

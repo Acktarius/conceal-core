@@ -50,7 +50,11 @@ namespace ClientWallet
     // Helper: draw menu bar at bottom
     void drawMenuBar(Tui::ScreenBuffer &buf,
                      const std::vector<std::string> &items,
-                     const std::vector<std::string> &keys);
+                     const std::vector<std::string> &keys,
+                     int left = 0);
+
+    // Helper: tail of /tmp/conceal-wallet-sync.log
+    void drawLastSyncLog(Tui::ScreenBuffer &buf, int boxTop, size_t lineCount = 6);
 
     // Helper: show a centered message box
     void showMessage(Tui::ScreenBuffer &buf,

@@ -35,6 +35,69 @@ namespace ClientWallet
   void EventLoop::setNode(cn::INode *node) { m_node = node; }
   void EventLoop::setStatePath(const std::string &path) { m_statePath = path; }
 
+  void EventLoop::enqueueSyncUpdate(SyncWalletUpdate update)
+  {
+    std::lock_guard<std::mutex> lock(m_syncUpdateMutex);
+    m_pendingSyncUpdates.push_back(std::move(update));
+  }
+
+  void EventLoop::applyPendingSyncUpdates()
+  {
+    std::deque<SyncWalletUpdate> pending;
+    {
+      std::lock_guard<std::mutex> lock(m_syncUpdateMutex);
+      pending.swap(m_pendingSyncUpdates);
+    }
+
+    if (!m_wallet)
+      return;
+
+    for (auto &update : pending)
+    {
+      for (const auto &out : update.outputs)
+      {
+        bool exists = false;
+        for (const auto &existing : m_wallet->getOutputs())
+        {
+          if (existing.txHash == out.txHash && existing.outputIndex == out.outputIndex)
+          {
+            exists = true;
+            break;
+          }
+        }
+        if (exists)
+          continue;
+
+        m_wallet->addOutput(out);
+
+        BoltCore::TransactionRecord tx;
+        tx.txHash = out.txHash;
+        tx.blockHeight = out.blockHeight;
+        tx.timestamp = 0;
+        tx.totalReceived = out.amount;
+        tx.totalSent = 0;
+        tx.type = out.isDeposit ? BoltCore::TransactionType::Deposit : BoltCore::TransactionType::Incoming;
+        tx.confirmed = true;
+        tx.outputs.push_back(out);
+        m_wallet->addTransaction(tx);
+      }
+
+      for (const auto &ki : update.spentKeyImages)
+        m_wallet->markOutputSpent(ki);
+      for (const auto &dep : update.depositSpends)
+        m_wallet->markDepositOutputSpent(dep.first, dep.second);
+
+      if (update.updateHeight && update.scannedHeight > 0)
+        m_wallet->setCurrentHeight(update.scannedHeight);
+
+      if (!update.spentKeyImages.empty() || !update.depositSpends.empty())
+        m_wallet->confirmPendingOutgoing(update.scannedHeight);
+    }
+
+    if (!pending.empty())
+      m_needsRedraw = true;
+  }
+
   void EventLoop::run()
   {
     if (!m_wallet || !m_sync)
@@ -55,31 +118,33 @@ namespace ClientWallet
     m_sync->start(
         [this](const std::vector<BoltCore::OutputInfo> &outputs)
         {
-          for (const auto &out : outputs)
-          {
-            m_wallet->addOutput(out);
-
-            // Create incoming transaction record
-            BoltCore::TransactionRecord tx;
-            tx.txHash = out.txHash;
-            tx.blockHeight = out.blockHeight;
-            tx.timestamp = 0; // Could look up block timestamp
-            tx.totalReceived = out.amount;
-            tx.totalSent = 0;
-            tx.type = out.isDeposit ? BoltCore::TransactionType::Deposit : BoltCore::TransactionType::Incoming;
-            tx.confirmed = true;
-            tx.outputs.push_back(out);
-            m_wallet->addTransaction(tx);
-          }
-          m_wallet->setCurrentHeight(m_sync->lastScannedHeight());
-          m_needsRedraw = true;
+          SyncWalletUpdate update;
+          update.outputs = outputs;
+          update.scannedHeight = m_sync->lastScannedHeight();
+          update.updateHeight = true;
+          enqueueSyncUpdate(std::move(update));
         },
         [this](const SyncStatus &status)
         {
           m_lastKnownHeight = status.currentHeight;
           if (status.scannedHeight > 0)
-            m_wallet->setCurrentHeight(status.scannedHeight);
-          m_needsRedraw = true;
+          {
+            SyncWalletUpdate update;
+            update.scannedHeight = status.scannedHeight;
+            update.updateHeight = true;
+            enqueueSyncUpdate(std::move(update));
+          }
+        },
+        [this](const std::vector<crypto::KeyImage> &keyImages,
+               const std::vector<std::pair<crypto::Hash, uint32_t>> &depositSpends)
+        {
+          if (keyImages.empty() && depositSpends.empty())
+            return;
+          SyncWalletUpdate update;
+          update.spentKeyImages = keyImages;
+          update.depositSpends = depositSpends;
+          update.scannedHeight = m_sync->lastScannedHeight();
+          enqueueSyncUpdate(std::move(update));
         });
 
     // Main event loop
@@ -103,6 +168,8 @@ namespace ClientWallet
         m_lastMempoolCheck = now;
       }
 
+      applyPendingSyncUpdates();
+
       auto sinceRender = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastRender).count();
       if (m_needsRedraw && sinceRender >= RENDER_INTERVAL_MS)
       {
@@ -113,10 +180,11 @@ namespace ClientWallet
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    // Save state on exit
-    if (!m_statePath.empty() && m_sync)
+    // Save state on exit (use wallet outputs — source of truth for the UI balance)
+    if (!m_statePath.empty() && m_sync && m_wallet)
     {
-      m_sync->saveStateFile(m_statePath);
+      if (!m_sync->saveStateFile(m_statePath, m_wallet->getOutputs()))
+        std::cerr << "Warning: failed to save wallet state to " << m_statePath << std::endl;
     }
 
     Tui::disableRawMode();
@@ -127,11 +195,8 @@ namespace ClientWallet
   {
     m_running = false;
     if (m_sync)
-    {
-      // Detach the sync thread so we don't block on it.
-      // The sync engine destructor will handle cleanup.
       m_sync->stop();
-    }
+    applyPendingSyncUpdates();
   }
 
   void EventLoop::pushScreen(std::shared_ptr<Screen> screen)

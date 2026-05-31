@@ -44,6 +44,7 @@ add_executable(HashTargetTests HashTarget.cpp)
 add_executable(HashTests Hash/main.cpp)
 add_executable(PowGpuEquivalenceTests pow_gpu_equivalence.cpp)
 add_executable(PowGpuMineEquivalenceTests pow_gpu_mine_equivalence.cpp)
+add_executable(BoltCoreBalanceTrackerTests BoltCoreBalanceTracker.cpp)
 
 if(WITH_OPENCL AND OpenCL_FOUND)
   add_executable(GpuVsCpuMiningHashTests gpu_vs_cpu_mining_hash.cpp)
@@ -87,6 +88,7 @@ target_link_libraries(HashTargetTests CryptoNoteCore crypto)
 target_link_libraries(HashTests crypto)
 target_link_libraries(PowGpuEquivalenceTests crypto pow CryptoNoteCore)
 target_link_libraries(PowGpuMineEquivalenceTests pow CryptoNoteCore ${Boost_LIBRARIES})
+target_link_libraries(BoltCoreBalanceTrackerTests BoltCore CryptoNoteCore Logging Common crypto gtest ${Boost_LIBRARIES})
 
 if(WITH_OPENCL AND OpenCL_FOUND)
   target_link_libraries(GpuVsCpuMiningHashTests
@@ -95,7 +97,7 @@ if(WITH_OPENCL AND OpenCL_FOUND)
     -Wl,--end-group)
 endif()
 
-add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests PowGpuEquivalenceTests PowGpuMineEquivalenceTests)
+add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests PowGpuEquivalenceTests PowGpuMineEquivalenceTests BoltCoreBalanceTrackerTests)
 
 if(WITH_OPENCL AND OpenCL_FOUND)
   add_dependencies(tests GpuVsCpuMiningHashTests)
@@ -117,6 +119,7 @@ set_property(TARGET
   DifficultyTests
   HashTargetTests
   HashTests
+  BoltCoreBalanceTrackerTests
 
 PROPERTY FOLDER "tests")
 
@@ -128,6 +131,8 @@ set_property(TARGET PerformanceTests PROPERTY OUTPUT_NAME "performance_tests")
 set_property(TARGET SystemTests PROPERTY OUTPUT_NAME "system_tests")
 set_property(TARGET TransfersTests PROPERTY OUTPUT_NAME "transfers_tests")
 set_property(TARGET UnitTests PROPERTY OUTPUT_NAME "unit_tests")
+
+set_property(TARGET BoltCoreBalanceTrackerTests PROPERTY OUTPUT_NAME "boltcore_balance_tracker_tests")
 
 set_property(TARGET DifficultyTests PROPERTY OUTPUT_NAME "difficulty_tests")
 set_property(TARGET HashTargetTests PROPERTY OUTPUT_NAME "hash_target_tests")
@@ -155,6 +160,7 @@ add_test(SystemTests system_tests)
 add_test(TransfersTests transfers_tests)
 add_test(UnitTests unit_tests --gtest_filter=-WalletApi.*:WalletApi_makeTransaction.*:WalletApi_commitTransaction.*:WalletApi_rollbackUncommitedTransaction.*:tx_pool.TxPoolDoesNotAcceptInvalidFusionTransaction:TxPool_FillBlockTemplate.TxPoolAddsFusionTransactionsToBlockTemplateNoMoreThanLimit:TxPool_FillBlockTemplate.TxPoolContinuesToAddOrdinaryTransactionsUpTo125PerCentOfMedianAfterAddingFusionTransactions:WalletLegacyApi.sendSeveralTransactions)
 
+add_test(BoltCoreBalanceTrackerTests boltcore_balance_tracker_tests)
 add_test(DifficultyTests difficulty_tests ${CMAKE_CURRENT_SOURCE_DIR}/Difficulty/data.txt)
 add_test(HashTargetTests hash_target_tests)
 foreach(hash IN ITEMS fast slow tree)

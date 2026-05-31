@@ -118,7 +118,7 @@ namespace ClientWallet
         m_amount = static_cast<uint64_t>(amt * 1000000.0);
         if (m_amount < m_currency.depositMinAmount())
           m_error = "Min: " + m_currency.formatAmount(m_currency.depositMinAmount()) + " CCX";
-        else if (m_amount > m_wallet->getBalance().actual)
+        else if (m_amount > BoltCore::spendableAmount(m_wallet->getBalance()))
           m_error = "Insufficient balance";
         else
         {
@@ -248,7 +248,7 @@ namespace ClientWallet
     }
 
     auto balance = m_wallet->getBalance();
-    drawHeader(buf, title(), balance.currentHeight, balance.actual, "");
+    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmount(balance), "");
 
     int termW = Tui::terminalWidth();
     int boxW = std::min(70, termW - 4);

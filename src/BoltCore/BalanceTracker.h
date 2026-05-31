@@ -5,6 +5,7 @@
 #pragma once
 
 #include "BoltCoreTypes.h"
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,15 +29,16 @@ namespace BoltCore
     Balance getBalance(const std::string &address) const;
 
     void addOutput(const OutputInfo &output);
-    void markSpent(const crypto::KeyImage &keyImage);
+    bool markSpent(const crypto::KeyImage &keyImage);
+    bool markDepositSpent(const crypto::Hash &txHash, uint32_t outputIndex);
 
-    void setCurrentHeight(uint32_t height) { m_currentHeight = height; }
-    uint32_t getCurrentHeight() const { return m_currentHeight; }
+    void setCurrentHeight(uint32_t height);
+    uint32_t getCurrentHeight() const;
 
     uint64_t totalActual() const;
     uint64_t totalPending() const;
 
-    const std::vector<OutputInfo> &getOutputs() const { return m_outputs; }
+    std::vector<OutputInfo> getOutputs() const;
 
     void addPendingOutgoing(const crypto::Hash &txHash, uint64_t amount, uint64_t fee);
     void confirmTransaction(const crypto::Hash &txHash, uint32_t blockHeight);
@@ -56,6 +58,11 @@ namespace BoltCore
       uint64_t unlockedDeposit = 0;
     };
 
+    bool outputExists(const crypto::Hash &txHash, uint32_t outputIndex) const;
+    void subtractFromBalance(const OutputInfo &out);
+    void refreshDepositBuckets();
+
+    mutable std::recursive_mutex m_dataMutex;
     mutable std::mutex m_pendingMutex;
     std::unordered_map<crypto::Hash, PendingTx> m_pendingOutgoing;
     uint64_t m_pendingOutgoingAmount = 0;

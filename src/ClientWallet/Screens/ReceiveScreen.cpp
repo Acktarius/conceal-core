@@ -55,7 +55,7 @@ namespace ClientWallet
   void ReceiveScreen::render(Tui::ScreenBuffer &buf)
   {
     auto balance = m_wallet->getBalance();
-    drawHeader(buf, title(), balance.currentHeight, balance.actual, "");
+    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmount(balance), "");
 
     int termW = Tui::terminalWidth();
     int boxW = std::min(74, termW - 4);

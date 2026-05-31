@@ -5,23 +5,25 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "crypto/crypto.h"
+#include "BoltCore/BoltCoreTypes.h"
+
 namespace cn
 {
   class INode;
+  class Currency;
 }
 namespace BoltCore
 {
   class Wallet;
-}
-namespace cn
-{
-  class Currency;
 }
 
 namespace ClientWallet
@@ -29,6 +31,15 @@ namespace ClientWallet
 
   class SyncEngine;
   class Screen;
+
+  struct SyncWalletUpdate
+  {
+    std::vector<BoltCore::OutputInfo> outputs;
+    std::vector<crypto::KeyImage> spentKeyImages;
+    std::vector<std::pair<crypto::Hash, uint32_t>> depositSpends;
+    uint32_t scannedHeight = 0;
+    bool updateHeight = false;
+  };
 
   enum class EventType
   {
@@ -82,6 +93,8 @@ namespace ClientWallet
     void renderCurrentScreen();
     void updateStatusBar();
     void timerTick();
+    void enqueueSyncUpdate(SyncWalletUpdate update);
+    void applyPendingSyncUpdates();
 
     std::string m_statePath;
 
@@ -93,6 +106,9 @@ namespace ClientWallet
 
     std::vector<std::shared_ptr<Screen>> m_screens;
     std::atomic<bool> m_running{false};
+
+    std::mutex m_syncUpdateMutex;
+    std::deque<SyncWalletUpdate> m_pendingSyncUpdates;
 
     std::chrono::steady_clock::time_point m_lastRender;
     std::chrono::steady_clock::time_point m_lastHeightCheck;

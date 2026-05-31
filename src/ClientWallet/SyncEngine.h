@@ -60,11 +60,15 @@ namespace ClientWallet
   public:
     using OutputCallback = std::function<void(const std::vector<BoltCore::OutputInfo> &newOutputs)>;
     using StatusCallback = std::function<void(const SyncStatus &status)>;
+    using SpentCallback = std::function<void(
+        const std::vector<crypto::KeyImage> &keyImages,
+        const std::vector<std::pair<crypto::Hash, uint32_t>> &depositSpends)>;
 
     SyncEngine(const std::string &dataDir,
                const crypto::SecretKey &viewKey,
                const crypto::PublicKey &spendPub,
-               const crypto::SecretKey *spendKey);
+               const crypto::SecretKey *spendKey,
+               bool enableChainSync = true);
     ~SyncEngine();
 
     // ── Lifecycle ──────────────────────────────────────────────────────
@@ -72,7 +76,7 @@ namespace ClientWallet
     void setNode(cn::INode *node);
     void setDaemonRpc(std::function<std::string(const std::string &method, const std::string &params)> rpc);
 
-    void start(OutputCallback onOutputs, StatusCallback onStatus);
+    void start(OutputCallback onOutputs, StatusCallback onStatus, SpentCallback onSpent = {});
     void stop();
 
     // ── Manual triggers ────────────────────────────────────────────────
@@ -84,7 +88,8 @@ namespace ClientWallet
     // ── State file ─────────────────────────────────────────────────────
 
     bool loadStateFile(const std::string &path);
-    bool saveStateFile(const std::string &path);
+    bool saveStateFile(const std::string &path,
+                       const std::vector<BoltCore::OutputInfo> &outputs);
     std::vector<BoltCore::OutputInfo> getCachedOutputs() const;
 
     // ── Getters ────────────────────────────────────────────────────────
@@ -119,6 +124,7 @@ namespace ClientWallet
     cn::INode *m_node = nullptr;
     std::function<std::string(const std::string &, const std::string &)> m_daemonRpc;
 
+    bool m_enableChainSync = true;
     SyncStrategy m_strategy = SyncStrategy::None;
     std::atomic<uint32_t> m_scannedHeight{0};
     std::atomic<bool> m_active{false};
@@ -126,10 +132,12 @@ namespace ClientWallet
 
     OutputCallback m_onOutputs;
     StatusCallback m_onStatus;
+    SpentCallback m_onSpent;
     std::thread m_thread;
 
     std::vector<crypto::PublicKey> m_knownPubKeys;
     std::mutex m_pubkeyMutex;
+    std::mutex m_threadMutex;
 
     // Cached outputs for state file save/load
     std::vector<BoltCore::OutputInfo> m_cachedOutputs;

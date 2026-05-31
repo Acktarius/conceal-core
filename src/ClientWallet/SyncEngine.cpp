@@ -21,24 +21,106 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <mdbx.h>
 
+static std::mutex g_syncLogWriteMutex;
+
 static void syncLog(const std::string &msg)
 {
+  std::lock_guard<std::mutex> lock(g_syncLogWriteMutex);
   std::ofstream log("/tmp/conceal-wallet-sync.log", std::ios::app);
+  if (!log)
+    return;
   log << msg << std::endl;
 }
 
 namespace ClientWallet
 {
 
+  namespace
+  {
+    constexpr const char *kWalletStateFile = "wallet_state.bin";
+
+    struct OutputRef
+    {
+      crypto::Hash txHash;
+      uint32_t outputIndex;
+
+      bool operator==(const OutputRef &other) const
+      {
+        return txHash == other.txHash && outputIndex == other.outputIndex;
+      }
+    };
+
+    struct OutputRefHash
+    {
+      size_t operator()(const OutputRef &ref) const
+      {
+        size_t hash = 0;
+        for (size_t i = 0; i < sizeof(crypto::Hash); ++i)
+          hash ^= static_cast<size_t>(ref.txHash.data[i]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= static_cast<size_t>(ref.outputIndex) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        return hash;
+      }
+    };
+
+    struct MsigOutputRef
+    {
+      crypto::Hash txHash;
+      uint32_t outputIndex;
+      uint32_t term;
+    };
+
+    bool endsWithFileName(const std::string &path, const std::string &leaf)
+    {
+      if (path.size() < leaf.size())
+        return false;
+      if (path.compare(path.size() - leaf.size(), leaf.size(), leaf) != 0)
+        return false;
+      return path.size() == leaf.size() ||
+             path[path.size() - leaf.size() - 1] == '/' ||
+             path[path.size() - leaf.size() - 1] == '\\';
+    }
+
+    std::string parentDirectory(const std::string &filePath)
+    {
+      const size_t pos = filePath.find_last_of("/\\");
+      if (pos == std::string::npos)
+        return ".";
+      if (pos == 0)
+        return "/";
+      return filePath.substr(0, pos);
+    }
+
+    // path from EventLoop: full snapshot file, bare name, or <data-dir>/wallet_state.bin
+    std::string resolveStateFilePath(const std::string &path, const std::string &dataDir)
+    {
+      if (path.empty())
+        return PathHelpers::appendPath(dataDir, kWalletStateFile);
+
+      if (path == kWalletStateFile)
+        return PathHelpers::appendPath(dataDir, kWalletStateFile);
+
+      if (endsWithFileName(path, kWalletStateFile))
+        return path;
+
+      if (path.find('/') == std::string::npos && path.find('\\') == std::string::npos)
+        return PathHelpers::appendPath(dataDir, path);
+
+      return PathHelpers::appendPath(path, kWalletStateFile);
+    }
+  }
+
   SyncEngine::SyncEngine(const std::string &dataDir,
                          const crypto::SecretKey &viewKey,
                          const crypto::PublicKey &spendPub,
-                         const crypto::SecretKey *spendKey)
-      : m_dataDir(dataDir), m_viewKey(viewKey), m_spendPub(spendPub), m_spendKey(spendKey)
+                         const crypto::SecretKey *spendKey,
+                         bool enableChainSync)
+      : m_dataDir(dataDir), m_viewKey(viewKey), m_spendPub(spendPub), m_spendKey(spendKey),
+        m_enableChainSync(enableChainSync)
   {
   }
 
@@ -52,31 +134,37 @@ namespace ClientWallet
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
-  void SyncEngine::start(OutputCallback onOutputs, StatusCallback onStatus)
+  void SyncEngine::start(OutputCallback onOutputs, StatusCallback onStatus, SpentCallback onSpent)
   {
     syncLog("SyncEngine::start() called, dataDir=" + m_dataDir);
     m_onOutputs = std::move(onOutputs);
     m_onStatus = std::move(onStatus);
-    m_strategy = detectBestStrategy();
-    syncLog("Strategy selected: " + std::to_string((int)m_strategy));
+    m_onSpent = std::move(onSpent);
+    if (!m_enableChainSync)
+    {
+      m_strategy = SyncStrategy::Offline;
+      syncLog("Strategy selected: 3 (Offline, chain sync disabled)");
+    }
+    else
+    {
+      m_strategy = detectBestStrategy();
+      syncLog("Strategy selected: " + std::to_string((int)m_strategy));
+    }
 
     SyncStatus status;
     status.strategy = m_strategy;
     if (m_onStatus)
       m_onStatus(status);
-    incrementalSync();
+    if (m_strategy != SyncStrategy::Offline)
+      incrementalSync();
   }
 
   void SyncEngine::stop()
   {
     m_stop = true;
-    // Don't join — let the thread finish on its own.
-    // The destructor will join if still joinable.
+    std::lock_guard<std::mutex> lock(m_threadMutex);
     if (m_thread.joinable())
-    {
-      // Give it a brief moment, then detach
-      m_thread.detach();
-    }
+      m_thread.join();
     m_active = false;
   }
 
@@ -114,11 +202,15 @@ namespace ClientWallet
 
   void SyncEngine::incrementalSync()
   {
+    std::lock_guard<std::mutex> lock(m_threadMutex);
     if (m_active)
     {
       syncLog("incrementalSync: already active");
       return;
     }
+    if (m_thread.joinable())
+      m_thread.join();
+
     syncLog("incrementalSync: starting background thread, strategy=" + std::to_string((int)m_strategy));
     m_active = true;
     m_stop = false;
@@ -459,6 +551,12 @@ namespace ClientWallet
             std::lock_guard<std::mutex> lock(m_outputCacheMutex);
             m_cachedOutputs.insert(m_cachedOutputs.end(), converted.begin(), converted.end());
           }
+
+          if (!spentKeyImages.empty() && m_onSpent)
+          {
+            std::vector<std::pair<crypto::Hash, uint32_t>> depositSpends;
+            m_onSpent(spentKeyImages, depositSpends);
+          }
         });
 
     while (!m_stop)
@@ -475,110 +573,164 @@ namespace ClientWallet
   void SyncEngine::markSpentOutputs(uint32_t topHeight)
   {
     syncLog("markSpentOutputs: starting spent check");
-    std::lock_guard<std::mutex> lock(m_outputCacheMutex);
-    if (m_cachedOutputs.empty() || !m_spendKey)
-      return;
+    std::vector<crypto::KeyImage> newKeyImages;
+    std::vector<std::pair<crypto::Hash, uint32_t>> newDepositSpends;
 
-    std::unordered_map<crypto::KeyImage, size_t> keyImageIndex;
-    for (size_t i = 0; i < m_cachedOutputs.size(); ++i)
     {
-      const auto &fo = m_cachedOutputs[i];
-      if (!fo.isDeposit)
+      std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+      if (m_cachedOutputs.empty())
+        return;
+
+      std::unordered_map<crypto::KeyImage, size_t> keyImageIndex;
+      std::unordered_map<OutputRef, size_t, OutputRefHash> depositIndex;
+      for (size_t i = 0; i < m_cachedOutputs.size(); ++i)
       {
+        const auto &fo = m_cachedOutputs[i];
+        if (fo.isDeposit && !fo.spent)
+          depositIndex[{fo.txHash, fo.outputIndex}] = i;
+        if (fo.isDeposit || fo.spent)
+          continue;
         static const crypto::KeyImage NULL_KI = {};
         if (std::memcmp(&fo.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) != 0)
           keyImageIndex[fo.keyImage] = i;
       }
-    }
-    if (keyImageIndex.empty())
-      return;
 
-    std::string dbPath = PathHelpers::appendPath(m_dataDir, "mdbx_blocks");
-    MDBX_env *env = nullptr;
-    if (mdbx_env_create(&env) != MDBX_SUCCESS)
-      return;
-    mdbx_env_set_maxdbs(env, 8);
-    mdbx_env_set_geometry(env, -1, -1, (intptr_t)1 << 37, 256 << 20, -1, -1);
-    if (mdbx_env_open(env, dbPath.c_str(), MDBX_NOSUBDIR | MDBX_NORDAHEAD, 0664) != MDBX_SUCCESS)
-    {
-      mdbx_env_close(env);
-      return;
-    }
+      std::unordered_map<uint64_t, std::vector<MsigOutputRef>> multisigIndex;
 
-    MDBX_dbi dbi;
-    {
-      MDBX_txn *t = nullptr;
-      int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &t);
-      if (rc == MDBX_SUCCESS)
-      {
-        rc = mdbx_dbi_open(t, "block_entries", MDBX_DB_DEFAULTS, &dbi);
-        mdbx_txn_abort(t);
-      }
-      if (rc != MDBX_SUCCESS)
+      std::string dbPath = PathHelpers::appendPath(m_dataDir, "mdbx_blocks");
+      MDBX_env *env = nullptr;
+      if (mdbx_env_create(&env) != MDBX_SUCCESS)
+        return;
+      mdbx_env_set_maxdbs(env, 8);
+      mdbx_env_set_geometry(env, -1, -1, (intptr_t)1 << 37, 256 << 20, -1, -1);
+      if (mdbx_env_open(env, dbPath.c_str(), MDBX_NOSUBDIR | MDBX_NORDAHEAD, 0664) != MDBX_SUCCESS)
       {
         mdbx_env_close(env);
         return;
       }
-    }
 
-    uint32_t spentCount = 0;
-    for (uint32_t h = 0; h <= topHeight; ++h)
-    {
-      if (m_stop)
-        break;
-
-      MDBX_txn *rt = nullptr;
-      if (mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &rt) != MDBX_SUCCESS)
-        continue;
-
-      std::ostringstream keyStr;
-      keyStr << "be_" << std::setw(8) << std::setfill('0') << h;
-      std::string key = keyStr.str();
-      MDBX_val k = {const_cast<char *>(key.data()), key.size()};
-      MDBX_val v;
-
-      if (mdbx_get(rt, dbi, &k, &v) == MDBX_SUCCESS)
+      MDBX_dbi dbi;
       {
-        cn::BinaryArray ba(static_cast<const uint8_t *>(v.iov_base),
-                           static_cast<const uint8_t *>(v.iov_base) + v.iov_len);
-        cn::Block block;
-        std::vector<cn::Transaction> transactions;
-        if (BoltSync::deserializeBlockEntry(ba, block, transactions))
+        MDBX_txn *t = nullptr;
+        int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &t);
+        if (rc == MDBX_SUCCESS)
         {
-          auto checkInputs = [&](const cn::Transaction &tx)
-          {
-            for (const auto &input : tx.inputs)
-            {
-              if (input.type() == typeid(cn::KeyInput))
-              {
-                const auto &ki = boost::get<cn::KeyInput>(input).keyImage;
-                auto it = keyImageIndex.find(ki);
-                if (it != keyImageIndex.end())
-                {
-                  m_cachedOutputs[it->second].spent = true;
-                  spentCount++;
-                }
-              }
-            }
-          };
-          checkInputs(block.baseTransaction);
-          for (const auto &tx : transactions)
-            checkInputs(tx);
+          rc = mdbx_dbi_open(t, "block_entries", MDBX_DB_DEFAULTS, &dbi);
+          mdbx_txn_abort(t);
+        }
+        if (rc != MDBX_SUCCESS)
+        {
+          mdbx_env_close(env);
+          return;
         }
       }
-      mdbx_txn_abort(rt);
+
+      auto markDepositSpentAt = [&](size_t index)
+      {
+        auto &out = m_cachedOutputs[index];
+        if (out.spent)
+          return;
+        out.spent = true;
+        newDepositSpends.emplace_back(out.txHash, out.outputIndex);
+      };
+
+      uint32_t spentCount = 0;
+      for (uint32_t h = 0; h <= topHeight; ++h)
+      {
+        if (m_stop)
+          break;
+
+        MDBX_txn *rt = nullptr;
+        if (mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &rt) != MDBX_SUCCESS)
+          continue;
+
+        std::ostringstream keyStr;
+        keyStr << "be_" << std::setw(8) << std::setfill('0') << h;
+        std::string key = keyStr.str();
+        MDBX_val k = {const_cast<char *>(key.data()), key.size()};
+        MDBX_val v;
+
+        if (mdbx_get(rt, dbi, &k, &v) == MDBX_SUCCESS)
+        {
+          cn::BinaryArray ba(static_cast<const uint8_t *>(v.iov_base),
+                             static_cast<const uint8_t *>(v.iov_base) + v.iov_len);
+          cn::Block block;
+          std::vector<cn::Transaction> transactions;
+          if (BoltSync::deserializeBlockEntry(ba, block, transactions))
+          {
+            auto processTransaction = [&](const cn::Transaction &tx)
+            {
+              const crypto::Hash txHash = cn::getObjectHash(tx);
+
+              for (const auto &input : tx.inputs)
+              {
+                if (input.type() == typeid(cn::KeyInput))
+                {
+                  const auto &ki = boost::get<cn::KeyInput>(input).keyImage;
+                  auto it = keyImageIndex.find(ki);
+                  if (it != keyImageIndex.end() && !m_cachedOutputs[it->second].spent)
+                  {
+                    m_cachedOutputs[it->second].spent = true;
+                    newKeyImages.push_back(ki);
+                    spentCount++;
+                  }
+                }
+                else if (input.type() == typeid(cn::MultisignatureInput))
+                {
+                  const auto &ms = boost::get<cn::MultisignatureInput>(input);
+                  auto amountIt = multisigIndex.find(ms.amount);
+                  if (amountIt == multisigIndex.end() || ms.outputIndex >= amountIt->second.size())
+                    continue;
+
+                  const auto &ref = amountIt->second[ms.outputIndex];
+                  if (ms.term != 0 && ref.term != ms.term)
+                    continue;
+
+                  auto depIt = depositIndex.find({ref.txHash, ref.outputIndex});
+                  if (depIt != depositIndex.end() && !m_cachedOutputs[depIt->second].spent)
+                  {
+                    markDepositSpentAt(depIt->second);
+                    depositIndex.erase(depIt);
+                    spentCount++;
+                  }
+                }
+              }
+
+              for (size_t o = 0; o < tx.outputs.size(); ++o)
+              {
+                const auto &out = tx.outputs[o];
+                if (out.target.type() == typeid(cn::MultisignatureOutput))
+                {
+                  const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
+                  multisigIndex[out.amount].push_back(
+                      {txHash, static_cast<uint32_t>(o), msigOut.term});
+                }
+              }
+            };
+
+            processTransaction(block.baseTransaction);
+            for (const auto &tx : transactions)
+              processTransaction(tx);
+          }
+        }
+        mdbx_txn_abort(rt);
+      }
+
+      syncLog("markSpentOutputs: marked " + std::to_string(spentCount) + " outputs as spent");
+      mdbx_env_close(env);
     }
 
-    syncLog("markSpentOutputs: marked " + std::to_string(spentCount) + " outputs as spent");
-    mdbx_env_close(env);
+    if (m_onSpent && (!newKeyImages.empty() || !newDepositSpends.empty()))
+      m_onSpent(newKeyImages, newDepositSpends);
   }
 
   // ── State file ─────────────────────────────────────────────────────────
 
   bool SyncEngine::loadStateFile(const std::string &path)
   {
-    syncLog("loadStateFile: " + path);
-    BoltRPC::StateManager mgr(path);
+    const std::string filePath = resolveStateFilePath(path, m_dataDir);
+    syncLog("loadStateFile: " + filePath);
+    BoltRPC::StateManager mgr(parentDirectory(filePath));
     BoltRPC::WalletState state;
     if (!mgr.load(state))
       return false;
@@ -604,43 +756,46 @@ namespace ClientWallet
       std::lock_guard<std::mutex> lock(m_outputCacheMutex);
       m_cachedOutputs = converted;
     }
-    if (m_onOutputs && !converted.empty())
-      m_onOutputs(converted);
-    m_strategy = SyncStrategy::Offline;
     syncLog("loadStateFile: loaded " + std::to_string(converted.size()) + " outputs at height " + std::to_string(state.lastHeight));
     return true;
   }
 
-  bool SyncEngine::saveStateFile(const std::string &path)
+  bool SyncEngine::saveStateFile(const std::string &path,
+                                 const std::vector<BoltCore::OutputInfo> &outputs)
   {
-    syncLog("saveStateFile: " + path);
-    BoltRPC::StateManager mgr(path);
+    const std::string filePath = resolveStateFilePath(path, m_dataDir);
+    syncLog("saveStateFile: " + filePath);
+    BoltRPC::StateManager mgr(parentDirectory(filePath));
     BoltRPC::WalletState state;
     state.lastHeight = m_scannedHeight;
+    state.ownedOutputs.reserve(outputs.size());
+    for (const auto &coreOut : outputs)
+    {
+      BoltRPC::OutputInfo rpcOut;
+      rpcOut.blockHeight = coreOut.blockHeight;
+      rpcOut.txHash = coreOut.txHash;
+      rpcOut.amount = coreOut.amount;
+      rpcOut.outputIndex = coreOut.outputIndex;
+      rpcOut.outputKey = coreOut.outputKey;
+      rpcOut.txPublicKey = coreOut.txPublicKey;
+      rpcOut.spent = coreOut.spent;
+      rpcOut.isDeposit = coreOut.isDeposit;
+      rpcOut.term = coreOut.term;
+      state.ownedOutputs.push_back(rpcOut);
+      if (coreOut.spent)
+        state.spentKeyImages.push_back(coreOut.keyImage);
+      else
+        state.balance += coreOut.amount;
+    }
     {
       std::lock_guard<std::mutex> lock(m_outputCacheMutex);
-      state.ownedOutputs.reserve(m_cachedOutputs.size());
-      for (const auto &coreOut : m_cachedOutputs)
-      {
-        BoltRPC::OutputInfo rpcOut;
-        rpcOut.blockHeight = coreOut.blockHeight;
-        rpcOut.txHash = coreOut.txHash;
-        rpcOut.amount = coreOut.amount;
-        rpcOut.outputIndex = coreOut.outputIndex;
-        rpcOut.outputKey = coreOut.outputKey;
-        rpcOut.txPublicKey = coreOut.txPublicKey;
-        rpcOut.spent = coreOut.spent;
-        rpcOut.isDeposit = coreOut.isDeposit;
-        rpcOut.term = coreOut.term;
-        state.ownedOutputs.push_back(rpcOut);
-        if (coreOut.spent)
-          state.spentKeyImages.push_back(coreOut.keyImage);
-        if (!coreOut.spent)
-          state.balance += coreOut.amount;
-      }
+      m_cachedOutputs = outputs;
     }
     syncLog("saveStateFile: saving " + std::to_string(state.ownedOutputs.size()) + " outputs");
-    return mgr.save(state);
+    const bool ok = mgr.save(state);
+    if (!ok)
+      syncLog("saveStateFile: failed to write state file");
+    return ok;
   }
 
   std::vector<BoltCore::OutputInfo> SyncEngine::getCachedOutputs() const

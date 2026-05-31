@@ -34,6 +34,11 @@ namespace BoltCore
     void loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight = 0);
     void addOutput(const OutputInfo &output);
 
+    void markOutputSpent(const crypto::KeyImage &keyImage);
+    void markDepositOutputSpent(const crypto::Hash &txHash, uint32_t outputIndex);
+    void markOutputsSpent(const std::vector<OutputInfo> &outputs);
+    void confirmPendingOutgoing(uint32_t blockHeight);
+
     void setCurrentHeight(uint32_t height);
     uint32_t getCurrentHeight() const;
 
@@ -52,7 +57,7 @@ namespace BoltCore
     uint64_t calculateDepositInterest(const OutputInfo &deposit) const;
 
     // Fusion
-    FusionEstimate estimateFusion(uint64_t threshold) const;
+    FusionEstimate estimateFusion(uint64_t threshold, uint64_t mixin) const;
     TransferResult createFusion(uint64_t threshold, uint64_t mixin);
 
     // Sub-addresses
@@ -81,6 +86,8 @@ namespace BoltCore
     uint32_t getTransactionCount() const;
 
   private:
+    void refreshDeposits();
+
     struct Impl;
     std::unique_ptr<Impl> m_impl;
   };

@@ -9,10 +9,49 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
 #endif
 
 namespace Tui
 {
+
+#if !defined(_WIN32)
+  namespace
+  {
+    int queryTerminalDimension(bool height)
+    {
+#if defined(TIOCGWINSZ)
+      struct winsize ws {};
+      if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0)
+      {
+        const int dim = height ? ws.ws_row : ws.ws_col;
+        if (dim >= 1)
+          return dim;
+      }
+#endif
+      const char *env = height ? std::getenv("LINES") : std::getenv("COLUMNS");
+      return parseTerminalDimension(env, height ? 24 : 80);
+    }
+  }
+#endif
+
+  int terminalWidth()
+  {
+#if defined(_WIN32)
+    return parseTerminalDimension(std::getenv("COLUMNS"), 80);
+#else
+    return queryTerminalDimension(false);
+#endif
+  }
+
+  int terminalHeight()
+  {
+#if defined(_WIN32)
+    return parseTerminalDimension(std::getenv("LINES"), 24);
+#else
+    return queryTerminalDimension(true);
+#endif
+  }
 
 #if defined(_WIN32)
 

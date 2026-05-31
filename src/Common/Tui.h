@@ -9,6 +9,7 @@
 #include <iostream>
 #include <vector>
 #include <functional>
+#include <cstdlib>
 
 namespace Tui
 {
@@ -72,21 +73,24 @@ namespace Tui
 
   // ── Terminal size ───────────────────────────────────────────────────────
 
-  inline int terminalWidth()
+  inline int parseTerminalDimension(const char *value, int fallback)
   {
-    const char *cols = std::getenv("COLUMNS");
-    if (cols)
-      return std::stoi(cols);
-    return 80;
+    if (!value || !*value)
+      return fallback;
+    try
+    {
+      const int dim = std::stoi(value);
+      if (dim >= 1)
+        return dim;
+    }
+    catch (...)
+    {
+    }
+    return fallback;
   }
 
-  inline int terminalHeight()
-  {
-    const char *rows = std::getenv("LINES");
-    if (rows)
-      return std::stoi(rows);
-    return 24;
-  }
+  int terminalWidth();
+  int terminalHeight();
 
   // ── Box drawing characters ──────────────────────────────────────────────
 
@@ -262,9 +266,11 @@ namespace Tui
     {
       result += " " + title + " ";
     }
-    int remaining = width - 2 - static_cast<int>(title.empty() ? 0 : title.size() + 2);
+    int remaining = width - 3;
+    if (!title.empty())
+      remaining -= static_cast<int>(title.size() + 2);
     if (remaining > 0)
-      result += std::string(remaining, h[0]);
+      result += std::string(static_cast<size_t>(remaining), h[0]);
     result += tr;
 
     // Sides
@@ -276,7 +282,10 @@ namespace Tui
 
     // Bottom border
     result += cursorTo(top + height - 1, left);
-    result += bl + std::string(width - 2, h[0]) + br;
+    if (width > 2)
+      result += bl + std::string(static_cast<size_t>(width - 2), h[0]) + br;
+    else
+      result += bl + br;
 
     return result;
   }

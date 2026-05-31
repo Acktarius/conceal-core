@@ -20,6 +20,35 @@
 
 namespace BoltCore
 {
+  namespace
+  {
+    constexpr size_t kBucketCount = 20;
+    constexpr size_t kDustFusionBucket = kBucketCount - 1;
+
+    bool isDustFusionInput(uint64_t amount, uint64_t dustThreshold)
+    {
+      return amount > 0 && amount < dustThreshold;
+    }
+
+    bool isFusionInputCandidate(const cn::Currency &currency,
+                                uint64_t amount,
+                                uint64_t threshold,
+                                uint64_t mixin,
+                                uint8_t &powerOfTen,
+                                uint32_t height)
+    {
+      const uint64_t dustThreshold = currency.defaultDustThreshold();
+      if (mixin == 0 && isDustFusionInput(amount, dustThreshold))
+      {
+        powerOfTen = static_cast<uint8_t>(kDustFusionBucket);
+        return true;
+      }
+
+      return currency.isAmountApplicableInFusionTransactionInput(
+          amount, threshold, powerOfTen, height);
+    }
+  }
+
   FusionManager::FusionManager(const cn::Currency &currency,
                                OutputSelector &outputSelector,
                                TransactionBuilder &txBuilder,
@@ -28,11 +57,11 @@ namespace BoltCore
       : m_currency(currency), m_outputSelector(outputSelector),
         m_txBuilder(txBuilder), m_sigBuilder(sigBuilder), m_relay(relay) {}
 
-  FusionEstimate FusionManager::estimate(uint64_t threshold,
+  FusionEstimate FusionManager::estimate(uint64_t threshold, uint64_t mixin,
                                          const std::vector<OutputInfo> &availableOutputs) const
   {
     FusionEstimate result = {0, 0};
-    std::array<size_t, 20> bucketSizes{};
+    std::array<size_t, kBucketCount> bucketSizes{};
 
     for (const auto &out : availableOutputs)
     {
@@ -40,7 +69,7 @@ namespace BoltCore
         continue;
 
       uint8_t powerOfTen = 0;
-      if (m_currency.isAmountApplicableInFusionTransactionInput(out.amount, threshold, powerOfTen, 0))
+      if (isFusionInputCandidate(m_currency, out.amount, threshold, mixin, powerOfTen, 0))
       {
         if (powerOfTen < bucketSizes.size())
           bucketSizes[powerOfTen]++;
@@ -64,15 +93,15 @@ namespace BoltCore
     TransferResult result;
     result.success = false;
 
-    // Find fusion-ready outputs grouped by digit count
-    std::array<std::vector<OutputInfo>, 20> buckets;
+    // Find fusion-ready outputs grouped by digit count (dust uses a dedicated bucket at mixin == 0)
+    std::array<std::vector<OutputInfo>, kBucketCount> buckets;
     for (const auto &out : availableOutputs)
     {
-      if (out.spent || out.isDeposit || out.amount <= m_currency.defaultDustThreshold())
+      if (out.spent || out.isDeposit)
         continue;
 
       uint8_t powerOfTen = 0;
-      if (m_currency.isAmountApplicableInFusionTransactionInput(out.amount, threshold, powerOfTen, 0))
+      if (isFusionInputCandidate(m_currency, out.amount, threshold, mixin, powerOfTen, 0))
       {
         if (powerOfTen < buckets.size())
           buckets[powerOfTen].push_back(out);

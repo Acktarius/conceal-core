@@ -28,8 +28,9 @@ namespace BoltCore
                   SignatureBuilder &sigBuilder,
                   RelayHandler &relay);
 
-    // Estimate how many outputs are ready for fusion
-    FusionEstimate estimate(uint64_t threshold,
+    // Estimate how many outputs are ready for fusion.
+    // When mixin == 0 (anonymity 1), dust outputs are included as candidates.
+    FusionEstimate estimate(uint64_t threshold, uint64_t mixin,
                             const std::vector<OutputInfo> &availableOutputs) const;
 
     // Create a fusion transaction to consolidate outputs

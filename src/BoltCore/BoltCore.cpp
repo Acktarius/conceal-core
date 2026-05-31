@@ -11,6 +11,7 @@
 #include "DepositManager.h"
 #include "FusionManager.h"
 #include "SubAddressManager.h"
+#include "OutputUtils.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/TransactionApi.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
@@ -21,6 +22,28 @@
 
 namespace BoltCore
 {
+  namespace
+  {
+    uint64_t computeDustBalance(const std::vector<OutputInfo> &outputs,
+                                uint32_t currentHeight,
+                                uint32_t unlockWindow,
+                                uint64_t dustThreshold,
+                                const std::string *address = nullptr)
+    {
+      uint64_t dust = 0;
+      for (const auto &out : outputs)
+      {
+        if (address && out.subAddress != *address)
+          continue;
+        if (!isSpendableKeyOutput(out, currentHeight, unlockWindow))
+          continue;
+        if (out.amount < dustThreshold)
+          dust += out.amount;
+      }
+      return dust;
+    }
+  }
+
   struct Wallet::Impl
   {
     crypto::SecretKey viewKey;
@@ -63,6 +86,28 @@ namespace BoltCore
     }
   };
 
+  void Wallet::refreshDeposits()
+  {
+    m_impl->deposits.clear();
+    uint64_t id = 0;
+    const uint32_t height = m_impl->balanceTracker.getCurrentHeight();
+    for (const auto &out : m_impl->balanceTracker.getOutputs())
+    {
+      if (!out.isDeposit || out.spent)
+        continue;
+
+      DepositInfo info;
+      info.id = id++;
+      info.amount = out.amount;
+      info.term = out.term;
+      info.unlockHeight = out.blockHeight + out.term;
+      info.locked = !isDepositUnlocked(out, height);
+      info.interest = m_impl->currency.calculateInterest(out.amount, out.term, out.blockHeight);
+      info.creatingTxHash = common::podToHex(out.txHash);
+      m_impl->deposits.push_back(std::move(info));
+    }
+  }
+
   Wallet::Wallet(const crypto::SecretKey &viewKey,
                  const crypto::SecretKey &spendKey,
                  const crypto::PublicKey &viewPub,
@@ -76,16 +121,51 @@ namespace BoltCore
   void Wallet::loadOutputs(const std::vector<OutputInfo> &outputs, uint32_t currentHeight)
   {
     m_impl->balanceTracker.loadOutputs(outputs, currentHeight);
+    refreshDeposits();
   }
 
   void Wallet::addOutput(const OutputInfo &output)
   {
     m_impl->balanceTracker.addOutput(output);
+    refreshDeposits();
+  }
+
+  void Wallet::markOutputSpent(const crypto::KeyImage &keyImage)
+  {
+    m_impl->balanceTracker.markSpent(keyImage);
+    refreshDeposits();
+  }
+
+  void Wallet::markDepositOutputSpent(const crypto::Hash &txHash, uint32_t outputIndex)
+  {
+    m_impl->balanceTracker.markDepositSpent(txHash, outputIndex);
+    refreshDeposits();
+  }
+
+  void Wallet::markOutputsSpent(const std::vector<OutputInfo> &outputs)
+  {
+    for (const auto &out : outputs)
+    {
+      if (out.isDeposit)
+        markDepositOutputSpent(out.txHash, out.outputIndex);
+      else
+        markOutputSpent(out.keyImage);
+    }
+  }
+
+  void Wallet::confirmPendingOutgoing(uint32_t blockHeight)
+  {
+    auto pending = m_impl->balanceTracker.getPendingTransactions();
+    for (const auto &tx : pending)
+    {
+      m_impl->balanceTracker.confirmTransaction(tx.txHash, blockHeight);
+    }
   }
 
   void Wallet::setCurrentHeight(uint32_t height)
   {
     m_impl->balanceTracker.setCurrentHeight(height);
+    refreshDeposits();
   }
 
   uint32_t Wallet::getCurrentHeight() const
@@ -102,12 +182,24 @@ namespace BoltCore
 
   Balance Wallet::getBalance() const
   {
-    return m_impl->balanceTracker.getTotalBalance();
+    Balance balance = m_impl->balanceTracker.getTotalBalance();
+    const uint32_t height = getCurrentHeight();
+    const uint32_t unlockWindow = m_impl->currency.minedMoneyUnlockWindow();
+    balance.dust = computeDustBalance(
+        m_impl->balanceTracker.getOutputs(), height, unlockWindow,
+        m_impl->currency.defaultDustThreshold());
+    return balance;
   }
 
   Balance Wallet::getBalance(const std::string &address) const
   {
-    return m_impl->balanceTracker.getBalance(address);
+    Balance balance = m_impl->balanceTracker.getBalance(address);
+    const uint32_t height = getCurrentHeight();
+    const uint32_t unlockWindow = m_impl->currency.minedMoneyUnlockWindow();
+    balance.dust = computeDustBalance(
+        m_impl->balanceTracker.getOutputs(), height, unlockWindow,
+        m_impl->currency.defaultDustThreshold(), &address);
+    return balance;
   }
 
   TransferResult Wallet::transfer(const std::string &address, uint64_t amount, uint64_t mixin)
@@ -182,7 +274,10 @@ namespace BoltCore
         record.address = transfers[0].address;
       m_impl->balanceTracker.addTransaction(record);
 
-      // Track pending outgoing
+      // Deduct selected inputs immediately (WalletGreen optimistic spend)
+      markOutputsSpent(buildResult.selectedOutputs);
+
+      // Track pending outgoing metadata
       m_impl->balanceTracker.addPendingOutgoing(record.txHash, totalAmount, buildResult.fee);
     }
 
@@ -217,6 +312,8 @@ namespace BoltCore
 
     if (result.success)
     {
+      markOutputsSpent(depositResult.spentInputs);
+
       // Record deposit transaction
       TransactionRecord record;
       if (common::podFromHex(result.txHash, record.txHash))
@@ -277,9 +374,9 @@ namespace BoltCore
     return m_impl->deposits;
   }
 
-  FusionEstimate Wallet::estimateFusion(uint64_t threshold) const
+  FusionEstimate Wallet::estimateFusion(uint64_t threshold, uint64_t mixin) const
   {
-    return m_impl->fusionManager.estimate(threshold, getUnspentOutputs());
+    return m_impl->fusionManager.estimate(threshold, mixin, getUnspentOutputs());
   }
 
   TransferResult Wallet::createFusion(uint64_t threshold, uint64_t mixin)
@@ -341,10 +438,12 @@ namespace BoltCore
 
   std::vector<OutputInfo> Wallet::getUnspentOutputs() const
   {
+    const uint32_t height = getCurrentHeight();
+    const uint32_t unlockWindow = m_impl->currency.minedMoneyUnlockWindow();
     std::vector<OutputInfo> unspent;
     for (const auto &out : getOutputs())
     {
-      if (!out.spent)
+      if (isSpendableKeyOutput(out, height, unlockWindow))
         unspent.push_back(out);
     }
     return unspent;

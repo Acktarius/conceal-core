@@ -279,7 +279,7 @@ int main(int argc, char *argv[])
     }
     else if (walletPtr && input == "4")
     {
-      auto est = walletPtr->estimateFusion(1000000);
+      auto est = walletPtr->estimateFusion(1000000, cn::parameters::MINIMUM_MIXIN);
       std::cout << "Fusion ready: " << est.fusionReadyCount << " outputs (total: " << est.totalOutputCount << ")" << std::endl;
       if (est.fusionReadyCount > 0)
       {
