@@ -130,7 +130,8 @@ int main(int argc, char *argv[])
       info.blockHeight = fo.blockHeight;
       info.txHash = fo.txHash;
       info.outputIndex = fo.outputIndex;
-      info.globalOutputIndex = fo.outputIndex;
+      info.globalOutputIndex = fo.globalOutputIndex;
+      info.hasGlobalOutputIndex = fo.hasGlobalOutputIndex;
       info.amount = fo.amount;
       info.outputKey = fo.outputKey;
       info.txPublicKey = fo.txPublicKey;

@@ -5,6 +5,8 @@
 #pragma once
 
 #include "Common/Tui.h"
+#include "BoltCore/BoltCoreTypes.h"
+#include <functional>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -24,6 +26,9 @@ namespace ClientWallet
   };
 
   using ActionCallback = std::function<void(ScreenAction)>;
+  using WalletTaskSubmitFn = std::function<void(
+      std::function<BoltCore::TransferResult()>,
+      std::function<void(BoltCore::TransferResult)>)>;
 
   class Screen
   {
@@ -38,6 +43,7 @@ namespace ClientWallet
     virtual std::string title() const = 0;
 
     void setActionCallback(ActionCallback cb) { m_onAction = std::move(cb); }
+    void setWalletTaskSubmit(WalletTaskSubmitFn fn) { m_submitWalletTask = std::move(fn); }
 
   protected:
     // Helper: draw header with title and status info
@@ -62,6 +68,7 @@ namespace ClientWallet
                      const std::string &message);
 
     ActionCallback m_onAction;
+    WalletTaskSubmitFn m_submitWalletTask;
 
   };
 

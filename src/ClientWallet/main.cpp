@@ -17,6 +17,7 @@
 #include "Common/Tui.h"
 #include "Common/Util.h"
 #include "Common/StringTools.h"
+#include "Common/PathHelpers.h"
 
 #include "crypto/crypto.h"
 
@@ -67,7 +68,6 @@ struct Config
   std::string daemonHost = "127.0.0.1";
   uint16_t daemonPort = 16000;
   std::string stateFile;
-  std::string walletStatePath;
   uint32_t startHeight = 0;
 };
 
@@ -82,10 +82,32 @@ enum class StartupChoice
 namespace
 {
 
+constexpr const char *kWalletStateFileName = "wallet_state.bin";
+
+std::string expandHomePath(std::string path)
+{
+  if (!path.empty() && path[0] == '~')
+  {
+    if (const char *home = std::getenv("HOME"))
+      path = std::string(home) + path.substr(1);
+  }
+  return path;
+}
+
+std::string defaultWalletStatePath(const std::string &dataDir)
+{
+  return PathHelpers::appendPath(dataDir, kWalletStateFileName);
+}
+
+bool pathIsReadableFile(const std::string &path)
+{
+  std::ifstream file(path, std::ios::binary);
+  return file.good();
+}
+
 void printWalletUsage(const char *program)
 {
   const char *name = program ? program : "conceal-wallet";
-  const std::string defaultDir = tools::getDefaultDataDirectory();
   std::cout
       << name << " — Conceal mainchain wallet (terminal UI)\n\n"
       << "Usage:\n"
@@ -95,25 +117,20 @@ void printWalletUsage(const char *program)
       << "  --view-key HEX       Private view key (64 hex characters)\n"
       << "  --spend-key HEX      Private spend key (64 hex characters)\n\n"
       << "Blockchain / sync:\n"
-      << "  --data-dir PATH      Conceald data directory; scans PATH/mdbx_blocks locally\n"
-      << "  --daemon HOST:PORT   Use daemon JSON-RPC instead (default 127.0.0.1:"
+      << "  --data-dir PATH      Path to conceald data directory (contains mdbx_blocks)\n"
+      << "  --daemon HOST:PORT   Daemon JSON-RPC (default 127.0.0.1:"
       << cn::RPC_DEFAULT_PORT << ")\n"
-      << "  --start-height N     Start local scan at block height N (default 0)\n"
-      << "  --state FILE         Path to wallet_state.bin snapshot FILE (not a directory)\n"
-      << "                       Without --data-dir: no chain scan.\n"
-      << "                       With --data-dir: load state then scan only new blocks since save.\n\n"
+      << "  --start-height N     First-time MDBX scan from block N (ignored if state loads)\n"
+      << "  --state FILE         Wallet state file (default: DATA_DIR/wallet_state.bin)\n\n"
       << "Other:\n"
       << "  -h, --help           Show this help\n\n"
-      << "Files:\n"
-      << "  Default --data-dir:  " << defaultDir << "\n"
-      << "  Chain database:      <data-dir> as path to mdbx_blocks file\n"
-      << "  State snapshot file: <data-dir>/wallet_state.bin on exit (default)\n"
-      << "                       or the --state FILE path if you passed --state\n"
       << "  Sync log:            /tmp/conceal-wallet-sync.log\n\n"
       << "Example first-time import:\n"
       << "  " << name << " <view_hex> <spend_hex> --data-dir ~/.conceal-mdbx --start-height 2000000\n"
-      << "Example resume from saved state:\n"
-      << "  " << name << " --data-dir ~/.conceal-mdbx --state ~/.conceal-mdbx-test/wallet_state.bin\n";
+      << "  (creates ~/.conceal-mdbx/wallet_state.bin on exit)\n"
+      << "Example resume:\n"
+      << "  " << name << " <view_hex> <spend_hex> --data-dir ~/.conceal-mdbx\n"
+      << "  (loads DATA_DIR/wallet_state.bin if present)\n";
 }
 
 bool isHexKey(const std::string &s)
@@ -192,7 +209,7 @@ bool parseWalletArgs(int argc, char *argv[], Config &cfg, bool &hasKeys)
   }
 
   if (hasDataDir)
-    cfg.mode = ConnectionMode::Local;
+    cfg.mode = ConnectionMode::Local; // MDBX scan + daemon RPC (see main after wallet create)
   else if (hasState)
     cfg.mode = ConnectionMode::Offline;
 
@@ -493,14 +510,11 @@ int main(int argc, char *argv[])
     cfg.daemonPort = conn.daemonPort;
   }
 
-  if (!cfg.dataPath.empty() && cfg.dataPath[0] == '~')
-  {
-    const char *home = std::getenv("HOME");
-    if (home)
-      cfg.dataPath = std::string(home) + cfg.dataPath.substr(1);
-  }
+  cfg.dataPath = expandHomePath(cfg.dataPath);
+  cfg.stateFile = expandHomePath(cfg.stateFile);
 
-  cfg.walletStatePath = cfg.dataPath + "/wallet_state.bin";
+  if (cfg.stateFile.empty() && !cfg.dataPath.empty())
+    cfg.stateFile = defaultWalletStatePath(cfg.dataPath);
 
   crypto::SecretKey viewKey, spendKey;
   crypto::PublicKey viewPub, spendPub;
@@ -550,13 +564,13 @@ int main(int argc, char *argv[])
   std::unique_ptr<cn::INode> remoteNode;
   cn::INode *nodePtr = &nullNode;
 
-  if (cfg.mode == ConnectionMode::Remote)
+  if (cfg.mode != ConnectionMode::Offline)
   {
     auto *client = new NodeClient::NodeClient(cfg.daemonHost, cfg.daemonPort);
     remoteNode.reset(client);
     nodePtr = remoteNode.get();
 
-    // Init the connection
+    // Init the connection (needed for send/deposit relay and mixin RPC even in local MDBX mode).
     bool initDone = false;
     client->init([&initDone](std::error_code ec)
                  { initDone = true; });
@@ -578,33 +592,26 @@ int main(int argc, char *argv[])
       cfg.spendKeyHex.empty() ? nullptr : &spendKey,
       chainSync);
 
-  if (cfg.startHeight > 0)
-  {
-    sync->setScannedHeight(cfg.startHeight);
-  }
-
-  if (cfg.mode == ConnectionMode::Remote)
-  {
-    sync->setNode(nodePtr);
-
-    // NodeClient handles all daemon communication internally.
-    // SyncEngine uses cn::INode interface directly.
-  }
-
+  bool stateLoaded = false;
   if (!cfg.stateFile.empty())
   {
-    if (sync->loadStateFile(cfg.stateFile))
+    const bool stateExists = pathIsReadableFile(cfg.stateFile);
+    if (stateExists && sync->loadStateFile(cfg.stateFile))
     {
+      stateLoaded = true;
       wallet->loadOutputs(sync->getCachedOutputs(), sync->lastScannedHeight());
-      // Keep a stable full path for save on exit (bare wallet_state.bin -> under data-dir)
-      if (cfg.stateFile == "wallet_state.bin" ||
-          (cfg.stateFile.find('/') == std::string::npos && cfg.stateFile.find('\\') == std::string::npos))
-        cfg.walletStatePath = cfg.dataPath + "/wallet_state.bin";
-      else
-        cfg.walletStatePath = cfg.stateFile;
     }
-    else
+    else if (stateExists)
       std::cerr << "Warning: could not load state file: " << cfg.stateFile << std::endl;
+  }
+
+  if (cfg.startHeight > 0 && !stateLoaded)
+    sync->setScannedHeight(cfg.startHeight);
+
+  if (cfg.mode != ConnectionMode::Offline)
+  {
+    sync->setNode(nodePtr);
+    // Local mode: scan PATH/mdbx_blocks for history/indices; daemon for tip, mempool, relay.
   }
 
   ClientWallet::EventLoop loop;
@@ -612,7 +619,7 @@ int main(int argc, char *argv[])
   loop.setSyncEngine(sync);
   loop.setNode(nodePtr);
   loop.setCurrency(currency);
-  loop.setStatePath(cfg.walletStatePath);
+  loop.setStatePath(cfg.stateFile);
 
   loop.pushScreen(std::make_shared<ClientWallet::OverviewScreen>(wallet));
   loop.run();

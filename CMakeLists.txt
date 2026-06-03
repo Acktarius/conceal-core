@@ -171,7 +171,7 @@ if(WITH_OPENCL)
   endif()
 endif()
 
-option(BUILD_MIGRATION_GUI "Build wxWidgets migration GUI (conceald-migrate-gui)" OFF)
+option(BUILD_MIGRATION_GUI "Build wxWidgets migration GUI (conceald-migrate-gui)" ON)
 
 if(BUILD_TESTS)
   add_subdirectory(tests)

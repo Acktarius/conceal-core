@@ -101,7 +101,7 @@ namespace ClientWallet
       }
     }
 
-    uint64_t available = BoltCore::spendableAmount(balance);
+    uint64_t available = BoltCore::spendableAmountBeforeFee(balance);
 
     drawHeader(buf, title(), balance.currentHeight, available,
                m_wallet->getType() == BoltCore::WalletType::Full ? "Full" : "View-only");
@@ -111,7 +111,7 @@ namespace ClientWallet
     const int balanceH = 12;
     buf.write(Tui::drawBox(balanceTop, 2, balanceH, 76, "Balance"));
 
-    buf.writeAt(balanceTop + 1, 4, Tui::dim() + "Available:      " + Tui::reset() + Tui::brightGreen() + formatAmount(available) + " CCX" + Tui::reset());
+    buf.writeAt(balanceTop + 1, 4, Tui::dim() + "Available:      " + Tui::reset() + Tui::accentGreen() + formatAmount(available) + " CCX" + Tui::reset());
     buf.writeAt(balanceTop + 2, 4, Tui::dim() + "Pending:        " + Tui::reset() + Tui::yellow() + formatAmount(balance.pending) + " CCX" + Tui::reset());
     buf.writeAt(balanceTop + 3, 4, Tui::dim() + "Locked Deposit: " + Tui::reset() + Tui::red() + formatAmount(balance.lockedDeposit) + " CCX" + Tui::reset() + " (" + std::to_string(lockedCount) + " locked)");
     buf.writeAt(balanceTop + 4, 4, Tui::dim() + "Withdrawable:   " + Tui::reset() + Tui::green() + formatAmount(withdrawableAmount) + " CCX" + Tui::reset() + " (" + std::to_string(withdrawableCount) + " ready)");

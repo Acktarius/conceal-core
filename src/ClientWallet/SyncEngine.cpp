@@ -5,10 +5,13 @@
 #include "SyncEngine.h"
 #include "Blockchain/BlockchainFilter.h"
 #include "BoltCore/BoltCoreTypes.h"
+#include "BoltCore/OutputUtils.h"
 #include "BoltRPC/StateManager.h"
 #include "BoltRPC/SyncManager.h"
 #include "BoltSync/BoltSync.h"
 #include "BoltSync/BlockDeserializer.h"
+#include "BoltCore/NewOutputScanner.h"
+#include "Blockchain/BlockchainFilter.h"
 #include "BoltSync/CryptoHelpers.h"
 #include "Storage/MDBXBlockchainStorage.h"
 #include "Common/PathHelpers.h"
@@ -17,13 +20,16 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "crypto/crypto.h"
 #include "INode.h"
+#include "NodeClient/NodeClient.h"
 
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <mdbx.h>
 
 static std::mutex g_syncLogWriteMutex;
@@ -74,43 +80,339 @@ namespace ClientWallet
       uint32_t term;
     };
 
-    bool endsWithFileName(const std::string &path, const std::string &leaf)
+    bool looksLikeCliFlag(const std::string &s)
     {
-      if (path.size() < leaf.size())
-        return false;
-      if (path.compare(path.size() - leaf.size(), leaf.size(), leaf) != 0)
-        return false;
-      return path.size() == leaf.size() ||
-             path[path.size() - leaf.size() - 1] == '/' ||
-             path[path.size() - leaf.size() - 1] == '\\';
+      return s.size() >= 2 && s[0] == '-' && s[1] == '-';
     }
 
-    std::string parentDirectory(const std::string &filePath)
+    // Use path as the wallet state file (--state FILE).
+    std::string resolveStateFilePath(const std::string &path)
     {
-      const size_t pos = filePath.find_last_of("/\\");
-      if (pos == std::string::npos)
-        return ".";
-      if (pos == 0)
-        return "/";
-      return filePath.substr(0, pos);
+      if (path.empty() || looksLikeCliFlag(path))
+        return {};
+      if (path.back() == '/' || path.back() == '\\')
+        return PathHelpers::appendPath(path, kWalletStateFile);
+      return path;
     }
 
-    // path from EventLoop: full snapshot file, bare name, or <data-dir>/wallet_state.bin
-    std::string resolveStateFilePath(const std::string &path, const std::string &dataDir)
+    bool lookupGlobalOutputIndexInBlock(MDBX_env *env,
+                                        uint32_t blockHeight,
+                                        const crypto::Hash &txHash,
+                                        uint32_t outputIndex,
+                                        uint32_t &globalIndex)
     {
-      if (path.empty())
-        return PathHelpers::appendPath(dataDir, kWalletStateFile);
+      MDBX_txn *rt = nullptr;
+      if (mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &rt) != MDBX_SUCCESS)
+        return false;
 
-      if (path == kWalletStateFile)
-        return PathHelpers::appendPath(dataDir, kWalletStateFile);
+      MDBX_dbi dbiBlockEntries = 0;
+      if (mdbx_dbi_open(rt, "block_entries", MDBX_DB_DEFAULTS, &dbiBlockEntries) != MDBX_SUCCESS)
+      {
+        mdbx_txn_abort(rt);
+        return false;
+      }
 
-      if (endsWithFileName(path, kWalletStateFile))
-        return path;
+      std::ostringstream keyStr;
+      keyStr << "be_" << std::setw(8) << std::setfill('0') << blockHeight;
+      std::string key = keyStr.str();
+      MDBX_val bk = {const_cast<char *>(key.data()), key.size()};
+      MDBX_val bv;
 
-      if (path.find('/') == std::string::npos && path.find('\\') == std::string::npos)
-        return PathHelpers::appendPath(dataDir, path);
+      bool ok = false;
+      if (mdbx_get(rt, dbiBlockEntries, &bk, &bv) == MDBX_SUCCESS)
+      {
+        cn::BinaryArray ba(static_cast<const uint8_t *>(bv.iov_base),
+                           static_cast<const uint8_t *>(bv.iov_base) + bv.iov_len);
+        cn::Block block;
+        std::vector<cn::Transaction> transactions;
+        std::vector<std::vector<uint32_t>> globalIndexesPerTx;
+        if (BoltSync::deserializeBlockEntry(ba, block, transactions, &globalIndexesPerTx))
+        {
+          for (size_t txIdx = 0; txIdx < transactions.size(); ++txIdx)
+          {
+            if (getObjectHash(transactions[txIdx]) != txHash)
+              continue;
+            if (txIdx >= globalIndexesPerTx.size())
+              break;
+            const auto &indexes = globalIndexesPerTx[txIdx];
+            if (outputIndex < indexes.size())
+            {
+              globalIndex = indexes[outputIndex];
+              ok = true;
+            }
+            break;
+          }
+        }
+      }
 
-      return PathHelpers::appendPath(path, kWalletStateFile);
+      mdbx_txn_abort(rt);
+      return ok;
+    }
+
+    bool lookupGlobalOutputIndicesViaNode(cn::INode *node,
+                                          const crypto::Hash &txHash,
+                                          std::vector<uint32_t> &indices)
+    {
+      indices.clear();
+      if (!node)
+        return false;
+
+      std::promise<std::error_code> promise;
+      auto future = promise.get_future();
+      node->getTransactionOutsGlobalIndices(
+          txHash, indices,
+          [&promise](std::error_code ec)
+          { promise.set_value(ec); });
+      const std::error_code ec = future.get();
+      return !ec && !indices.empty();
+    }
+
+    bool lookupGlobalOutputIndexViaNode(cn::INode *node,
+                                        const BoltCore::OutputInfo &output,
+                                        uint32_t &globalIndex)
+    {
+      std::vector<uint32_t> indices;
+      if (!lookupGlobalOutputIndicesViaNode(node, output.txHash, indices))
+        return false;
+      if (output.outputIndex >= indices.size())
+        return false;
+
+      globalIndex = indices[output.outputIndex];
+      return true;
+    }
+
+    // WalletGreen / TransfersContainer: globalOutputIndex = globalIndices[outputInTransaction].
+    void applyGlobalIndicesToOutputs(std::vector<BoltCore::OutputInfo> &outputs,
+                                     const std::vector<uint32_t> &globalIndices)
+    {
+      if (globalIndices.empty())
+        return;
+      for (auto &out : outputs)
+      {
+        if (out.outputIndex >= globalIndices.size())
+          continue;
+        out.globalOutputIndex = globalIndices[out.outputIndex];
+        out.hasGlobalOutputIndex = true;
+      }
+    }
+
+    bool fetchGlobalIndicesForConfirmedTx(cn::INode *node,
+                                          NodeClient::NodeClient *nc,
+                                          const crypto::Hash &txHash,
+                                          uint32_t blockHeight,
+                                          std::vector<uint32_t> &globalIndices)
+    {
+      globalIndices.clear();
+      if (blockHeight == 0)
+        return false;
+
+      if (nc)
+      {
+        std::vector<cn::Transaction> txs;
+        std::vector<crypto::Hash> hashes;
+        std::vector<std::vector<uint32_t>> globalIndexesPerTx;
+        if (nc->getTransactionsAtHeight(blockHeight, txs, hashes, &globalIndexesPerTx))
+        {
+          for (size_t i = 0; i < hashes.size(); ++i)
+          {
+            if (hashes[i] != txHash)
+              continue;
+            if (i < globalIndexesPerTx.size())
+              globalIndices = globalIndexesPerTx[i];
+            return !globalIndices.empty();
+          }
+        }
+      }
+
+      return lookupGlobalOutputIndicesViaNode(node, txHash, globalIndices);
+    }
+
+    std::vector<BoltCore::OutputInfo> backfillOutputsInCache(
+        std::vector<BoltCore::OutputInfo> &cachedOutputs,
+        cn::INode *node,
+        MDBX_env *env,
+        std::unordered_set<crypto::Hash, boost::hash<crypto::Hash>> *unresolvedTxHashes)
+    {
+      std::vector<BoltCore::OutputInfo> updated;
+      for (auto &out : cachedOutputs)
+      {
+        if (out.spent || out.hasGlobalOutputIndex)
+          continue;
+
+        // Global amount indices exist only after the tx is included in a block.
+        if (out.blockHeight == 0)
+          continue;
+
+        if (unresolvedTxHashes && unresolvedTxHashes->count(out.txHash) != 0)
+          continue;
+
+        uint32_t globalIndex = 0;
+        bool resolved = false;
+        if (env &&
+            lookupGlobalOutputIndexInBlock(env, out.blockHeight, out.txHash, out.outputIndex, globalIndex))
+          resolved = true;
+        else if (lookupGlobalOutputIndexViaNode(node, out, globalIndex))
+          resolved = true;
+
+        if (!resolved)
+        {
+          if (unresolvedTxHashes)
+            unresolvedTxHashes->insert(out.txHash);
+          continue;
+        }
+
+        if (unresolvedTxHashes)
+          unresolvedTxHashes->erase(out.txHash);
+
+        out.globalOutputIndex = globalIndex;
+        out.hasGlobalOutputIndex = true;
+        updated.push_back(out);
+      }
+      return updated;
+    }
+
+    void dedupeOutputsByRef(std::vector<BoltCore::OutputInfo> &outputs)
+    {
+      std::vector<BoltCore::OutputInfo> unique;
+      unique.reserve(outputs.size());
+      for (const auto &out : outputs)
+      {
+        bool exists = false;
+        for (const auto &existing : unique)
+        {
+          if (existing.txHash == out.txHash && existing.outputIndex == out.outputIndex)
+          {
+            exists = true;
+            break;
+          }
+        }
+        if (!exists)
+          unique.push_back(out);
+      }
+      outputs.swap(unique);
+    }
+
+    void dedupeOutputsByKey(std::vector<BoltCore::OutputInfo> &outputs)
+    {
+      static const crypto::PublicKey NULL_KEY = {};
+      std::vector<BoltCore::OutputInfo> unique;
+      unique.reserve(outputs.size());
+      for (const auto &out : outputs)
+      {
+        bool exists = false;
+        for (const auto &existing : unique)
+        {
+          if (existing.txHash != out.txHash)
+            continue;
+          if (existing.outputIndex == out.outputIndex)
+          {
+            exists = true;
+            break;
+          }
+          if (out.outputKey != NULL_KEY && existing.outputKey == out.outputKey)
+          {
+            exists = true;
+            break;
+          }
+          if (out.hasGlobalOutputIndex && existing.hasGlobalOutputIndex &&
+              out.globalOutputIndex == existing.globalOutputIndex)
+          {
+            exists = true;
+            break;
+          }
+        }
+        if (!exists)
+          unique.push_back(out);
+      }
+      outputs.swap(unique);
+    }
+
+    bool outputsPhysicallyMatch(const BoltCore::OutputInfo &existing,
+                                const BoltCore::OutputInfo &out)
+    {
+      static const crypto::PublicKey NULL_KEY = {};
+      if (existing.txHash != out.txHash)
+        return false;
+      if (existing.isDeposit != out.isDeposit)
+        return false;
+      if (existing.outputIndex == out.outputIndex)
+        return true;
+      if (out.outputKey != NULL_KEY && existing.outputKey == out.outputKey)
+        return true;
+      if (out.hasGlobalOutputIndex && existing.hasGlobalOutputIndex &&
+          out.globalOutputIndex == existing.globalOutputIndex)
+        return true;
+      if (!out.isDeposit && !existing.isDeposit && !out.spent && !existing.spent &&
+          out.amount == existing.amount)
+      {
+        if (out.blockHeight > 0 && existing.blockHeight > 0 &&
+            out.blockHeight == existing.blockHeight)
+          return true;
+        if (out.blockHeight == 0 || existing.blockHeight == 0)
+          return true;
+      }
+      return false;
+    }
+
+    BoltCore::OutputInfo *findCachedOutputMatch(std::vector<BoltCore::OutputInfo> &cache,
+                                                const BoltCore::OutputInfo &out)
+    {
+      for (auto &existing : cache)
+      {
+        if (outputsPhysicallyMatch(existing, out))
+          return &existing;
+      }
+
+      if (!out.isDeposit && !out.spent)
+      {
+        BoltCore::OutputInfo *byTxAmount = nullptr;
+        uint32_t sameTxAmount = 0;
+        for (auto &existing : cache)
+        {
+          if (existing.txHash != out.txHash || existing.isDeposit || existing.spent)
+            continue;
+          if (existing.amount != out.amount)
+            continue;
+          if (out.blockHeight > 0 && existing.blockHeight > 0 &&
+              out.blockHeight != existing.blockHeight)
+            continue;
+          byTxAmount = &existing;
+          if (++sameTxAmount > 1)
+            break;
+        }
+        if (sameTxAmount == 1)
+          return byTxAmount;
+      }
+
+      return nullptr;
+    }
+
+    bool outputAlreadyCached(const BoltCore::OutputInfo &out,
+                             const std::vector<BoltCore::OutputInfo> &cache)
+    {
+      std::vector<BoltCore::OutputInfo> mutableCache = cache;
+      return findCachedOutputMatch(mutableCache, out) != nullptr;
+    }
+
+    void dedupeOutputsPhysically(std::vector<BoltCore::OutputInfo> &outputs)
+    {
+      std::vector<BoltCore::OutputInfo> unique;
+      unique.reserve(outputs.size());
+      for (const auto &out : outputs)
+      {
+        bool exists = false;
+        for (const auto &existing : unique)
+        {
+          if (outputsPhysicallyMatch(existing, out))
+          {
+            exists = true;
+            break;
+          }
+        }
+        if (!exists)
+          unique.push_back(out);
+      }
+      outputs.swap(unique);
     }
   }
 
@@ -134,12 +436,14 @@ namespace ClientWallet
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
-  void SyncEngine::start(OutputCallback onOutputs, StatusCallback onStatus, SpentCallback onSpent)
+  void SyncEngine::start(OutputCallback onOutputs, StatusCallback onStatus, SpentCallback onSpent,
+                         MetadataCallback onMetadata)
   {
     syncLog("SyncEngine::start() called, dataDir=" + m_dataDir);
     m_onOutputs = std::move(onOutputs);
     m_onStatus = std::move(onStatus);
     m_onSpent = std::move(onSpent);
+    m_onMetadata = std::move(onMetadata);
     if (!m_enableChainSync)
     {
       m_strategy = SyncStrategy::Offline;
@@ -161,7 +465,7 @@ namespace ClientWallet
 
   void SyncEngine::stop()
   {
-    m_stop = true;
+    requestStop();
     std::lock_guard<std::mutex> lock(m_threadMutex);
     if (m_thread.joinable())
       m_thread.join();
@@ -193,9 +497,15 @@ namespace ClientWallet
   void SyncEngine::fullSync()
   {
     m_scannedHeight = 0;
+    m_lastDaemonGapScanHeight = 0;
+    m_multisigIndex.clear();
     {
       std::lock_guard<std::mutex> lock(m_outputCacheMutex);
       m_cachedOutputs.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(m_appliedTxMutex);
+      m_walletAppliedTxHashes.clear();
     }
     incrementalSync();
   }
@@ -203,6 +513,8 @@ namespace ClientWallet
   void SyncEngine::incrementalSync()
   {
     std::lock_guard<std::mutex> lock(m_threadMutex);
+    if (m_stop)
+      return;
     if (m_active)
     {
       syncLog("incrementalSync: already active");
@@ -210,6 +522,8 @@ namespace ClientWallet
     }
     if (m_thread.joinable())
       m_thread.join();
+    if (m_stop)
+      return;
 
     syncLog("incrementalSync: starting background thread, strategy=" + std::to_string((int)m_strategy));
     m_active = true;
@@ -229,11 +543,81 @@ namespace ClientWallet
 
   void SyncEngine::onNewBlockHeight(uint32_t newHeight)
   {
-    if (newHeight > m_scannedHeight)
+    notifyDaemonHeight(newHeight);
+    syncIfBehind();
+  }
+
+  void SyncEngine::notifyDaemonHeight(uint32_t height)
+  {
+    m_daemonHeight.store(height);
+  }
+
+  void SyncEngine::syncIfBehind()
+  {
+    if (!m_enableChainSync || m_strategy == SyncStrategy::Offline)
+      return;
+
+    const uint32_t mdbxTop = peekMdbxTopHeight();
+    const uint32_t daemonHeight = m_daemonHeight.load();
+
+    if (daemonHeight > mdbxTop && daemonHeight > m_lastLoggedMdbxLag)
     {
-      syncLog("onNewBlockHeight: " + std::to_string(newHeight));
-      incrementalSync();
+      const uint32_t walletHeight = m_scannedHeight.load();
+      if (mdbxTop == 0)
+      {
+        syncLog("syncIfBehind: no local mdbx_blocks (mdbx=0); wallet at height " +
+                std::to_string(walletHeight) + ", daemon tip " +
+                std::to_string(daemonHeight > 0 ? daemonHeight - 1 : 0) +
+                " — gap blocks fetched via daemon RPC");
+      }
+      else
+      {
+        syncLog("syncIfBehind: local MDBX behind daemon by " +
+                std::to_string(daemonHeight - mdbxTop) +
+                " blocks (daemon=" + std::to_string(daemonHeight) +
+                ", mdbx=" + std::to_string(mdbxTop) +
+                ", wallet=" + std::to_string(walletHeight) + ")");
+      }
+      m_lastLoggedMdbxLag = daemonHeight;
     }
+
+    if (mdbxTop > m_scannedHeight && !m_stop)
+      incrementalSync();
+  }
+
+  uint32_t SyncEngine::peekMdbxTopHeight() const
+  {
+    const std::string dbPath = PathHelpers::appendPath(m_dataDir, "mdbx_blocks");
+    std::ifstream testFile(dbPath, std::ios::binary);
+    if (!testFile.good())
+      return 0;
+    testFile.close();
+
+    MDBX_env *env = nullptr;
+    if (mdbx_env_create(&env) != MDBX_SUCCESS)
+      return 0;
+
+    mdbx_env_set_maxdbs(env, 8);
+    if (mdbx_env_open(env, dbPath.c_str(), MDBX_NOSUBDIR | MDBX_NORDAHEAD, 0664) != MDBX_SUCCESS)
+    {
+      mdbx_env_close(env);
+      return 0;
+    }
+
+    uint32_t topHeight = 0;
+    MDBX_txn *ht = nullptr;
+    MDBX_dbi hdbi;
+    if (mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ht) == MDBX_SUCCESS &&
+        mdbx_dbi_open(ht, "heights", MDBX_DB_DEFAULTS, &hdbi) == MDBX_SUCCESS)
+    {
+      MDBX_stat st;
+      if (mdbx_dbi_stat(ht, hdbi, &st, sizeof(st)) == MDBX_SUCCESS && st.ms_entries > 0)
+        topHeight = static_cast<uint32_t>(st.ms_entries - 1);
+      mdbx_txn_abort(ht);
+    }
+
+    mdbx_env_close(env);
+    return topHeight;
   }
 
   // ── Direct scan (local MDBX with view-tag filter) ──────────────────────
@@ -299,102 +683,65 @@ namespace ClientWallet
 
     syncLog("runDirectScan: topHeight=" + std::to_string(topHeight));
 
+    const uint32_t daemonHeight = m_daemonHeight.load();
+    if (daemonHeight > topHeight)
+    {
+      syncLog("runDirectScan: MDBX behind daemon by " +
+              std::to_string(daemonHeight - topHeight) +
+              " blocks (daemon=" + std::to_string(daemonHeight) +
+              ", mdbx=" + std::to_string(topHeight) + ")");
+    }
+
     if (m_scannedHeight >= topHeight)
     {
-      mdbx_env_close(env);
-      markSpentOutputs(topHeight);
-      status.isSyncing = false;
-      if (m_onStatus)
-        m_onStatus(status);
-      return;
+      // Re-scan the tip block when already caught up (picks up outputs missed by older scanners).
+      if (m_scannedHeight == topHeight && topHeight > 0)
+      {
+        m_scannedHeight = topHeight - 1;
+      }
+      else
+      {
+        bool needsBackfill = false;
+        {
+          std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+          for (const auto &out : m_cachedOutputs)
+          {
+            if (!out.spent && !out.hasGlobalOutputIndex)
+            {
+              needsBackfill = true;
+              break;
+            }
+          }
+        }
+
+        if (needsBackfill)
+        {
+          std::vector<BoltCore::OutputInfo> backfilled;
+          {
+            std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+            std::lock_guard<std::mutex> backfillLock(m_backfillMutex);
+            backfilled = backfillOutputsInCache(m_cachedOutputs, m_node, env, &m_unresolvedGlobalIndexTxs);
+          }
+          if (!backfilled.empty())
+          {
+            syncLog("runDirectScan: backfilled " + std::to_string(backfilled.size()) +
+                    " global indices (cache only)");
+            if (m_onMetadata)
+              m_onMetadata(backfilled);
+          }
+        }
+
+        mdbx_env_close(env);
+        markSpentOutputs(topHeight);
+        status.isSyncing = false;
+        if (m_onStatus)
+          m_onStatus(status);
+        return;
+      }
     }
 
     std::vector<BoltCore::OutputInfo> outputs;
     uint32_t checked = 0;
-
-    auto scanTxOutputs = [this, &outputs](
-                             const cn::Transaction &tx, const crypto::PublicKey &txPubKey,
-                             const crypto::Hash &txHash, uint32_t blockHeight,
-                             const cn::BlockFilterRecord *filterRecord, size_t &filterIdx)
-    {
-      if (txPubKey == cn::NULL_PUBLIC_KEY)
-        return;
-
-      crypto::KeyDerivation derivation;
-      if (!crypto::generate_key_derivation(txPubKey, m_viewKey, derivation))
-        return;
-
-      size_t keyIndex = 0;
-      for (size_t o = 0; o < tx.outputs.size(); ++o)
-      {
-        const auto &out = tx.outputs[o];
-        if (out.target.type() == typeid(cn::KeyOutput))
-        {
-          const auto &keyOut = boost::get<cn::KeyOutput>(out.target);
-
-          if (filterRecord && filterIdx < filterRecord->entries.size())
-          {
-            const auto &entry = filterRecord->entries[filterIdx];
-            ++filterIdx;
-
-            uint8_t walletTag = BoltSync::computeDaemonViewTag(txPubKey, o);
-            if (walletTag != entry.view_tag)
-            {
-              ++keyIndex;
-              continue;
-            }
-          }
-
-          crypto::PublicKey derivedKey;
-          if (crypto::derive_public_key(derivation, keyIndex, m_spendPub, derivedKey) &&
-              derivedKey == keyOut.key)
-          {
-            BoltCore::OutputInfo info;
-            info.blockHeight = blockHeight;
-            info.txHash = txHash;
-            info.amount = out.amount;
-            info.outputIndex = static_cast<uint32_t>(o);
-            info.outputKey = keyOut.key;
-            info.txPublicKey = txPubKey;
-            info.spent = false;
-            info.isDeposit = false;
-            info.term = 0;
-            if (m_spendKey)
-              info.keyImage = deriveKeyImage(info);
-            outputs.push_back(info);
-          }
-          ++keyIndex;
-        }
-        else if (out.target.type() == typeid(cn::MultisignatureOutput))
-        {
-          const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
-          if (msigOut.term > 0)
-          {
-            for (size_t ki = 0; ki < msigOut.keys.size(); ++ki)
-            {
-              crypto::PublicKey recoveredSpend;
-              if (crypto::underive_public_key(derivation, o, msigOut.keys[ki], recoveredSpend) &&
-                  recoveredSpend == m_spendPub)
-              {
-                BoltCore::OutputInfo info;
-                info.blockHeight = blockHeight;
-                info.txHash = txHash;
-                info.amount = out.amount;
-                info.outputIndex = static_cast<uint32_t>(o);
-                info.outputKey = msigOut.keys[ki];
-                info.txPublicKey = txPubKey;
-                info.spent = false;
-                info.isDeposit = true;
-                info.term = msigOut.term;
-                outputs.push_back(info);
-                break;
-              }
-            }
-          }
-          keyIndex += msigOut.keys.size();
-        }
-      }
-    };
 
     // Main scan loop
     for (uint32_t h = m_scannedHeight + 1; h <= topHeight && !m_stop; ++h)
@@ -415,10 +762,12 @@ namespace ClientWallet
                            static_cast<const uint8_t *>(bv.iov_base) + bv.iov_len);
         cn::Block block;
         std::vector<cn::Transaction> transactions;
-        if (BoltSync::deserializeBlockEntry(ba, block, transactions))
+        std::vector<std::vector<uint32_t>> globalIndexesPerTx;
+        if (BoltSync::deserializeBlockEntry(ba, block, transactions, &globalIndexesPerTx))
         {
           cn::BlockFilterRecord filterRecord;
           bool haveFilter = false;
+          size_t filterIdx = 0;
           {
             std::ostringstream frKeyStr;
             frKeyStr << "fr_" << std::setw(8) << std::setfill('0') << h;
@@ -435,15 +784,17 @@ namespace ClientWallet
             }
           }
 
-          size_t filterIdx = 0;
-
-          // transactions[0] is the coinbase — process all transactions
-          // through the same path so filterIdx stays aligned
-          for (const auto &tx : transactions)
+          // Filter order is baseTransaction then tx[1..n]; transactions[0] is the coinbase
+          // (same as baseTransaction). Scan transactions[] only — never both.
+          for (size_t txIdx = 0; txIdx < transactions.size(); ++txIdx)
           {
-            crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
-            scanTxOutputs(tx, txPubKey, getObjectHash(tx), h,
-                          haveFilter ? &filterRecord : nullptr, filterIdx);
+            const std::vector<uint32_t> *indexes = txIdx < globalIndexesPerTx.size()
+                                                       ? &globalIndexesPerTx[txIdx]
+                                                       : nullptr;
+            const crypto::Hash blockTxHash = cn::getObjectHash(transactions[txIdx]);
+            scanBlockTransaction(transactions[txIdx], h, indexes, outputs,
+                                 haveFilter ? &filterRecord : nullptr, haveFilter, filterIdx,
+                                 &blockTxHash);
           }
         }
       }
@@ -463,12 +814,10 @@ namespace ClientWallet
       {
         syncLog("runDirectScan: checked " + std::to_string(checked) +
                 " blocks, found " + std::to_string(outputs.size()));
-        if (!outputs.empty() && m_onOutputs)
+        if (!outputs.empty())
         {
           syncLog("runDirectScan: dispatching " + std::to_string(outputs.size()) + " outputs");
-          m_onOutputs(outputs);
-          std::lock_guard<std::mutex> lock(m_outputCacheMutex);
-          m_cachedOutputs.insert(m_cachedOutputs.end(), outputs.begin(), outputs.end());
+          dispatchDiscoveredOutputs(outputs);
           outputs.clear();
         }
         status.scannedHeight = checked;
@@ -481,23 +830,43 @@ namespace ClientWallet
     syncLog("runDirectScan: checked " + std::to_string(checked) +
             " blocks, found " + std::to_string(outputs.size()) + " owned outputs");
 
-    if (!outputs.empty() && m_onOutputs)
-    {
-      m_onOutputs(outputs);
-      std::lock_guard<std::mutex> lock(m_outputCacheMutex);
-      m_cachedOutputs.insert(m_cachedOutputs.end(), outputs.begin(), outputs.end());
-    }
+    if (!outputs.empty())
+      dispatchDiscoveredOutputs(outputs);
 
     m_scannedHeight = topHeight;
     status.scannedHeight = m_scannedHeight;
     status.ownedOutputs = static_cast<uint32_t>(m_cachedOutputs.size());
+
+    const auto backfilled = [this, &env]()
+    {
+      std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+      std::lock_guard<std::mutex> backfillLock(m_backfillMutex);
+      return backfillOutputsInCache(m_cachedOutputs, m_node, env, &m_unresolvedGlobalIndexTxs);
+    }();
+    if (!backfilled.empty())
+    {
+      syncLog("runDirectScan: backfilled " + std::to_string(backfilled.size()) +
+              " global indices (cache only)");
+      if (m_onMetadata)
+        m_onMetadata(backfilled);
+    }
+
     mdbx_env_close(env);
 
-    markSpentOutputs(topHeight);
+    markSpentOutputs(m_scannedHeight);
 
     status.isSyncing = false;
     if (m_onStatus)
       m_onStatus(status);
+
+    // MDBX can advance while a long rescan runs — schedule a catch-up pass.
+    const uint32_t liveTop = peekMdbxTopHeight();
+    if (liveTop > m_scannedHeight && !m_stop)
+    {
+      syncLog("runDirectScan: MDBX grew during scan to " + std::to_string(liveTop) +
+              " (scanned through " + std::to_string(m_scannedHeight) + "), scheduling catch-up");
+      incrementalSync();
+    }
   }
 
   // ── Polling sync ───────────────────────────────────────────────────────
@@ -538,6 +907,8 @@ namespace ClientWallet
             info.txHash = rpcOut.txHash;
             info.amount = rpcOut.amount;
             info.outputIndex = rpcOut.outputIndex;
+            info.globalOutputIndex = rpcOut.globalOutputIndex;
+            info.hasGlobalOutputIndex = rpcOut.hasGlobalOutputIndex;
             info.outputKey = rpcOut.outputKey;
             info.txPublicKey = rpcOut.txPublicKey;
             info.spent = rpcOut.spent;
@@ -545,17 +916,14 @@ namespace ClientWallet
             info.term = rpcOut.term;
             converted.push_back(info);
           }
-          if (!converted.empty() && m_onOutputs)
-          {
-            m_onOutputs(converted);
-            std::lock_guard<std::mutex> lock(m_outputCacheMutex);
-            m_cachedOutputs.insert(m_cachedOutputs.end(), converted.begin(), converted.end());
-          }
+          if (!converted.empty())
+            dispatchDiscoveredOutputs(converted);
 
           if (!spentKeyImages.empty() && m_onSpent)
           {
             std::vector<std::pair<crypto::Hash, uint32_t>> depositSpends;
-            m_onSpent(spentKeyImages, depositSpends);
+            std::vector<std::pair<crypto::Hash, uint32_t>> outputSpends;
+            m_onSpent(spentKeyImages, depositSpends, outputSpends);
           }
         });
 
@@ -572,9 +940,29 @@ namespace ClientWallet
 
   void SyncEngine::markSpentOutputs(uint32_t topHeight)
   {
-    syncLog("markSpentOutputs: starting spent check");
+    const uint32_t mdbxTop = peekMdbxTopHeight();
+    if (mdbxTop == 0)
+    {
+      syncLog("markSpentOutputs: skipped (no local mdbx_blocks; wallet at " +
+              std::to_string(m_scannedHeight.load()) + ")");
+      return;
+    }
+
+    uint32_t startHeight = m_lastSpentScanHeight + 1;
+    if (startHeight > topHeight)
+    {
+      syncLog("markSpentOutputs: up to date through block " + std::to_string(topHeight));
+      return;
+    }
+
+    syncLog("markSpentOutputs: scanning blocks " + std::to_string(startHeight) +
+            ".." + std::to_string(topHeight) +
+            " (wallet=" + std::to_string(m_scannedHeight.load()) +
+            ", mdbx=" + std::to_string(mdbxTop) + ")");
+
     std::vector<crypto::KeyImage> newKeyImages;
     std::vector<std::pair<crypto::Hash, uint32_t>> newDepositSpends;
+    std::vector<std::pair<crypto::Hash, uint32_t>> newOutputSpends;
 
     {
       std::lock_guard<std::mutex> lock(m_outputCacheMutex);
@@ -594,8 +982,6 @@ namespace ClientWallet
         if (std::memcmp(&fo.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) != 0)
           keyImageIndex[fo.keyImage] = i;
       }
-
-      std::unordered_map<uint64_t, std::vector<MsigOutputRef>> multisigIndex;
 
       std::string dbPath = PathHelpers::appendPath(m_dataDir, "mdbx_blocks");
       MDBX_env *env = nullptr;
@@ -635,7 +1021,7 @@ namespace ClientWallet
       };
 
       uint32_t spentCount = 0;
-      for (uint32_t h = 0; h <= topHeight; ++h)
+      for (uint32_t h = startHeight; h <= topHeight; ++h)
       {
         if (m_stop)
           break;
@@ -670,45 +1056,53 @@ namespace ClientWallet
                   auto it = keyImageIndex.find(ki);
                   if (it != keyImageIndex.end() && !m_cachedOutputs[it->second].spent)
                   {
+                    const auto &spentOut = m_cachedOutputs[it->second];
                     m_cachedOutputs[it->second].spent = true;
                     newKeyImages.push_back(ki);
+                    if (!spentOut.isDeposit)
+                      newOutputSpends.emplace_back(spentOut.txHash, spentOut.outputIndex);
                     spentCount++;
                   }
                 }
                 else if (input.type() == typeid(cn::MultisignatureInput))
                 {
                   const auto &ms = boost::get<cn::MultisignatureInput>(input);
-                  auto amountIt = multisigIndex.find(ms.amount);
-                  if (amountIt == multisigIndex.end() || ms.outputIndex >= amountIt->second.size())
-                    continue;
 
-                  const auto &ref = amountIt->second[ms.outputIndex];
-                  if (ms.term != 0 && ref.term != ms.term)
-                    continue;
-
-                  auto depIt = depositIndex.find({ref.txHash, ref.outputIndex});
-                  if (depIt != depositIndex.end() && !m_cachedOutputs[depIt->second].spent)
+                  for (auto it = depositIndex.begin(); it != depositIndex.end();)
                   {
-                    markDepositSpentAt(depIt->second);
-                    depositIndex.erase(depIt);
+                    const auto &depOut = m_cachedOutputs[it->second];
+                    if (depOut.spent)
+                    {
+                      it = depositIndex.erase(it);
+                      continue;
+                    }
+                    if (depOut.amount != ms.amount)
+                    {
+                      ++it;
+                      continue;
+                    }
+                    if (ms.term != 0 && depOut.term != ms.term)
+                    {
+                      ++it;
+                      continue;
+                    }
+                    if (!depOut.hasGlobalOutputIndex ||
+                        depOut.globalOutputIndex != ms.outputIndex)
+                    {
+                      ++it;
+                      continue;
+                    }
+
+                    markDepositSpentAt(it->second);
+                    it = depositIndex.erase(it);
                     spentCount++;
                   }
                 }
               }
 
-              for (size_t o = 0; o < tx.outputs.size(); ++o)
-              {
-                const auto &out = tx.outputs[o];
-                if (out.target.type() == typeid(cn::MultisignatureOutput))
-                {
-                  const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
-                  multisigIndex[out.amount].push_back(
-                      {txHash, static_cast<uint32_t>(o), msigOut.term});
-                }
-              }
+              (void)txHash;
             };
 
-            processTransaction(block.baseTransaction);
             for (const auto &tx : transactions)
               processTransaction(tx);
           }
@@ -720,21 +1114,210 @@ namespace ClientWallet
       mdbx_env_close(env);
     }
 
-    if (m_onSpent && (!newKeyImages.empty() || !newDepositSpends.empty()))
-      m_onSpent(newKeyImages, newDepositSpends);
+    m_lastSpentScanHeight = topHeight;
+
+    if (m_onSpent && (!newKeyImages.empty() || !newDepositSpends.empty() || !newOutputSpends.empty()))
+      m_onSpent(newKeyImages, newDepositSpends, newOutputSpends);
   }
 
   // ── State file ─────────────────────────────────────────────────────────
 
+  std::vector<BoltCore::OutputInfo> SyncEngine::backfillMissingGlobalOutputIndices()
+  {
+    MDBX_env *env = nullptr;
+    bool ownEnv = false;
+    const std::string dbPath = PathHelpers::appendPath(m_dataDir, "mdbx_blocks");
+    std::ifstream testFile(dbPath, std::ios::binary);
+    if (testFile.good())
+    {
+      testFile.close();
+      if (mdbx_env_create(&env) == MDBX_SUCCESS)
+      {
+        mdbx_env_set_maxdbs(env, 8);
+        mdbx_env_set_geometry(env, -1, -1, (intptr_t)1 << 37, 256 << 20, -1, -1);
+        if (mdbx_env_open(env, dbPath.c_str(), MDBX_NOSUBDIR | MDBX_NORDAHEAD, 0664) == MDBX_SUCCESS)
+          ownEnv = true;
+        else
+        {
+          mdbx_env_close(env);
+          env = nullptr;
+        }
+      }
+    }
+
+    std::vector<BoltCore::OutputInfo> updated;
+    {
+      std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+      std::lock_guard<std::mutex> backfillLock(m_backfillMutex);
+      updated = backfillOutputsInCache(m_cachedOutputs, m_node, env, &m_unresolvedGlobalIndexTxs);
+    }
+
+    if (ownEnv && env)
+      mdbx_env_close(env);
+
+    if (!updated.empty())
+      syncLog("backfillMissingGlobalOutputIndices: resolved " + std::to_string(updated.size()) + " outputs");
+
+    return updated;
+  }
+
+  bool SyncEngine::lookupGlobalOutputIndex(const BoltCore::OutputInfo &out,
+                                           uint32_t &globalIndex) const
+  {
+    globalIndex = 0;
+    if (out.blockHeight == 0)
+      return false;
+
+    const std::string dbPath = PathHelpers::appendPath(m_dataDir, "mdbx_blocks");
+    MDBX_env *env = nullptr;
+    bool ownEnv = false;
+    std::ifstream testFile(dbPath, std::ios::binary);
+    if (testFile.good())
+    {
+      testFile.close();
+      if (mdbx_env_create(&env) == MDBX_SUCCESS)
+      {
+        mdbx_env_set_maxdbs(env, 8);
+        mdbx_env_set_geometry(env, -1, -1, (intptr_t)1 << 37, 256 << 20, -1, -1);
+        if (mdbx_env_open(env, dbPath.c_str(), MDBX_NOSUBDIR | MDBX_NORDAHEAD, 0664) == MDBX_SUCCESS)
+          ownEnv = true;
+        else
+        {
+          mdbx_env_close(env);
+          env = nullptr;
+        }
+      }
+    }
+
+    if (env && lookupGlobalOutputIndexInBlock(env, out.blockHeight, out.txHash, out.outputIndex,
+                                              globalIndex))
+    {
+      if (ownEnv)
+        mdbx_env_close(env);
+      return true;
+    }
+
+    if (ownEnv && env)
+      mdbx_env_close(env);
+
+    return lookupGlobalOutputIndexViaNode(m_node, out, globalIndex);
+  }
+
+  void SyncEngine::noteIncomingTxApplied(const crypto::Hash &txHash)
+  {
+    std::lock_guard<std::mutex> lock(m_appliedTxMutex);
+    m_walletAppliedTxHashes.insert(txHash);
+  }
+
+  void SyncEngine::dispatchDiscoveredOutputs(const std::vector<BoltCore::OutputInfo> &outputs)
+  {
+    if (outputs.empty())
+      return;
+
+    std::vector<BoltCore::OutputInfo> scanned = outputs;
+    dedupeOutputsPhysically(scanned);
+
+    std::vector<BoltCore::OutputInfo> novel;
+    novel.reserve(scanned.size());
+    std::vector<BoltCore::OutputInfo> metadataUpdates;
+
+    for (const auto &out : scanned)
+    {
+      bool alreadyCached = false;
+      {
+        std::lock_guard<std::mutex> appliedLock(m_appliedTxMutex);
+        if (m_walletAppliedTxHashes.count(out.txHash))
+          alreadyCached = true;
+      }
+      if (!alreadyCached)
+      {
+        std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+        alreadyCached = outputAlreadyCached(out, m_cachedOutputs);
+      }
+
+      BoltCore::OutputInfo indexUpdate;
+      mergeCachedOutput(out, &indexUpdate);
+      if (indexUpdate.hasGlobalOutputIndex)
+        metadataUpdates.push_back(std::move(indexUpdate));
+
+      if (!alreadyCached)
+        novel.push_back(out);
+    }
+
+    if (!novel.empty() && m_onOutputs)
+    {
+      syncLog("dispatchDiscoveredOutputs: " + std::to_string(novel.size()) + " new of " +
+              std::to_string(scanned.size()) + " scanned");
+      m_onOutputs(novel);
+    }
+    else if (!scanned.empty())
+    {
+      syncLog("dispatchDiscoveredOutputs: 0 new of " + std::to_string(scanned.size()) +
+              " scanned (wallet/cache already have this tx)");
+    }
+
+    if (!metadataUpdates.empty() && m_onMetadata)
+      m_onMetadata(metadataUpdates);
+  }
+
+  void SyncEngine::mergeCachedOutput(const BoltCore::OutputInfo &out,
+                                     BoltCore::OutputInfo *walletIndexUpdate)
+  {
+    if (walletIndexUpdate)
+      *walletIndexUpdate = {};
+    std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+    if (BoltCore::OutputInfo *existing = findCachedOutputMatch(m_cachedOutputs, out))
+    {
+      if (out.blockHeight > 0 && existing->blockHeight == 0)
+      {
+        existing->blockHeight = out.blockHeight;
+        std::lock_guard<std::mutex> backfillLock(m_backfillMutex);
+        m_unresolvedGlobalIndexTxs.erase(out.txHash);
+      }
+
+      if (out.hasGlobalOutputIndex && !existing->hasGlobalOutputIndex)
+      {
+        existing->globalOutputIndex = out.globalOutputIndex;
+        existing->hasGlobalOutputIndex = true;
+        if (walletIndexUpdate)
+          *walletIndexUpdate = *existing;
+      }
+
+      if (existing->outputKey == crypto::PublicKey{} && out.outputKey != crypto::PublicKey{})
+        existing->outputKey = out.outputKey;
+
+      if (out.hasGlobalOutputIndex)
+      {
+        std::lock_guard<std::mutex> backfillLock(m_backfillMutex);
+        m_unresolvedGlobalIndexTxs.erase(out.txHash);
+      }
+      return;
+    }
+
+    m_cachedOutputs.push_back(out);
+    if (out.hasGlobalOutputIndex)
+    {
+      std::lock_guard<std::mutex> backfillLock(m_backfillMutex);
+      m_unresolvedGlobalIndexTxs.erase(out.txHash);
+    }
+  }
+
   bool SyncEngine::loadStateFile(const std::string &path)
   {
-    const std::string filePath = resolveStateFilePath(path, m_dataDir);
+    const std::string filePath = resolveStateFilePath(path);
+    if (filePath.empty())
+    {
+      syncLog("loadStateFile: invalid path \"" + path + "\"");
+      return false;
+    }
+    m_walletStateBinPath = filePath;
     syncLog("loadStateFile: " + filePath);
-    BoltRPC::StateManager mgr(parentDirectory(filePath));
+    BoltRPC::StateManager mgr(filePath, true);
     BoltRPC::WalletState state;
     if (!mgr.load(state))
       return false;
     m_scannedHeight = state.lastHeight;
+    m_lastSpentScanHeight = state.lastHeight;
 
     std::vector<BoltCore::OutputInfo> converted;
     converted.reserve(state.ownedOutputs.size());
@@ -745,6 +1328,8 @@ namespace ClientWallet
       info.txHash = rpcOut.txHash;
       info.amount = rpcOut.amount;
       info.outputIndex = rpcOut.outputIndex;
+      info.globalOutputIndex = rpcOut.globalOutputIndex;
+      info.hasGlobalOutputIndex = rpcOut.hasGlobalOutputIndex;
       info.outputKey = rpcOut.outputKey;
       info.txPublicKey = rpcOut.txPublicKey;
       info.spent = rpcOut.spent;
@@ -756,6 +1341,15 @@ namespace ClientWallet
       std::lock_guard<std::mutex> lock(m_outputCacheMutex);
       m_cachedOutputs = converted;
     }
+    {
+      std::lock_guard<std::mutex> lock(m_appliedTxMutex);
+      m_walletAppliedTxHashes.clear();
+      for (const auto &out : converted)
+      {
+        if (out.blockHeight > 0)
+          m_walletAppliedTxHashes.insert(out.txHash);
+      }
+    }
     syncLog("loadStateFile: loaded " + std::to_string(converted.size()) + " outputs at height " + std::to_string(state.lastHeight));
     return true;
   }
@@ -763,9 +1357,12 @@ namespace ClientWallet
   bool SyncEngine::saveStateFile(const std::string &path,
                                  const std::vector<BoltCore::OutputInfo> &outputs)
   {
-    const std::string filePath = resolveStateFilePath(path, m_dataDir);
+    const std::string filePath = resolveStateFilePath(path);
+    if (filePath.empty())
+      return false;
+    m_walletStateBinPath = filePath;
     syncLog("saveStateFile: " + filePath);
-    BoltRPC::StateManager mgr(parentDirectory(filePath));
+    BoltRPC::StateManager mgr(filePath, true);
     BoltRPC::WalletState state;
     state.lastHeight = m_scannedHeight;
     state.ownedOutputs.reserve(outputs.size());
@@ -776,6 +1373,8 @@ namespace ClientWallet
       rpcOut.txHash = coreOut.txHash;
       rpcOut.amount = coreOut.amount;
       rpcOut.outputIndex = coreOut.outputIndex;
+      rpcOut.globalOutputIndex = coreOut.globalOutputIndex;
+      rpcOut.hasGlobalOutputIndex = coreOut.hasGlobalOutputIndex;
       rpcOut.outputKey = coreOut.outputKey;
       rpcOut.txPublicKey = coreOut.txPublicKey;
       rpcOut.spent = coreOut.spent;
@@ -810,7 +1409,7 @@ namespace ClientWallet
     if (!crypto::generate_key_derivation(candidate.txPublicKey, m_viewKey, derivation))
       return false;
     crypto::PublicKey derivedKey;
-    if (!crypto::derive_public_key(derivation, candidate.outputIndex, m_spendPub, derivedKey))
+    if (!crypto::derive_public_key(derivation, outputSigningIndex(candidate), m_spendPub, derivedKey))
       return false;
     return derivedKey == candidate.outputKey;
   }
@@ -824,7 +1423,7 @@ namespace ClientWallet
     if (!crypto::generate_key_derivation(output.txPublicKey, m_viewKey, derivation))
       return ki;
     crypto::SecretKey ephemeralSec;
-    crypto::derive_secret_key(derivation, output.outputIndex, *m_spendKey, ephemeralSec);
+    crypto::derive_secret_key(derivation, outputSigningIndex(output), *m_spendKey, ephemeralSec);
     crypto::PublicKey ephemeralPub;
     if (!crypto::secret_key_to_public_key(ephemeralSec, ephemeralPub))
       return ki;
@@ -845,6 +1444,447 @@ namespace ClientWallet
       }
     }
     candidates = std::move(owned);
+  }
+
+  void SyncEngine::scanBlockTransaction(
+      const cn::Transaction &tx,
+      uint32_t blockHeight,
+      const std::vector<uint32_t> *globalIndexes,
+      std::vector<BoltCore::OutputInfo> &outputs,
+      cn::BlockFilterRecord *filterRecord,
+      bool &haveFilter,
+      size_t &filterIdx,
+      const crypto::Hash *canonicalTxHash)
+  {
+    static const crypto::PublicKey NULL_KEY = {};
+
+    const crypto::PublicKey txPubKey = cn::getTransactionPublicKeyFromExtra(tx.extra);
+    if (txPubKey == NULL_KEY)
+      return;
+
+    const crypto::Hash computedHash = cn::getObjectHash(tx);
+    const crypto::Hash txHash = canonicalTxHash != nullptr ? *canonicalTxHash : computedHash;
+    std::vector<BoltCore::OutputInfo> txOutputs;
+
+    if (BoltCore::NewOutputScanner::hasNewOutputs(tx))
+    {
+      std::vector<uint32_t> indexes;
+      if (globalIndexes)
+        indexes = *globalIndexes;
+
+      std::vector<BoltSync::FoundOutput> found;
+      BoltCore::NewOutputScanner::scanTransaction(
+          tx, txPubKey, indexes, blockHeight,
+          m_viewKey, m_spendPub, m_spendKey, found);
+
+      for (const auto &fo : found)
+      {
+        BoltCore::OutputInfo info;
+        info.blockHeight = fo.blockHeight;
+        info.txHash = fo.txHash;
+        info.outputIndex = fo.outputIndex;
+        info.globalOutputIndex = fo.globalOutputIndex;
+        info.hasGlobalOutputIndex = fo.hasGlobalOutputIndex;
+        info.amount = fo.amount;
+        info.outputKey = fo.outputKey;
+        info.txPublicKey = fo.txPublicKey;
+        info.keyImage = fo.keyImage;
+        info.spent = false;
+        info.isDeposit = fo.isDeposit;
+        info.term = fo.term;
+        info.keyDerivationIndex = fo.keyDerivationIndex;
+        info.hasKeyDerivationIndex = fo.hasKeyDerivationIndex;
+        txOutputs.push_back(std::move(info));
+      }
+      // Do not return — legacy KeyOutput / MultisignatureOutput scanning must still run
+      // (WalletGreen change outputs are KeyOutput; skipping them broke balances after rescan).
+    }
+
+    std::unordered_set<uint32_t> newScannerIndices;
+    for (const auto &out : txOutputs)
+      newScannerIndices.insert(out.outputIndex);
+
+    crypto::KeyDerivation derivation;
+    if (!crypto::generate_key_derivation(txPubKey, m_viewKey, derivation))
+      return;
+
+    size_t keyIndex = 0;
+    for (size_t o = 0; o < tx.outputs.size(); ++o)
+    {
+      const auto &out = tx.outputs[o];
+      if (out.target.type() == typeid(cn::KeyOutput))
+      {
+        if (newScannerIndices.count(static_cast<uint32_t>(o)) > 0)
+        {
+          ++keyIndex;
+          continue;
+        }
+
+        const auto &keyOut = boost::get<cn::KeyOutput>(out.target);
+
+        if (haveFilter && filterRecord)
+        {
+          if (filterIdx >= filterRecord->entries.size())
+          {
+            ++keyIndex;
+            continue;
+          }
+
+          const auto &entry = filterRecord->entries[filterIdx];
+          ++filterIdx;
+
+          const uint8_t walletTag = BoltSync::computeDaemonViewTag(txPubKey, o);
+          if (walletTag != entry.view_tag)
+          {
+            ++keyIndex;
+            continue;
+          }
+        }
+
+        // WalletGreen / TransfersConsumer: KeyOutput derivation uses the output index in the tx
+        // (not a running count of KeyOutputs). A deposit multisig at index 0 must not make
+        // change at index 1 sign with derivation index 0.
+        crypto::PublicKey derivedKey;
+        if (crypto::derive_public_key(derivation, o, m_spendPub, derivedKey) &&
+            derivedKey == keyOut.key)
+        {
+          BoltCore::OutputInfo info;
+          info.blockHeight = blockHeight;
+          info.txHash = txHash;
+          info.amount = out.amount;
+          info.outputIndex = static_cast<uint32_t>(o);
+          info.outputKey = keyOut.key;
+          info.txPublicKey = txPubKey;
+          info.spent = false;
+          info.isDeposit = false;
+          info.term = 0;
+          if (globalIndexes && o < globalIndexes->size())
+          {
+            info.globalOutputIndex = (*globalIndexes)[o];
+            info.hasGlobalOutputIndex = true;
+          }
+          if (m_spendKey)
+          {
+            crypto::SecretKey outSec = BoltSync::deriveOutputSecretKey(derivation, o, *m_spendKey);
+            crypto::generate_key_image(keyOut.key, outSec, info.keyImage);
+          }
+          txOutputs.push_back(std::move(info));
+        }
+        ++keyIndex;
+      }
+      else if (out.target.type() == typeid(cn::MultisignatureOutput))
+      {
+        if (newScannerIndices.count(static_cast<uint32_t>(o)) > 0)
+        {
+          keyIndex += boost::get<cn::MultisignatureOutput>(out.target).keys.size();
+          continue;
+        }
+
+        const auto &msigOut = boost::get<cn::MultisignatureOutput>(out.target);
+
+        for (size_t ki = 0; ki < msigOut.keys.size(); ++ki)
+        {
+          crypto::PublicKey recoveredSpend;
+          if (crypto::underive_public_key(derivation, o, msigOut.keys[ki], recoveredSpend) &&
+              recoveredSpend == m_spendPub)
+          {
+            BoltCore::OutputInfo info;
+            info.blockHeight = blockHeight;
+            info.txHash = txHash;
+            info.amount = out.amount;
+            info.outputIndex = static_cast<uint32_t>(o);
+            info.outputKey = msigOut.keys[ki];
+            info.txPublicKey = txPubKey;
+            info.spent = false;
+            info.isDeposit = (msigOut.term > 0);
+            info.term = msigOut.term;
+            if (globalIndexes && o < globalIndexes->size())
+            {
+              info.globalOutputIndex = (*globalIndexes)[o];
+              info.hasGlobalOutputIndex = true;
+            }
+            txOutputs.push_back(std::move(info));
+            break;
+          }
+        }
+        keyIndex += msigOut.keys.size();
+      }
+    }
+
+    dedupeOutputsByRef(txOutputs);
+    dedupeOutputsByKey(txOutputs);
+    dedupeOutputsPhysically(txOutputs);
+    for (auto &out : txOutputs)
+      out.txHash = txHash;
+    outputs.insert(outputs.end(), txOutputs.begin(), txOutputs.end());
+  }
+
+  std::vector<BoltCore::OutputInfo> SyncEngine::scanTransactionOutputs(
+      const cn::Transaction &tx,
+      const crypto::Hash &txHash,
+      uint32_t blockHeight)
+  {
+    std::vector<BoltCore::OutputInfo> outputs;
+    bool haveFilter = false;
+    size_t filterIdx = 0;
+    scanBlockTransaction(tx, blockHeight, nullptr, outputs, nullptr, haveFilter, filterIdx, &txHash);
+    for (auto &out : outputs)
+      out.txHash = txHash;
+    return outputs;
+  }
+
+  bool SyncEngine::tryResolveIncomingTx(const crypto::Hash &txHash,
+                                        std::vector<BoltCore::OutputInfo> &outputs,
+                                        uint64_t &totalAmount,
+                                        bool &confirmed)
+  {
+    outputs.clear();
+    totalAmount = 0;
+    confirmed = false;
+
+    if (!m_node)
+      return false;
+
+    cn::Transaction tx;
+    uint32_t blockHeight = 0;
+    auto *nc = dynamic_cast<NodeClient::NodeClient *>(m_node);
+
+    if (nc)
+    {
+      bool inBlock = false;
+      if (nc->fetchTransactionDetails(txHash, tx, blockHeight, inBlock))
+      {
+        confirmed = inBlock;
+        outputs = scanTransactionOutputs(tx, txHash, inBlock ? blockHeight : 0);
+      }
+    }
+
+    if (outputs.empty() && m_node->getTransactionSync(txHash, tx))
+    {
+      confirmed = false;
+      outputs = scanTransactionOutputs(tx, txHash, 0);
+    }
+
+    if (outputs.empty())
+      return false;
+
+    // WalletGreen: unconfirmed transfers have no global index; set on block confirm.
+    if (confirmed && blockHeight > 0)
+    {
+      std::vector<uint32_t> globalIndices;
+      if (fetchGlobalIndicesForConfirmedTx(m_node, nc, txHash, blockHeight, globalIndices))
+        applyGlobalIndicesToOutputs(outputs, globalIndices);
+    }
+
+    for (auto &out : outputs)
+    {
+      out.txHash = txHash;
+      totalAmount += out.amount;
+    }
+    return true;
+  }
+
+  std::vector<BoltCore::OutputInfo> SyncEngine::scanDaemonGapBlocks()
+  {
+    std::vector<BoltCore::OutputInfo> found;
+    auto *nc = dynamic_cast<NodeClient::NodeClient *>(m_node);
+    if (!nc)
+      return found;
+
+    const uint32_t mdbxTop = peekMdbxTopHeight();
+    const uint32_t daemonHeight = m_daemonHeight.load();
+    const uint32_t daemonTip = daemonHeight > 0 ? daemonHeight - 1 : 0;
+    const uint32_t walletHeight = m_scannedHeight.load();
+
+    // Wallet state may already cover most of the chain; only fetch blocks after wallet tip.
+    if (walletHeight >= daemonTip)
+      return found;
+
+    if (daemonTip <= mdbxTop)
+      return found;
+
+    uint32_t firstHeight = std::max(mdbxTop + 1u, walletHeight + 1u);
+    if (m_lastDaemonGapScanHeight + 1u > firstHeight)
+      firstHeight = m_lastDaemonGapScanHeight + 1u;
+    const uint32_t lastHeight = daemonTip;
+    if (firstHeight > lastHeight)
+      return found;
+
+    syncLog("scanDaemonGapBlocks: heights " + std::to_string(firstHeight) +
+            ".." + std::to_string(lastHeight) +
+            " (wallet=" + std::to_string(walletHeight) + ", mdbx=" + std::to_string(mdbxTop) + ")");
+
+    for (uint32_t h = firstHeight; h <= lastHeight && h <= firstHeight + 4; ++h)
+    {
+      if (m_stop)
+        break;
+      std::vector<cn::Transaction> txs;
+      std::vector<crypto::Hash> hashes;
+      std::vector<std::vector<uint32_t>> globalIndexes;
+      if (!nc->getTransactionsAtHeight(h, txs, hashes, &globalIndexes))
+        continue;
+
+      for (size_t i = 0; i < txs.size(); ++i)
+      {
+        const std::vector<uint32_t> *indexes = i < globalIndexes.size() ? &globalIndexes[i] : nullptr;
+        bool haveFilter = false;
+        size_t filterIdx = 0;
+        const size_t before = found.size();
+        scanBlockTransaction(txs[i], h, indexes, found, nullptr, haveFilter, filterIdx, &hashes[i]);
+        for (size_t o = before; o < found.size(); ++o)
+        {
+          if (indexes && found[o].outputIndex < indexes->size())
+          {
+            found[o].globalOutputIndex = (*indexes)[found[o].outputIndex];
+            found[o].hasGlobalOutputIndex = true;
+          }
+        }
+      }
+
+      m_lastDaemonGapScanHeight = h;
+    }
+
+    if (!found.empty())
+      syncLog("scanDaemonGapBlocks: found " + std::to_string(found.size()) + " outputs");
+
+    return found;
+  }
+
+  SyncEngine::MempoolUpdate SyncEngine::pollMempool()
+  {
+    MempoolUpdate update;
+    if (m_stop || !m_node)
+      return update;
+
+    const std::vector<crypto::Hash> poolIds = m_node->getPoolTransactions();
+    std::vector<crypto::Hash> previous;
+    {
+      std::lock_guard<std::mutex> lock(m_poolMutex);
+      previous = m_knownPoolTxIds;
+    }
+
+    auto isKnown = [&previous](const crypto::Hash &hash)
+    {
+      for (const auto &known : previous)
+      {
+        if (known == hash)
+          return true;
+      }
+      return false;
+    };
+
+    auto isInPool = [&poolIds](const crypto::Hash &hash)
+    {
+      for (const auto &id : poolIds)
+      {
+        if (id == hash)
+          return true;
+      }
+      return false;
+    };
+
+    std::vector<crypto::Hash> nextKnown;
+    nextKnown.reserve(poolIds.size());
+    std::unordered_set<crypto::Hash, boost::hash<crypto::Hash>> confirmedViaPool;
+
+    for (const auto &hash : poolIds)
+    {
+      if (m_stop)
+        break;
+      if (isKnown(hash))
+      {
+        nextKnown.push_back(hash);
+        continue;
+      }
+
+      std::vector<BoltCore::OutputInfo> outputs;
+      uint64_t total = 0;
+      bool confirmed = false;
+      if (!tryResolveIncomingTx(hash, outputs, total, confirmed))
+      {
+        cn::Transaction tx;
+        if (m_node->getTransactionSync(hash, tx))
+          nextKnown.push_back(hash);
+        continue;
+      }
+
+      nextKnown.push_back(hash);
+      if (confirmed)
+      {
+        confirmedViaPool.insert(hash);
+        for (auto &out : outputs)
+          update.confirmedOutputs.push_back(std::move(out));
+      }
+      else
+      {
+        IncomingMempoolTx incoming;
+        incoming.txHash = hash;
+        incoming.totalAmount = total;
+        incoming.outputs = std::move(outputs);
+        for (auto &out : incoming.outputs)
+          out.blockHeight = 0;
+        update.newIncoming.push_back(std::move(incoming));
+      }
+    }
+
+    for (const auto &hash : previous)
+    {
+      if (isInPool(hash))
+        continue;
+
+      update.removedFromPool.push_back(hash);
+
+      std::vector<BoltCore::OutputInfo> outputs;
+      uint64_t total = 0;
+      bool confirmed = false;
+      if (!tryResolveIncomingTx(hash, outputs, total, confirmed))
+        continue;
+
+      if (confirmed)
+      {
+        confirmedViaPool.insert(hash);
+        for (auto &out : outputs)
+          update.confirmedOutputs.push_back(std::move(out));
+      }
+      else if (total > 0)
+      {
+        IncomingMempoolTx incoming;
+        incoming.txHash = hash;
+        incoming.totalAmount = total;
+        incoming.outputs = std::move(outputs);
+        for (auto &out : incoming.outputs)
+          out.blockHeight = 0;
+        update.newIncoming.push_back(std::move(incoming));
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(m_poolMutex);
+      m_knownPoolTxIds = std::move(nextKnown);
+    }
+
+    const auto gapOutputs = scanDaemonGapBlocks();
+    for (const auto &out : gapOutputs)
+    {
+      if (confirmedViaPool.count(out.txHash))
+        continue;
+      mergeCachedOutput(out);
+      update.confirmedOutputs.push_back(out);
+    }
+    dedupeOutputsByRef(update.confirmedOutputs);
+    dedupeOutputsByKey(update.confirmedOutputs);
+    dedupeOutputsPhysically(update.confirmedOutputs);
+
+    if (!poolIds.empty() || !update.newIncoming.empty() || !update.removedFromPool.empty() ||
+        !update.confirmedOutputs.empty())
+    {
+      syncLog("pollMempool: pool=" + std::to_string(poolIds.size()) + ", " +
+              std::to_string(update.newIncoming.size()) + " new, " +
+              std::to_string(update.removedFromPool.size()) + " removed, " +
+              std::to_string(update.confirmedOutputs.size()) + " confirmed");
+    }
+
+    return update;
   }
 
 } // namespace ClientWallet

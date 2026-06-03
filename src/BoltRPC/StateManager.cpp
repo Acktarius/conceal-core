@@ -14,7 +14,7 @@ namespace BoltRPC
   {
 
     constexpr uint32_t STATE_FILE_MAGIC = 0x43435354; // "CCST" = Conceal State
-    constexpr uint32_t STATE_FILE_VERSION = 1;
+    constexpr uint32_t STATE_FILE_VERSION = 2;
 
     // ── Binary serialization helpers (no external dependency) ──────────────
 
@@ -58,6 +58,8 @@ namespace BoltRPC
       file.write(reinterpret_cast<const char *>(&out.txHash), sizeof(out.txHash));
       writePod(file, out.amount);
       writePod(file, out.outputIndex);
+      writePod(file, out.globalOutputIndex);
+      writePod(file, static_cast<uint8_t>(out.hasGlobalOutputIndex ? 1 : 0));
       file.write(reinterpret_cast<const char *>(&out.outputKey), sizeof(out.outputKey));
       file.write(reinterpret_cast<const char *>(&out.txPublicKey), sizeof(out.txPublicKey));
       writePod(file, static_cast<uint8_t>(out.spent ? 1 : 0));
@@ -76,6 +78,12 @@ namespace BoltRPC
         return false;
       if (!readPod(file, out.outputIndex))
         return false;
+      if (!readPod(file, out.globalOutputIndex))
+        return false;
+      uint8_t hasGlobal = 0;
+      if (!readPod(file, hasGlobal))
+        return false;
+      out.hasGlobalOutputIndex = (hasGlobal != 0);
       file.read(reinterpret_cast<char *>(&out.outputKey), sizeof(out.outputKey));
       if (!file.good())
         return false;
@@ -175,7 +183,12 @@ namespace BoltRPC
   // ─── Constructor / Destructor ──────────────────────────────────────────────
 
   StateManager::StateManager(const std::string &dataDir)
-      : m_dataDir(dataDir)
+      : m_filePath(dataDir + "/wallet_state.bin")
+  {
+  }
+
+  StateManager::StateManager(const std::string &filePath, bool pathIsFullFile)
+      : m_filePath(pathIsFullFile ? filePath : filePath + "/wallet_state.bin")
   {
   }
 
@@ -187,7 +200,7 @@ namespace BoltRPC
 
   std::string StateManager::filePath() const
   {
-    return m_dataDir + "/wallet_state.bin";
+    return m_filePath;
   }
 
   bool StateManager::exists() const

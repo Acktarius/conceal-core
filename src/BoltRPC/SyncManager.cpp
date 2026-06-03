@@ -859,6 +859,8 @@ namespace BoltRPC
               info.txHash = fo.txHash;
               info.amount = fo.amount;
               info.outputIndex = fo.outputIndex;
+              info.globalOutputIndex = fo.globalOutputIndex;
+              info.hasGlobalOutputIndex = fo.hasGlobalOutputIndex;
               info.outputKey = fo.outputKey;
               info.txPublicKey = fo.txPublicKey;
               info.spent = false;
@@ -896,6 +898,8 @@ namespace BoltRPC
               info.txHash = fo.txHash;
               info.amount = fo.amount;
               info.outputIndex = fo.outputIndex;
+              info.globalOutputIndex = fo.globalOutputIndex;
+              info.hasGlobalOutputIndex = fo.hasGlobalOutputIndex;
               info.outputKey = fo.outputKey;
               info.txPublicKey = fo.txPublicKey;
               info.spent = false;

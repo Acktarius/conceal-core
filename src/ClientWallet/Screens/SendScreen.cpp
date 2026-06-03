@@ -5,6 +5,7 @@
 #include "SendScreen.h"
 #include "BoltCore/BoltCore.h"
 #include "BoltCore/BoltCoreTypes.h"
+#include "CryptoNoteConfig.h"
 #include <iomanip>
 #include <sstream>
 
@@ -46,7 +47,7 @@ namespace ClientWallet
       break; // Ignore input while sending
     case State::Sent:
     case State::Error:
-      if (key == 13 || key == ' ')
+      if (key == 13 || key == 10 || key == ' ')
       {            // Enter or Space to go back
         onEnter(); // Reset form
       }
@@ -56,7 +57,7 @@ namespace ClientWallet
 
   void SendScreen::handleAddressInput(int key)
   {
-    if (key == 13)
+    if (key == 13 || key == 10)
     { // Enter
       if (m_address.empty())
       {
@@ -96,7 +97,7 @@ namespace ClientWallet
 
   void SendScreen::handleAmountInput(int key)
   {
-    if (key == 13)
+    if (key == 13 || key == 10)
     { // Enter
       try
       {
@@ -109,9 +110,10 @@ namespace ClientWallet
         else
         {
           auto balance = m_wallet->getBalance();
-          if (m_amount > BoltCore::spendableAmount(balance))
+          const uint64_t fee = cn::parameters::MINIMUM_FEE_V2;
+          if (m_amount + fee > BoltCore::spendableAmountBeforeFee(balance))
           {
-            m_error = "Insufficient balance";
+            m_error = "Insufficient balance (need amount + 0.001 CCX fee)";
           }
           else
           {
@@ -149,7 +151,7 @@ namespace ClientWallet
 
   void SendScreen::handleConfirm(int key)
   {
-    if (key == 'y' || key == 'Y' || key == 13)
+    if (key == 'y' || key == 'Y' || key == 13 || key == 10)
     {
       doSend();
     }
@@ -161,22 +163,37 @@ namespace ClientWallet
 
   void SendScreen::doSend()
   {
-    m_state = State::Sending;
-
-    // Call wallet transfer
-    auto result = m_wallet->transfer(m_address, m_amount);
-
-    if (result.success)
-    {
-      m_state = State::Sent;
-      m_txHash = result.txHash;
-      m_fee = result.fee;
-    }
-    else
+    if (!m_submitWalletTask)
     {
       m_state = State::Error;
-      m_error = result.error.empty() ? "Transaction failed" : result.error;
+      m_error = "Internal error: wallet task runner not available";
+      return;
     }
+
+    m_state = State::Sending;
+    m_error.clear();
+
+    const std::string address = m_address;
+    const uint64_t amount = m_amount;
+    auto wallet = m_wallet;
+
+    m_submitWalletTask(
+        [wallet, address, amount]()
+        { return wallet->transfer(address, amount); },
+        [this](BoltCore::TransferResult result)
+        {
+          if (result.success)
+          {
+            m_state = State::Sent;
+            m_txHash = result.txHash;
+            m_fee = result.fee;
+          }
+          else
+          {
+            m_state = State::Error;
+            m_error = result.error.empty() ? "Transaction failed" : result.error;
+          }
+        });
   }
 
   std::string formatAmount(uint64_t amount);
@@ -193,7 +210,7 @@ namespace ClientWallet
     }
 
     auto balance = m_wallet->getBalance();
-    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmount(balance), "");
+    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmountBeforeFee(balance), "");
 
     int termW = Tui::terminalWidth();
     int boxW = std::min(70, termW - 4);
@@ -211,19 +228,25 @@ namespace ClientWallet
     }
     case State::EnterAmount:
     {
-      buf.write(Tui::drawBox(boxTop, 2, 8, boxW, "Enter Amount"));
+      buf.write(Tui::drawBox(boxTop, 2, 9, boxW, "Enter Amount"));
       buf.writeAt(boxTop + 1, 4, Tui::dim() + "To: " + Tui::reset() + m_address.substr(0, 60));
       buf.writeAt(boxTop + 3, 4, Tui::dim() + "Amount (CCX):" + Tui::reset());
       buf.writeAt(boxTop + 4, 4, Tui::brightWhite() + "> " + m_amountStr + (m_amountStr.empty() ? Tui::dim() + "0.0" + Tui::reset() : "") + Tui::reset());
+      buf.writeAt(boxTop + 6, 4, Tui::dim() + "Network fee: " + Tui::reset() +
+                                    formatAmount(cn::parameters::MINIMUM_FEE_V2) + " CCX");
       break;
     }
     case State::Confirm:
     {
-      buf.write(Tui::drawBox(boxTop, 2, 10, boxW, "Confirm Transaction"));
+      const uint64_t fee = cn::parameters::MINIMUM_FEE_V2;
+      const uint64_t spendable = BoltCore::spendableAmountBeforeFee(balance);
+      buf.write(Tui::drawBox(boxTop, 2, 12, boxW, "Confirm Transaction"));
       buf.writeAt(boxTop + 1, 4, Tui::dim() + "To:     " + Tui::reset() + m_address.substr(0, 55));
       buf.writeAt(boxTop + 2, 4, Tui::dim() + "Amount: " + Tui::reset() + Tui::brightGreen() + m_amountStr + " CCX" + Tui::reset());
-      buf.writeAt(boxTop + 4, 4, Tui::dim() + "Available: " + Tui::reset() + formatAmount(BoltCore::spendableAmount(balance)) + " CCX");
-      buf.writeAt(boxTop + 6, 4, Tui::brightYellow() + "Send this transaction? [Y/N]" + Tui::reset());
+      buf.writeAt(boxTop + 3, 4, Tui::dim() + "Fee:    " + Tui::reset() + formatAmount(fee) + " CCX");
+      buf.writeAt(boxTop + 4, 4, Tui::dim() + "Total:  " + Tui::reset() + Tui::bold() + formatAmount(m_amount + fee) + " CCX" + Tui::reset());
+      buf.writeAt(boxTop + 6, 4, Tui::dim() + "Available: " + Tui::reset() + formatAmount(spendable) + " CCX");
+      buf.writeAt(boxTop + 8, 4, Tui::brightYellow() + "Send this transaction? [Y/N]" + Tui::reset());
       break;
     }
     case State::Sending:

@@ -39,6 +39,10 @@ namespace Tui
   inline std::string brightCyan() { return "\033[96m"; }
   inline std::string brightWhite() { return "\033[97m"; }
 
+  // Brand accents (256-color; terminals without 256-color may fall back gracefully)
+  inline std::string orange() { return "\033[38;5;208m"; }
+  inline std::string accentGreen() { return "\033[38;5;82m"; }
+
   // Background colors
   inline std::string bgBlack() { return "\033[40m"; }
   inline std::string bgRed() { return "\033[41m"; }
@@ -296,5 +300,8 @@ namespace Tui
   void disableRawMode();
   bool keyAvailable();
   int readKey();
+
+  // Runs work on a background thread while animating message + spinner (alt screen).
+  void runWithStatusSpinner(const std::string &message, const std::function<void()> &work);
 
 } // namespace Tui

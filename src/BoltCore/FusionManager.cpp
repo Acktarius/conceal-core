@@ -150,7 +150,7 @@ namespace BoltCore
     // Add fusion outputs
     std::vector<uint64_t> outputAmounts;
     cn::decompose_amount_into_digits(
-        totalAmount - m_currency.minimumFee(), 0,
+        totalAmount - m_currency.minimumFeeV2(), 0,
         [&outputAmounts](uint64_t chunk)
         { outputAmounts.push_back(chunk); },
         [&outputAmounts](uint64_t dust)

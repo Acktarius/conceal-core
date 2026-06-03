@@ -36,6 +36,8 @@ namespace BoltRPC
     crypto::Hash txHash;
     uint64_t amount;
     uint32_t outputIndex;
+    uint32_t globalOutputIndex = 0;
+    bool hasGlobalOutputIndex = false;
     crypto::PublicKey outputKey;
     crypto::PublicKey txPublicKey;
     bool spent;

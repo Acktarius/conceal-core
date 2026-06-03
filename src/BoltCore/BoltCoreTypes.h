@@ -18,6 +18,11 @@ namespace BoltCore
     crypto::Hash txHash;
     uint32_t outputIndex;
     uint32_t globalOutputIndex;
+    bool hasGlobalOutputIndex = false;
+    // Derivation index for generate_key_image_helper (StandardPaymentOutput key_index).
+    // When unset, legacy KeyOutput uses outputIndex.
+    uint32_t keyDerivationIndex = 0;
+    bool hasKeyDerivationIndex = false;
     uint64_t amount;
     crypto::PublicKey outputKey;
     crypto::PublicKey txPublicKey;
@@ -50,12 +55,14 @@ namespace BoltCore
     uint64_t pending;
     uint64_t lockedDeposit;
     uint64_t unlockedDeposit;
-    uint64_t accruedInterest; // Interest earned on deposits not yet withdrawn
+    uint64_t accruedInterest; // Unused; use Wallet::getAccruedInterest() for display
     uint64_t dust;            // Un-mixable outputs below the dust threshold
     uint32_t currentHeight;   // Current blockchain height for this balance
   };
 
-  inline uint64_t spendableAmount(const Balance &balance)
+  // Key outputs available before deducting a tx fee (actual minus dust).
+  // Callers subtract the fee for their operation (send/deposit: MINIMUM_FEE_V2, withdraw: MINIMUM_FEE, …).
+  inline uint64_t spendableAmountBeforeFee(const Balance &balance)
   {
     return balance.actual > balance.dust ? balance.actual - balance.dust : 0;
   }
@@ -66,6 +73,7 @@ namespace BoltCore
     uint64_t amount;
     uint64_t interest;
     uint32_t term;
+    uint32_t outputIndex;
     uint32_t unlockHeight;
     bool locked;
     std::string creatingTxHash;

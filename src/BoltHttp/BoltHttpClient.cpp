@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <chrono>
@@ -29,7 +30,7 @@ namespace BoltHttp
     }
   }
 
-  bool HttpClient::connect()
+  bool HttpClient::connect(int timeoutMs)
   {
     m_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (m_socket < 0)
@@ -48,13 +49,14 @@ namespace BoltHttp
       return false;
     }
 
-    // Wait for connection with 5-second timeout
-    if (result < 0) // EINPROGRESS
+    if (result < 0)
     {
       fd_set fdset;
       FD_ZERO(&fdset);
       FD_SET(m_socket, &fdset);
-      struct timeval tv = {5, 0}; // 5 second timeout
+      const int sec = std::max(1, timeoutMs / 1000);
+      const int usec = (timeoutMs % 1000) * 1000;
+      struct timeval tv = {sec, usec};
 
       result = select(m_socket + 1, nullptr, &fdset, nullptr, &tv);
       if (result <= 0)
@@ -64,7 +66,6 @@ namespace BoltHttp
         return false;
       }
 
-      // Check if connection succeeded
       int error = 0;
       socklen_t len = sizeof(error);
       getsockopt(m_socket, SOL_SOCKET, SO_ERROR, &error, &len);
@@ -76,31 +77,31 @@ namespace BoltHttp
       }
     }
 
-    // Set back to blocking for recv/send
     int flags = fcntl(m_socket, F_GETFL, 0);
     fcntl(m_socket, F_SETFL, flags & ~O_NONBLOCK);
 
     return true;
   }
 
-  HttpClientResponse HttpClient::post(const std::string &path, const std::string &body)
+  HttpClientResponse HttpClient::post(const std::string &path, const std::string &body,
+                                      const char *contentType,
+                                      int connectTimeoutMs, int recvTimeoutMs)
   {
     HttpClientResponse resp;
 
-    if (!connect())
+    if (!connect(connectTimeoutMs))
     {
       resp.error = "Failed to connect to " + m_host + ":" + std::to_string(m_port);
       return resp;
     }
 
-    // Set receive timeout
-    struct timeval tv = {10, 0}; // 10 second recv timeout
+    struct timeval tv = {std::max(1, recvTimeoutMs / 1000), (recvTimeoutMs % 1000) * 1000};
     setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::ostringstream request;
     request << "POST " << path << " HTTP/1.1\r\n"
             << "Host: " << m_host << "\r\n"
-            << "Content-Type: application/json\r\n"
+            << "Content-Type: " << contentType << "\r\n"
             << "Content-Length: " << body.size() << "\r\n"
             << "Connection: close\r\n"
             << "\r\n"
@@ -150,17 +151,18 @@ namespace BoltHttp
     return resp;
   }
 
-  HttpClientResponse HttpClient::get(const std::string &path)
+  HttpClientResponse HttpClient::get(const std::string &path,
+                                      int connectTimeoutMs, int recvTimeoutMs)
   {
     HttpClientResponse resp;
 
-    if (!connect())
+    if (!connect(connectTimeoutMs))
     {
       resp.error = "Failed to connect to " + m_host + ":" + std::to_string(m_port);
       return resp;
     }
 
-    struct timeval tv = {10, 0}; // 10 second recv timeout
+    struct timeval tv = {std::max(1, recvTimeoutMs / 1000), (recvTimeoutMs % 1000) * 1000};
     setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::ostringstream request;

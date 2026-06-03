@@ -150,6 +150,8 @@ add_executable(Sidechain ${SIDECHAIN_FILES})
 add_executable(ClientWallet ${CLIENT_WALLET_FILES})
 set_property(TARGET ClientWallet PROPERTY OUTPUT_NAME "conceal-wallet")
 add_dependencies(ClientWallet version)
+target_sources(ClientWallet PRIVATE ${CMAKE_SOURCE_DIR}/external/qrcodegen/qrcodegen.cpp)
+target_include_directories(ClientWallet PRIVATE ${CMAKE_SOURCE_DIR}/external/qrcodegen)
 
 if (MSVC)
   target_link_libraries(System ws2_32)

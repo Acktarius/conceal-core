@@ -3,6 +3,12 @@
 
 #include "Tui.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <exception>
+#include <thread>
+
 #if defined(_WIN32)
 #include <conio.h>
 #else
@@ -140,5 +146,45 @@ namespace Tui
   }
 
 #endif
+
+  void runWithStatusSpinner(const std::string &message, const std::function<void()> &work)
+  {
+    std::atomic<bool> done{false};
+    std::exception_ptr error;
+    std::thread worker([&]()
+                       {
+      try
+      {
+        work();
+      }
+      catch (...)
+      {
+        error = std::current_exception();
+      }
+      done = true; });
+
+    static const char frames[] = {'|', '/', '-', '\\'};
+    size_t frame = 0;
+    const std::string line = std::string(1, frames[0]) + " " + message;
+
+    while (!done.load())
+    {
+      const int height = terminalHeight();
+      const int width = terminalWidth();
+      const int row = std::max(1, height / 2);
+      const int col = std::max(1, (width - static_cast<int>(line.size())) / 2);
+      const char spinner = frames[frame % (sizeof(frames) / sizeof(frames[0]))];
+      ++frame;
+
+      std::cout << clearScreen() << hideCursor() << cursorTo(row, col)
+                << dim() << spinner << reset() << " " << message << std::flush;
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    }
+
+    worker.join();
+    if (error)
+      std::rethrow_exception(error);
+  }
 
 } // namespace Tui

@@ -6,6 +6,8 @@
 #include "BoltCore/BoltCore.h"
 #include "BoltCore/BoltCoreTypes.h"
 #include "CryptoNoteCore/Currency.h"
+#include "CryptoNoteConfig.h"
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 
@@ -57,6 +59,9 @@ namespace ClientWallet
       return;
     } // Left
 
+    if (m_state == State::Creating || m_state == State::Withdrawing)
+      return;
+
     if (key == 27)
     {
       if (m_onAction)
@@ -77,9 +82,8 @@ namespace ClientWallet
     if (m_state == State::Creating)
       return;
 
-    if (m_amountStr.empty() && m_state == State::Idle)
+    if (m_state == State::Idle)
     {
-      // Selecting month
       switch (key)
       {
       case 1000:
@@ -92,14 +96,14 @@ namespace ClientWallet
         break;
       case 10:
       case 13:
-        m_amountStr = "";
-        m_state = State::Idle; // ready for amount
+        m_amountStr.clear();
+        m_state = State::EnterAmount;
+        m_error.clear();
         break;
       }
       return;
     }
 
-    // Entering amount or confirming
     if (m_state == State::ConfirmCreate)
     {
       if (key == 'y' || key == 'Y' || key == 13 || key == 10)
@@ -108,6 +112,9 @@ namespace ClientWallet
         onEnter();
       return;
     }
+
+    if (m_state != State::EnterAmount)
+      return;
 
     // Amount entry
     if (key == 13 || key == 10)
@@ -118,8 +125,9 @@ namespace ClientWallet
         m_amount = static_cast<uint64_t>(amt * 1000000.0);
         if (m_amount < m_currency.depositMinAmount())
           m_error = "Min: " + m_currency.formatAmount(m_currency.depositMinAmount()) + " CCX";
-        else if (m_amount > BoltCore::spendableAmount(m_wallet->getBalance()))
-          m_error = "Insufficient balance";
+        else if (m_amount + m_currency.minimumFeeV2() >
+                 BoltCore::spendableAmountBeforeFee(m_wallet->getBalance()))
+          m_error = "Insufficient balance (need amount + 0.001 CCX fee)";
         else
         {
           m_state = State::ConfirmCreate;
@@ -144,27 +152,47 @@ namespace ClientWallet
 
   void DepositScreen::doCreateDeposit()
   {
-    m_state = State::Creating;
-    uint32_t termBlocks = (m_selectedMonth + 1) * m_currency.depositMinTermV3();
-    auto result = m_wallet->createDeposit(m_amount, termBlocks);
-    if (result.success)
-    {
-      m_state = State::Done;
-      m_txHash = result.txHash;
-    }
-    else
+    if (!m_submitWalletTask)
     {
       m_state = State::Error;
-      m_error = result.error.empty() ? "Failed" : result.error;
+      m_error = "Internal error: wallet task runner not available";
+      return;
     }
+
+    m_state = State::Creating;
+    m_error.clear();
+    m_taskStarted = std::chrono::steady_clock::now();
+
+    const uint64_t amount = m_amount;
+    const uint32_t termBlocks =
+        static_cast<uint32_t>(m_selectedMonth + 1) * cn::parameters::DEPOSIT_MIN_TERM_V3;
+    auto wallet = m_wallet;
+
+    m_submitWalletTask(
+        [wallet, amount, termBlocks]()
+        { return wallet->createDeposit(amount, termBlocks); },
+        [this](BoltCore::TransferResult result)
+        {
+          if (result.success)
+          {
+            m_state = State::Done;
+            m_txHash = result.txHash;
+          }
+          else
+          {
+            m_state = State::Error;
+            m_error = result.error.empty() ? "Failed" : result.error;
+          }
+        });
   }
 
   uint64_t DepositScreen::estimateInterest() const
   {
     if (m_amount == 0)
       return 0;
-    uint32_t termBlocks = (m_selectedMonth + 1) * m_currency.depositMinTermV3();
-    return m_currency.calculateInterest(m_amount, termBlocks, 0);
+    uint32_t termBlocks =
+        static_cast<uint32_t>(m_selectedMonth + 1) * cn::parameters::DEPOSIT_MIN_TERM_V3;
+    return m_currency.calculateInterest(m_amount, termBlocks, m_wallet->getCurrentHeight());
   }
 
   // ── Withdraw tab ────────────────────────────────────────────────────────
@@ -218,18 +246,36 @@ namespace ClientWallet
 
   void DepositScreen::doWithdrawDeposit()
   {
-    m_state = State::Withdrawing;
-    auto result = m_wallet->withdrawDeposit(m_selectedDepositId);
-    if (result.success)
-    {
-      m_state = State::Done;
-      m_txHash = result.txHash;
-    }
-    else
+    if (!m_submitWalletTask)
     {
       m_state = State::Error;
-      m_error = result.error.empty() ? "Failed" : result.error;
+      m_error = "Internal error: wallet task runner not available";
+      return;
     }
+
+    m_state = State::Withdrawing;
+    m_error.clear();
+    m_taskStarted = std::chrono::steady_clock::now();
+
+    const uint64_t depositId = m_selectedDepositId;
+    auto wallet = m_wallet;
+
+    m_submitWalletTask(
+        [wallet, depositId]()
+        { return wallet->withdrawDeposit(depositId); },
+        [this](BoltCore::TransferResult result)
+        {
+          if (result.success)
+          {
+            m_state = State::Done;
+            m_txHash = result.txHash;
+          }
+          else
+          {
+            m_state = State::Error;
+            m_error = result.error.empty() ? "Failed" : result.error;
+          }
+        });
   }
 
   // ── Render ──────────────────────────────────────────────────────────────
@@ -248,7 +294,7 @@ namespace ClientWallet
     }
 
     auto balance = m_wallet->getBalance();
-    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmount(balance), "");
+    drawHeader(buf, title(), balance.currentHeight, BoltCore::spendableAmountBeforeFee(balance), "");
 
     int termW = Tui::terminalWidth();
     int boxW = std::min(70, termW - 4);
@@ -281,8 +327,17 @@ namespace ClientWallet
     }
     if (m_state == State::Creating || m_state == State::Withdrawing)
     {
-      buf.write(Tui::drawBox(boxTop, 2, 5, boxW, "Processing"));
-      buf.writeAt(boxTop + 2, 4, Tui::brightYellow() + "Creating transaction..." + Tui::reset());
+      buf.write(Tui::drawBox(boxTop, 2, 8, boxW, "Processing"));
+      const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - m_taskStarted);
+      const char *verb = m_state == State::Creating ? "Creating deposit" : "Withdrawing deposit";
+      buf.writeAt(boxTop + 2, 4, Tui::brightYellow() + std::string(verb) + "... " +
+                                    std::to_string(elapsed.count()) + "s" + Tui::reset());
+      buf.writeAt(boxTop + 3, 4, Tui::dim() +
+                                    "Contacting daemon for mixin + relay (port 16000, up to ~2 min)" +
+                                    Tui::reset());
+      buf.writeAt(boxTop + 4, 4, Tui::dim() + "Esc to go back (transaction continues in background)" +
+                                    Tui::reset());
       drawMenuBar(buf, {"Back"}, {"Esc"});
       return;
     }
@@ -290,7 +345,7 @@ namespace ClientWallet
     // ── Create tab ───────────────────────────────────────────────────
     if (m_tab == Tab::Create)
     {
-      buf.write(Tui::drawBox(boxTop, 2, 15, boxW, "Create New Deposit"));
+      buf.write(Tui::drawBox(boxTop, 2, 20, boxW, "Create New Deposit"));
 
       // Month selector
       for (int i = 0; i < 12; ++i)
@@ -305,20 +360,30 @@ namespace ClientWallet
 
       // Amount entry
       int amtRow = boxTop + 14;
-      if (!m_amountStr.empty() || m_state == State::ConfirmCreate)
+      if (m_state == State::EnterAmount || !m_amountStr.empty() || m_state == State::ConfirmCreate)
       {
-        buf.writeAt(amtRow, 4, Tui::dim() + "Amount: " + Tui::reset() + Tui::brightWhite() + m_amountStr + " CCX" + Tui::reset());
+        buf.writeAt(amtRow, 4, Tui::dim() + "Amount: " + Tui::reset() + Tui::brightWhite() + m_amountStr +
+                                    (m_state == State::EnterAmount ? "_" : "") + " CCX" + Tui::reset());
         if (m_state == State::ConfirmCreate)
         {
+          const uint32_t termBlocks =
+              static_cast<uint32_t>(m_selectedMonth + 1) * cn::parameters::DEPOSIT_MIN_TERM_V3;
           uint64_t interest = estimateInterest();
-          buf.writeAt(amtRow + 1, 4, Tui::dim() + "Interest: " + Tui::reset() + Tui::cyan() + formatAmount(interest) + " CCX" + Tui::reset());
-          buf.writeAt(amtRow + 2, 4, Tui::dim() + "Total return: " + Tui::reset() + Tui::brightGreen() + formatAmount(m_amount + interest) + " CCX" + Tui::reset());
-          buf.writeAt(amtRow + 3, 4, Tui::brightYellow() + "Confirm? [Y/N]" + Tui::reset());
+          buf.writeAt(amtRow + 1, 4, Tui::dim() + "Term: " + Tui::reset() +
+                                          std::to_string(m_selectedMonth + 1) + " month(s) (" +
+                                          std::to_string(termBlocks) + " blocks)" + Tui::reset());
+          buf.writeAt(amtRow + 2, 4, Tui::dim() + "Fee: " + Tui::reset() +
+                                          formatAmount(m_currency.minimumFeeV2()) + " CCX" + Tui::reset());
+          buf.writeAt(amtRow + 3, 4, Tui::dim() + "Interest: " + Tui::reset() + Tui::cyan() +
+                                          formatAmount(interest) + " CCX" + Tui::reset());
+          buf.writeAt(amtRow + 4, 4, Tui::dim() + "Total return: " + Tui::reset() + Tui::brightGreen() +
+                                          formatAmount(m_amount + interest) + " CCX" + Tui::reset());
+          buf.writeAt(amtRow + 5, 4, Tui::brightYellow() + "Confirm? [Y/N]" + Tui::reset());
         }
       }
       else
       {
-        buf.writeAt(amtRow, 4, Tui::dim() + "Select a term above, then type amount + Enter" + Tui::reset());
+        buf.writeAt(amtRow, 4, Tui::dim() + "↑↓ term, Enter to confirm term, then type amount" + Tui::reset());
       }
     }
 
@@ -349,7 +414,7 @@ namespace ClientWallet
                << " " << std::setw(3) << d.id
                << "  " << std::setw(14) << formatAmount(d.amount)
                << "  " << std::setw(12) << formatAmount(d.interest)
-               << "  " << (d.term / 64800) << "mo"
+               << "  " << (d.term / cn::parameters::DEPOSIT_MIN_TERM_V3) << "mo"
                << Tui::reset();
           buf.writeAt(boxTop + 2 + i, 4, line.str());
         }
