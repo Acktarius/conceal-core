@@ -118,6 +118,9 @@ namespace NodeClient
                                  uint32_t &blockHeight,
                                  bool &inBlock);
 
+    // Generic daemon JSON-RPC call (used by BoltRPC::SyncManager polling strategy).
+    std::string callDaemonMethod(const std::string &method, const std::string &paramsJson);
+
   private:
     std::string jsonRpcCall(const std::string &method, const std::string &paramsJson,
                             int connectTimeoutMs = 5000, int recvTimeoutMs = 10000);

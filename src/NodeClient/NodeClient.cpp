@@ -1449,6 +1449,11 @@ namespace NodeClient
     return false;
   }
 
+  std::string NodeClient::callDaemonMethod(const std::string &method, const std::string &paramsJson)
+  {
+    return jsonRpcCall(method, paramsJson);
+  }
+
   // ─── Additional helpers ──────────────────────────────────────────────────
 
   void NodeClient::getBlockDetailsByHeight(uint32_t blockHeight,

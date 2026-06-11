@@ -121,16 +121,16 @@ void printWalletUsage(const char *program)
       << "  --daemon HOST:PORT   Daemon JSON-RPC (default 127.0.0.1:"
       << cn::RPC_DEFAULT_PORT << ")\n"
       << "  --start-height N     First-time MDBX scan from block N (ignored if state loads)\n"
-      << "  --state FILE         Wallet state file (default: DATA_DIR/wallet_state.bin)\n\n"
+      << "  --state FILE         Resume from saved wallet state (sync continues unless --offline)\n\n"
       << "Other:\n"
+      << "  --offline            Load state only; do not sync with daemon or MDBX\n"
       << "  -h, --help           Show this help\n\n"
       << "  Sync log:            /tmp/conceal-wallet-sync.log\n\n"
       << "Example first-time import:\n"
       << "  " << name << " <view_hex> <spend_hex> --data-dir ~/.conceal-mdbx --start-height 2000000\n"
       << "  (creates ~/.conceal-mdbx/wallet_state.bin on exit)\n"
-      << "Example resume:\n"
-      << "  " << name << " <view_hex> <spend_hex> --data-dir ~/.conceal-mdbx\n"
-      << "  (loads DATA_DIR/wallet_state.bin if present)\n";
+      << "Example resume with remote sync:\n"
+      << "  " << name << " <view_hex> <spend_hex> --state ~/.conceal/wallet_state.bin --daemon 66.203.178.176:16000\n";
 }
 
 bool isHexKey(const std::string &s)
@@ -142,7 +142,6 @@ bool parseWalletArgs(int argc, char *argv[], Config &cfg, bool &hasKeys)
 {
   std::vector<std::string> positional;
   bool hasDataDir = false;
-  bool hasState = false;
 
   for (int i = 1; i < argc; ++i)
   {
@@ -172,11 +171,10 @@ bool parseWalletArgs(int argc, char *argv[], Config &cfg, bool &hasKeys)
       cfg.dataPath = argv[++i];
       hasDataDir = true;
     }
+    else if (arg == "--offline")
+      cfg.mode = ConnectionMode::Offline;
     else if (arg == "--state" && i + 1 < argc)
-    {
       cfg.stateFile = argv[++i];
-      hasState = true;
-    }
     else if (arg == "--start-height" && i + 1 < argc)
       cfg.startHeight = static_cast<uint32_t>(std::stoul(argv[++i]));
     else if (arg.rfind("--", 0) == 0)
@@ -210,8 +208,7 @@ bool parseWalletArgs(int argc, char *argv[], Config &cfg, bool &hasKeys)
 
   if (hasDataDir)
     cfg.mode = ConnectionMode::Local; // MDBX scan + daemon RPC (see main after wallet create)
-  else if (hasState)
-    cfg.mode = ConnectionMode::Offline;
+  // --state alone does not disable sync; use --offline for state-only mode
 
   return true;
 }
@@ -441,7 +438,6 @@ bool openSavedState(Config &cfg)
     std::this_thread::sleep_for(std::chrono::seconds(1));
     return false;
   }
-  cfg.mode = ConnectionMode::Offline;
   return true;
 }
 
@@ -611,7 +607,18 @@ int main(int argc, char *argv[])
   if (cfg.mode != ConnectionMode::Offline)
   {
     sync->setNode(nodePtr);
-    // Local mode: scan PATH/mdbx_blocks for history/indices; daemon for tip, mempool, relay.
+
+    // Wire the JSON-RPC callback so Polling strategy (no local MDBX) works exactly
+    // like legacy concealwallet: BoltRPC::SyncManager pulls blocks from the daemon.
+    // This applies whether --daemon points to localhost or a remote node.
+    auto *nc = dynamic_cast<NodeClient::NodeClient *>(nodePtr);
+    if (nc)
+    {
+      sync->setDaemonRpc([nc](const std::string &method, const std::string &params) -> std::string
+      {
+        return nc->callDaemonMethod(method, params);
+      });
+    }
   }
 
   ClientWallet::EventLoop loop;
