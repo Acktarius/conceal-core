@@ -887,6 +887,14 @@ namespace ClientWallet
       m_onStatus(status);
 
     BoltRPC::SyncManager syncMgr(*m_node, m_viewKey, m_spendPub, m_dataDir, m_daemonRpc);
+
+    const uint32_t walletHeight = m_scannedHeight.load();
+    if (walletHeight > 0)
+    {
+      syncMgr.seedScannedHeight(walletHeight);
+      syncLog("runPollingSync: seeded SyncManager at height " + std::to_string(walletHeight));
+    }
+
     syncMgr.start(
         [this, &status](const BoltRPC::SyncProgress &progress)
         {
@@ -1714,6 +1722,7 @@ namespace ClientWallet
             ".." + std::to_string(lastHeight) +
             " (wallet=" + std::to_string(walletHeight) + ", mdbx=" + std::to_string(mdbxTop) + ")");
 
+    uint32_t batchTop = 0;
     for (uint32_t h = firstHeight; h <= lastHeight && h <= firstHeight + 4; ++h)
     {
       if (m_stop)
@@ -1742,6 +1751,13 @@ namespace ClientWallet
       }
 
       m_lastDaemonGapScanHeight = h;
+      batchTop = h;
+    }
+
+    if (batchTop > walletHeight)
+    {
+      m_scannedHeight.store(batchTop);
+      syncLog("scanDaemonGapBlocks: advanced wallet height to " + std::to_string(batchTop));
     }
 
     if (!found.empty())

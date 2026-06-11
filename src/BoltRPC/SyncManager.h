@@ -103,6 +103,9 @@ namespace BoltRPC
     uint32_t lastScannedHeight() const { return m_lastScannedHeight.load(); }
     bool isActive() const { return m_active.load(); }
 
+    // Raise persisted scan height (e.g. from wallet --state) without lowering it.
+    void seedScannedHeight(uint32_t height);
+
   private:
     // ── Internal sync methods ──────────────────────────────────────────────
     void runLoop();

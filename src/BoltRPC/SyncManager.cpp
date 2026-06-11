@@ -207,6 +207,16 @@ namespace BoltRPC
     m_triggerSync.store(true);
   }
 
+  void SyncManager::seedScannedHeight(uint32_t height)
+  {
+    const uint32_t current = m_lastScannedHeight.load();
+    if (height > current)
+    {
+      m_lastScannedHeight.store(height);
+      saveProgress();
+    }
+  }
+
   // ─── Main Loop ─────────────────────────────────────────────────────────────
 
   void SyncManager::runLoop()
