@@ -206,8 +206,10 @@ bool parseWalletArgs(int argc, char *argv[], Config &cfg, bool &hasKeys)
     return false;
   }
 
-  if (hasDataDir)
-    cfg.mode = ConnectionMode::Local; // MDBX scan + daemon RPC (see main after wallet create)
+  // --data-dir implies Local (MDBX + daemon RPC), but must not override an
+  // explicit --offline: in offline mode the user wants MDBX-only, no RPC.
+  if (hasDataDir && cfg.mode != ConnectionMode::Offline)
+    cfg.mode = ConnectionMode::Local;
   // --state alone does not disable sync; use --offline for state-only mode
 
   return true;
@@ -588,8 +590,12 @@ int main(int argc, char *argv[])
       cfg.spendKeyHex.empty() ? nullptr : &spendKey,
       chainSync);
 
+  // When --start-height is provided the user explicitly requests a fresh
+  // rescan from that height.  Skip loading any existing state file so the
+  // old wallet_state.bin is not silently restored.  On exit, saveStateFile
+  // will overwrite it with the results of the new scan.
   bool stateLoaded = false;
-  if (!cfg.stateFile.empty())
+  if (!cfg.stateFile.empty() && cfg.startHeight == 0)
   {
     const bool stateExists = pathIsReadableFile(cfg.stateFile);
     if (stateExists && sync->loadStateFile(cfg.stateFile))
@@ -601,7 +607,9 @@ int main(int argc, char *argv[])
       std::cerr << "Warning: could not load state file: " << cfg.stateFile << std::endl;
   }
 
-  if (cfg.startHeight > 0 && !stateLoaded)
+  // Apply --start-height unconditionally (no !stateLoaded guard) — it was
+  // already guaranteed above that no state was loaded when startHeight > 0.
+  if (cfg.startHeight > 0)
     sync->setScannedHeight(cfg.startHeight);
 
   if (cfg.mode != ConnectionMode::Offline)

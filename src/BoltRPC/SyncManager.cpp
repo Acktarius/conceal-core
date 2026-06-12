@@ -322,7 +322,22 @@ namespace BoltRPC
     {
       std::vector<cn::BlockFilterRecord> dummy;
       if (!callGetFilterRecords(0, 0, dummy, chainHeight))
+      {
+        // get_filter_records is unavailable — this is an old-style daemon that
+        // does not implement the BoltRPC filter endpoint.  Block scanning falls
+        // back to scanDaemonGapBlocks (getTransactionsAtHeight) in SyncEngine.
+        // Log once so the operator knows which path is active.
+        if (!m_loggedOldDaemon && m_onProgress)
+        {
+          m_loggedOldDaemon = true;
+          SyncProgress p;
+          p.errorMessage = "get_filter_records unavailable — old daemon detected; "
+                           "falling back to getTransactionsAtHeight via scanDaemonGapBlocks";
+          p.phase = SyncProgress::COMPLETE;
+          m_onProgress(p);
+        }
         return;
+      }
     }
 
     if (chainHeight <= walletHeight)

@@ -168,6 +168,8 @@ namespace BoltRPC
     std::atomic<bool> m_active{false};
     std::atomic<bool> m_stop{false};
     std::atomic<bool> m_triggerSync{false};
+    // Logged once when get_filter_records is unavailable (old daemon).
+    bool m_loggedOldDaemon{false};
 
     ProgressCallback m_onProgress;
     OutputCallback m_onOutputs;

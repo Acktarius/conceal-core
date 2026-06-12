@@ -1007,8 +1007,10 @@ namespace ClientWallet
       const std::vector<cn::Transaction> &txs)
   {
     // Called from two sites:
-    //  1. scanDaemonGapBlocks — confirmed blocks beyond MDBX tip (DirectScan/Hybrid).
-    //     In Polling mode scanDaemonGapBlocks returns early, so this path is skipped.
+    //  1. scanDaemonGapBlocks — confirmed blocks beyond wallet tip (both strategies).
+    //     When SyncManager (Polling) advances m_scannedHeight via its progress
+    //     callback, this starts where SyncManager left off.  When SyncManager
+    //     is unavailable, this is the sole gap-filler.
     //  2. pollMempool — new-to-pool transactions, both strategies.
     //     Enables spend detection at mempool time, not just at block confirmation.
     SpendDetectionResult result;
@@ -1103,9 +1105,9 @@ namespace ClientWallet
   void SyncEngine::markSpentOutputs(uint32_t topHeight)
   {
     // Only valid for DirectScan: requires the local MDBX block store.
-    // In Polling mode SyncManager collects spent key images from daemon RPC
-    // transactions and delivers them through the output callback — this
-    // MDBX-based path must not run there.
+    // In Polling mode, spend detection is handled by SyncManager's key-image
+    // collection (via the output callback) and by detectSpendsInTransactions
+    // called from both scanDaemonGapBlocks and pollMempool.
     if (m_strategy == SyncStrategy::Polling)
     {
       syncLog("markSpentOutputs: skipped (Polling mode — spend detection via SyncManager)");
@@ -1891,16 +1893,19 @@ namespace ClientWallet
   {
     std::vector<BoltCore::OutputInfo> found;
 
-    // In Polling mode SyncManager already owns block scanning via its own
-    // incremental loop.  Running a second gap-scan here would double-fetch the
-    // same blocks from the daemon and fire m_onSpent twice for the same key
-    // images.  Both paths share m_walletAppliedTxHashes so balances stay
-    // correct, but the redundant RPC traffic and duplicate spend events are
-    // wasteful.  SyncManager's callback updates m_scannedHeight (Problem 3),
-    // so the wallet height tracker stays consistent without this path.
-    if (m_strategy == SyncStrategy::Polling)
-      return found;
-
+    // This function is the fallback gap-filler for both DirectScan and Polling.
+    //
+    // Polling: SyncManager drives block scanning via get_filter_records RPC.
+    // If that endpoint is unavailable on the remote daemon, SyncManager fails
+    // silently and never advances m_scannedHeight.  This function then takes
+    // over, fetching blocks via the standard getTransactionsAtHeight and
+    // advancing m_scannedHeight itself.  When SyncManager IS working, Problem 3
+    // (progress callback → m_scannedHeight) ensures firstHeight starts where
+    // SyncManager left off, so overlap is minimal.  Any actual overlap is
+    // harmless: m_walletAppliedTxHashes prevents double-crediting, and
+    // markSpent is idempotent.
+    //
+    // DirectScan: fills the gap between MDBX tip and daemon tip.
     auto *nc = dynamic_cast<NodeClient::NodeClient *>(m_node);
     if (!nc)
       return found;
