@@ -902,10 +902,16 @@ namespace ClientWallet
           status.currentHeight = progress.currentHeight;
           if (m_onStatus)
             m_onStatus(status);
+          // Keep m_scannedHeight in sync with SyncManager's position so that
+          // saveStateFile persists the correct height and a future seedScannedHeight
+          // call starts the next SyncManager at the right block (not at genesis).
+          if (progress.currentHeight > m_scannedHeight.load(std::memory_order_relaxed))
+            m_scannedHeight.store(progress.currentHeight, std::memory_order_relaxed);
         },
         [this](const std::vector<BoltRPC::OutputInfo> &newOutputs,
                const std::vector<crypto::KeyImage> &spentKeyImages)
         {
+          static const crypto::KeyImage NULL_KI = {};
           std::vector<BoltCore::OutputInfo> converted;
           converted.reserve(newOutputs.size());
           for (const auto &rpcOut : newOutputs)
@@ -919,19 +925,70 @@ namespace ClientWallet
             info.hasGlobalOutputIndex = rpcOut.hasGlobalOutputIndex;
             info.outputKey = rpcOut.outputKey;
             info.txPublicKey = rpcOut.txPublicKey;
+            info.keyImage = rpcOut.keyImage;
             info.spent = rpcOut.spent;
             info.isDeposit = rpcOut.isDeposit;
             info.term = rpcOut.term;
+            info.keyDerivationIndex = rpcOut.keyDerivationIndex;
+            info.hasKeyDerivationIndex = rpcOut.hasKeyDerivationIndex;
+
+            // SyncManager doesn't have the spend key, so key images are NULL.
+            // Compute them here so spend detection can match them later.
+            if (m_spendKey && !info.isDeposit && info.blockHeight > 0 &&
+                std::memcmp(&info.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) == 0)
+            {
+              crypto::KeyDerivation deriv;
+              if (crypto::generate_key_derivation(info.txPublicKey, m_viewKey, deriv))
+              {
+                const uint32_t derivIdx = info.hasKeyDerivationIndex
+                    ? info.keyDerivationIndex : info.outputIndex;
+                crypto::SecretKey outSec = BoltSync::deriveOutputSecretKey(
+                    deriv, derivIdx, *m_spendKey);
+                crypto::generate_key_image(info.outputKey, outSec, info.keyImage);
+              }
+            }
+
             converted.push_back(info);
           }
           if (!converted.empty())
             dispatchDiscoveredOutputs(converted);
 
-          if (!spentKeyImages.empty() && m_onSpent)
+          // Match received key images against our cached outputs and mark them spent.
+          if (!spentKeyImages.empty())
           {
-            std::vector<std::pair<crypto::Hash, uint32_t>> depositSpends;
+            std::vector<crypto::KeyImage> matchedKIs;
             std::vector<std::pair<crypto::Hash, uint32_t>> outputSpends;
-            m_onSpent(spentKeyImages, depositSpends, outputSpends);
+            std::vector<std::pair<crypto::Hash, uint32_t>> depositSpends;
+
+            static const crypto::KeyImage NULL_KI = {};
+            std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+            std::unordered_map<crypto::KeyImage, size_t> kiIndex;
+            std::unordered_map<OutputRef, size_t, OutputRefHash> depIndex;
+            for (size_t i = 0; i < m_cachedOutputs.size(); ++i)
+            {
+              const auto &fo = m_cachedOutputs[i];
+              if (fo.isDeposit && !fo.spent)
+                depIndex[{fo.txHash, fo.outputIndex}] = i;
+              if (fo.isDeposit || fo.spent)
+                continue;
+              if (std::memcmp(&fo.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) != 0)
+                kiIndex[fo.keyImage] = i;
+            }
+
+            for (const auto &ki : spentKeyImages)
+            {
+              auto it = kiIndex.find(ki);
+              if (it != kiIndex.end() && !m_cachedOutputs[it->second].spent)
+              {
+                m_cachedOutputs[it->second].spent = true;
+                matchedKIs.push_back(ki);
+                const auto &spentOut = m_cachedOutputs[it->second];
+                outputSpends.emplace_back(spentOut.txHash, spentOut.outputIndex);
+              }
+            }
+
+            if (m_onSpent && (!matchedKIs.empty() || !depositSpends.empty()))
+              m_onSpent(matchedKIs, depositSpends, outputSpends);
           }
         });
 
@@ -944,10 +1001,117 @@ namespace ClientWallet
     syncLog("runPollingSync: finished");
   }
 
+  // ── Inline spend detection (works without MDBX) ──────────────────────
+
+  SyncEngine::SpendDetectionResult SyncEngine::detectSpendsInTransactions(
+      const std::vector<cn::Transaction> &txs)
+  {
+    // Called from two sites:
+    //  1. scanDaemonGapBlocks — confirmed blocks beyond MDBX tip (DirectScan/Hybrid).
+    //     In Polling mode scanDaemonGapBlocks returns early, so this path is skipped.
+    //  2. pollMempool — new-to-pool transactions, both strategies.
+    //     Enables spend detection at mempool time, not just at block confirmation.
+    SpendDetectionResult result;
+    if (txs.empty())
+      return result;
+
+    std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+    if (m_cachedOutputs.empty())
+      return result;
+
+    // Build lookup: keyImage → cache index (for regular outputs)
+    // Build lookup: (txHash, outputIndex) → cache index (for deposits)
+    static const crypto::KeyImage NULL_KI = {};
+    std::unordered_map<crypto::KeyImage, size_t> kiIndex;
+    std::unordered_map<OutputRef, size_t, OutputRefHash> depIndex;
+    for (size_t i = 0; i < m_cachedOutputs.size(); ++i)
+    {
+      const auto &fo = m_cachedOutputs[i];
+      if (fo.isDeposit && !fo.spent)
+        depIndex[{fo.txHash, fo.outputIndex}] = i;
+      if (fo.isDeposit || fo.spent)
+        continue;
+      if (std::memcmp(&fo.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) != 0)
+        kiIndex[fo.keyImage] = i;
+    }
+
+    if (kiIndex.empty() && depIndex.empty())
+      return result;
+
+    uint32_t spentCount = 0;
+    for (const auto &tx : txs)
+    {
+      for (const auto &input : tx.inputs)
+      {
+        if (input.type() == typeid(cn::KeyInput))
+        {
+          const auto &ki = boost::get<cn::KeyInput>(input).keyImage;
+          auto it = kiIndex.find(ki);
+          if (it != kiIndex.end() && !m_cachedOutputs[it->second].spent)
+          {
+            m_cachedOutputs[it->second].spent = true;
+            result.spentKeyImages.push_back(ki);
+            const auto &spentOut = m_cachedOutputs[it->second];
+            result.outputSpends.emplace_back(spentOut.txHash, spentOut.outputIndex);
+            spentCount++;
+          }
+        }
+        else if (input.type() == typeid(cn::MultisignatureInput))
+        {
+          const auto &ms = boost::get<cn::MultisignatureInput>(input);
+          for (auto dit = depIndex.begin(); dit != depIndex.end();)
+          {
+            const auto &depOut = m_cachedOutputs[dit->second];
+            if (depOut.spent)
+            {
+              dit = depIndex.erase(dit);
+              continue;
+            }
+            if (depOut.amount != ms.amount)
+            {
+              ++dit;
+              continue;
+            }
+            if (ms.term != 0 && depOut.term != ms.term)
+            {
+              ++dit;
+              continue;
+            }
+            if (!depOut.hasGlobalOutputIndex || depOut.globalOutputIndex != ms.outputIndex)
+            {
+              ++dit;
+              continue;
+            }
+            auto &spent = m_cachedOutputs[dit->second];
+            spent.spent = true;
+            result.depositSpends.emplace_back(spent.txHash, spent.outputIndex);
+            dit = depIndex.erase(dit);
+            spentCount++;
+          }
+        }
+      }
+    }
+
+    if (spentCount > 0)
+      syncLog("detectSpendsInTransactions: marked " + std::to_string(spentCount) + " outputs as spent");
+
+    return result;
+  }
+
   // ── Mark spent outputs ─────────────────────────────────────────────────
 
   void SyncEngine::markSpentOutputs(uint32_t topHeight)
   {
+    // Only valid for DirectScan: requires the local MDBX block store.
+    // In Polling mode SyncManager collects spent key images from daemon RPC
+    // transactions and delivers them through the output callback — this
+    // MDBX-based path must not run there.
+    if (m_strategy == SyncStrategy::Polling)
+    {
+      syncLog("markSpentOutputs: skipped (Polling mode — spend detection via SyncManager)");
+      return;
+    }
+
     const uint32_t mdbxTop = peekMdbxTopHeight();
     if (mdbxTop == 0)
     {
@@ -1217,6 +1381,30 @@ namespace ClientWallet
     m_walletAppliedTxHashes.insert(txHash);
   }
 
+  void SyncEngine::notifyOutputsSpent(const std::vector<BoltCore::OutputInfo> &spentInputs)
+  {
+    if (spentInputs.empty())
+      return;
+    static const crypto::KeyImage NULL_KI = {};
+    std::lock_guard<std::mutex> lock(m_outputCacheMutex);
+    for (const auto &spent : spentInputs)
+    {
+      for (auto &cached : m_cachedOutputs)
+      {
+        if (cached.txHash != spent.txHash || cached.outputIndex != spent.outputIndex || cached.spent)
+          continue;
+        cached.spent = true;
+        // Capture key image computed during signing so MDBX spend detection works later.
+        if (std::memcmp(&cached.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) == 0
+            && std::memcmp(&spent.keyImage, &NULL_KI, sizeof(crypto::KeyImage)) != 0)
+        {
+          cached.keyImage = spent.keyImage;
+        }
+        break;
+      }
+    }
+  }
+
   void SyncEngine::dispatchDiscoveredOutputs(const std::vector<BoltCore::OutputInfo> &outputs)
   {
     if (outputs.empty())
@@ -1340,6 +1528,7 @@ namespace ClientWallet
       info.hasGlobalOutputIndex = rpcOut.hasGlobalOutputIndex;
       info.outputKey = rpcOut.outputKey;
       info.txPublicKey = rpcOut.txPublicKey;
+      info.keyImage = rpcOut.keyImage;
       info.spent = rpcOut.spent;
       info.isDeposit = rpcOut.isDeposit;
       info.term = rpcOut.term;
@@ -1385,6 +1574,7 @@ namespace ClientWallet
       rpcOut.hasGlobalOutputIndex = coreOut.hasGlobalOutputIndex;
       rpcOut.outputKey = coreOut.outputKey;
       rpcOut.txPublicKey = coreOut.txPublicKey;
+      rpcOut.keyImage = coreOut.keyImage;
       rpcOut.spent = coreOut.spent;
       rpcOut.isDeposit = coreOut.isDeposit;
       rpcOut.term = coreOut.term;
@@ -1644,7 +1834,8 @@ namespace ClientWallet
   bool SyncEngine::tryResolveIncomingTx(const crypto::Hash &txHash,
                                         std::vector<BoltCore::OutputInfo> &outputs,
                                         uint64_t &totalAmount,
-                                        bool &confirmed)
+                                        bool &confirmed,
+                                        cn::Transaction *rawTxOut)
   {
     outputs.clear();
     totalAmount = 0;
@@ -1664,6 +1855,8 @@ namespace ClientWallet
       {
         confirmed = inBlock;
         outputs = scanTransactionOutputs(tx, txHash, inBlock ? blockHeight : 0);
+        if (rawTxOut)
+          *rawTxOut = tx;
       }
     }
 
@@ -1671,6 +1864,8 @@ namespace ClientWallet
     {
       confirmed = false;
       outputs = scanTransactionOutputs(tx, txHash, 0);
+      if (rawTxOut)
+        *rawTxOut = tx;
     }
 
     if (outputs.empty())
@@ -1695,6 +1890,17 @@ namespace ClientWallet
   std::vector<BoltCore::OutputInfo> SyncEngine::scanDaemonGapBlocks()
   {
     std::vector<BoltCore::OutputInfo> found;
+
+    // In Polling mode SyncManager already owns block scanning via its own
+    // incremental loop.  Running a second gap-scan here would double-fetch the
+    // same blocks from the daemon and fire m_onSpent twice for the same key
+    // images.  Both paths share m_walletAppliedTxHashes so balances stay
+    // correct, but the redundant RPC traffic and duplicate spend events are
+    // wasteful.  SyncManager's callback updates m_scannedHeight (Problem 3),
+    // so the wallet height tracker stays consistent without this path.
+    if (m_strategy == SyncStrategy::Polling)
+      return found;
+
     auto *nc = dynamic_cast<NodeClient::NodeClient *>(m_node);
     if (!nc)
       return found;
@@ -1723,6 +1929,7 @@ namespace ClientWallet
             " (wallet=" + std::to_string(walletHeight) + ", mdbx=" + std::to_string(mdbxTop) + ")");
 
     uint32_t batchTop = 0;
+    std::vector<cn::Transaction> allTxs;
     for (uint32_t h = firstHeight; h <= lastHeight && h <= firstHeight + 4; ++h)
     {
       if (m_stop)
@@ -1750,8 +1957,18 @@ namespace ClientWallet
         }
       }
 
+      allTxs.insert(allTxs.end(), txs.begin(), txs.end());
       m_lastDaemonGapScanHeight = h;
       batchTop = h;
+    }
+
+    // Inline spend detection: check all transaction inputs against our known key images.
+    if (!allTxs.empty())
+    {
+      auto spends = detectSpendsInTransactions(allTxs);
+      if (m_onSpent && (!spends.spentKeyImages.empty() || !spends.outputSpends.empty() ||
+                        !spends.depositSpends.empty()))
+        m_onSpent(spends.spentKeyImages, spends.depositSpends, spends.outputSpends);
     }
 
     if (batchTop > walletHeight)
@@ -1803,6 +2020,14 @@ namespace ClientWallet
     nextKnown.reserve(poolIds.size());
     std::unordered_set<crypto::Hash, boost::hash<crypto::Hash>> confirmedViaPool;
 
+    // Collect raw transactions for mempool spend detection.  We scan the INPUTS
+    // of every new-to-pool tx immediately so that spends are reported in the
+    // same poll cycle as the incoming change output — not minutes later when the
+    // block is confirmed.  Note: even txs where tryResolveIncomingTx returns
+    // false (no outputs for us) might contain key images of our outputs as
+    // inputs (e.g. a send-all with no change), so we always collect.
+    std::vector<cn::Transaction> newPoolTxsForSpendScan;
+
     for (const auto &hash : poolIds)
     {
       if (m_stop)
@@ -1816,15 +2041,22 @@ namespace ClientWallet
       std::vector<BoltCore::OutputInfo> outputs;
       uint64_t total = 0;
       bool confirmed = false;
-      if (!tryResolveIncomingTx(hash, outputs, total, confirmed))
+      cn::Transaction rawTx;
+      if (!tryResolveIncomingTx(hash, outputs, total, confirmed, &rawTx))
       {
-        cn::Transaction tx;
-        if (m_node->getTransactionSync(hash, tx))
+        // No outputs for us, but still collect the tx for input/spend scanning.
+        cn::Transaction fallbackTx;
+        if (m_node->getTransactionSync(hash, fallbackTx))
+        {
           nextKnown.push_back(hash);
+          newPoolTxsForSpendScan.push_back(std::move(fallbackTx));
+        }
         continue;
       }
 
       nextKnown.push_back(hash);
+      newPoolTxsForSpendScan.push_back(rawTx);
+
       if (confirmed)
       {
         confirmedViaPool.insert(hash);
@@ -1877,6 +2109,27 @@ namespace ClientWallet
     {
       std::lock_guard<std::mutex> lock(m_poolMutex);
       m_knownPoolTxIds = std::move(nextKnown);
+    }
+
+    // Inline spend detection from mempool inputs.  This fires m_onSpent in the
+    // same poll cycle as the incoming change is reported, eliminating the
+    // minutes-long gap between "pending" appearing and the spent outputs being
+    // deducted.  Confirmed-block spends are still handled by SyncManager (Polling)
+    // or scanDaemonGapBlocks (DirectScan) as a redundant safety net.
+    if (!newPoolTxsForSpendScan.empty())
+    {
+      auto mempoolSpends = detectSpendsInTransactions(newPoolTxsForSpendScan);
+      if (m_onSpent && (!mempoolSpends.spentKeyImages.empty() ||
+                        !mempoolSpends.outputSpends.empty() ||
+                        !mempoolSpends.depositSpends.empty()))
+      {
+        syncLog("pollMempool: detected " +
+                std::to_string(mempoolSpends.spentKeyImages.size()) +
+                " mempool spends inline");
+        m_onSpent(mempoolSpends.spentKeyImages,
+                  mempoolSpends.depositSpends,
+                  mempoolSpends.outputSpends);
+      }
     }
 
     const auto gapOutputs = scanDaemonGapBlocks();

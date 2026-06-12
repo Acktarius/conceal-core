@@ -288,9 +288,10 @@ namespace BoltRPC
       return;
 
     // Step 3: Sync post-fork range by scanning full blocks
+    std::vector<crypto::KeyImage> spentKIs;
     if (chainHeight >= forkHeight)
     {
-      scanPostForkBlocks(std::max(forkHeight, 0u), chainHeight, progress, allOwned);
+      scanPostForkBlocks(std::max(forkHeight, 0u), chainHeight, progress, allOwned, spentKIs);
     }
 
     progress.ownedOutputs = static_cast<uint32_t>(allOwned.size());
@@ -298,11 +299,10 @@ namespace BoltRPC
     if (m_onProgress)
       m_onProgress(progress);
 
-    // Report outputs
-    if (m_onOutputs && !allOwned.empty())
+    // Report outputs + spent key images
+    if (m_onOutputs && (!allOwned.empty() || !spentKIs.empty()))
     {
-      std::vector<crypto::KeyImage> empty;
-      m_onOutputs(allOwned, empty);
+      m_onOutputs(allOwned, spentKIs);
     }
 
     m_lastScannedHeight.store(chainHeight);
@@ -344,10 +344,11 @@ namespace BoltRPC
     }
 
     // Post-fork portion (if any)
+    std::vector<crypto::KeyImage> spentKIs;
     if (chainHeight >= forkHeight)
     {
       uint32_t postForkStart = std::max(startHeight, forkHeight);
-      scanPostForkBlocks(postForkStart, chainHeight, progress, allOwned);
+      scanPostForkBlocks(postForkStart, chainHeight, progress, allOwned, spentKIs);
     }
 
     progress.ownedOutputs = static_cast<uint32_t>(allOwned.size());
@@ -355,10 +356,9 @@ namespace BoltRPC
     if (m_onProgress)
       m_onProgress(progress);
 
-    if (m_onOutputs && !allOwned.empty())
+    if (m_onOutputs && (!allOwned.empty() || !spentKIs.empty()))
     {
-      std::vector<crypto::KeyImage> empty;
-      m_onOutputs(allOwned, empty);
+      m_onOutputs(allOwned, spentKIs);
     }
 
     m_lastScannedHeight.store(chainHeight);
@@ -802,7 +802,8 @@ namespace BoltRPC
 
   void SyncManager::scanPostForkBlocks(uint32_t startHeight, uint32_t endHeight,
                                        SyncProgress &progress,
-                                       std::vector<OutputInfo> &owned)
+                                       std::vector<OutputInfo> &owned,
+                                       std::vector<crypto::KeyImage> &spentKIs)
   {
     if (startHeight > endHeight)
       return;
@@ -876,6 +877,8 @@ namespace BoltRPC
               info.spent = false;
               info.isDeposit = fo.isDeposit;
               info.term = fo.term;
+              info.keyDerivationIndex = fo.keyDerivationIndex;
+              info.hasKeyDerivationIndex = fo.hasKeyDerivationIndex;
               owned.push_back(info);
             }
           }
@@ -915,8 +918,18 @@ namespace BoltRPC
               info.spent = false;
               info.isDeposit = fo.isDeposit;
               info.term = fo.term;
+              info.keyDerivationIndex = fo.keyDerivationIndex;
+              info.hasKeyDerivationIndex = fo.hasKeyDerivationIndex;
               owned.push_back(info);
             }
+          }
+
+          // Collect key images from transaction inputs for spend detection.
+          // The caller matches these against known wallet outputs.
+          for (const auto &input : tx.inputs)
+          {
+            if (input.type() == typeid(cn::KeyInput))
+              spentKIs.push_back(boost::get<cn::KeyInput>(input).keyImage);
           }
         }
       }

@@ -119,6 +119,10 @@ namespace ClientWallet
     // Wallet already credited this incoming tx (mempool confirm) — block scan must not re-dispatch.
     void noteIncomingTxApplied(const crypto::Hash &txHash);
 
+    // Called after a successful transfer/deposit so the cache reflects the spent state
+    // and captures the key images computed during signing (needed for MDBX spend detection).
+    void notifyOutputsSpent(const std::vector<BoltCore::OutputInfo> &spentInputs);
+
     struct IncomingMempoolTx
     {
       crypto::Hash txHash;
@@ -138,6 +142,16 @@ namespace ClientWallet
 
     // Fetch outputs from daemon blocks not yet in local MDBX (daemon ahead of mdbx).
     std::vector<BoltCore::OutputInfo> scanDaemonGapBlocks();
+
+    // Scan transaction inputs against cached outputs and mark any key-image matches as spent.
+    // Returns the list of newly-spent key images and deposit refs for wallet notification.
+    struct SpendDetectionResult
+    {
+      std::vector<crypto::KeyImage> spentKeyImages;
+      std::vector<std::pair<crypto::Hash, uint32_t>> outputSpends;
+      std::vector<std::pair<crypto::Hash, uint32_t>> depositSpends;
+    };
+    SpendDetectionResult detectSpendsInTransactions(const std::vector<cn::Transaction> &txs);
 
     // ── Getters ────────────────────────────────────────────────────────
 
@@ -187,7 +201,8 @@ namespace ClientWallet
     bool tryResolveIncomingTx(const crypto::Hash &txHash,
                               std::vector<BoltCore::OutputInfo> &outputs,
                               uint64_t &totalAmount,
-                              bool &confirmed);
+                              bool &confirmed,
+                              cn::Transaction *rawTxOut = nullptr);
 
     // Push only outputs not already in cache to the wallet callback.
     void dispatchDiscoveredOutputs(const std::vector<BoltCore::OutputInfo> &outputs);

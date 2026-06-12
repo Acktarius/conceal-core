@@ -175,8 +175,9 @@ namespace ClientWallet
       if (update.updateHeight && update.scannedHeight > 0)
         m_wallet->setCurrentHeight(update.scannedHeight);
 
+
       if (!update.spentKeyImages.empty() || !update.outputSpends.empty() ||
-          !update.depositSpends.empty())
+          !update.depositSpends.empty() || (!grouped.empty() && update.scannedHeight > 0))
         m_wallet->confirmPendingOutgoing(update.scannedHeight);
     }
 
@@ -627,8 +628,17 @@ namespace ClientWallet
 
     for (auto &entry : results)
     {
+      // Capture before move so we can sync the cache after the callback.
+      const bool success = entry.second.success;
+      std::vector<BoltCore::OutputInfo> spent = entry.second.spentInputs;
+
       if (entry.first)
         entry.first(std::move(entry.second));
+
+      // Propagate spent state + computed key images into the SyncEngine cache so
+      // markSpentOutputs() can detect the spend via MDBX key-image lookup.
+      if (success && m_sync && !spent.empty())
+        m_sync->notifyOutputsSpent(spent);
     }
     m_needsRedraw = true;
   }

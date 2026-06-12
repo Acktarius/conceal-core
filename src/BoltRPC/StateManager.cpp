@@ -14,7 +14,7 @@ namespace BoltRPC
   {
 
     constexpr uint32_t STATE_FILE_MAGIC = 0x43435354; // "CCST" = Conceal State
-    constexpr uint32_t STATE_FILE_VERSION = 2;
+    constexpr uint32_t STATE_FILE_VERSION = 3; // v3: keyImage added to OutputInfo
 
     // ── Binary serialization helpers (no external dependency) ──────────────
 
@@ -62,6 +62,7 @@ namespace BoltRPC
       writePod(file, static_cast<uint8_t>(out.hasGlobalOutputIndex ? 1 : 0));
       file.write(reinterpret_cast<const char *>(&out.outputKey), sizeof(out.outputKey));
       file.write(reinterpret_cast<const char *>(&out.txPublicKey), sizeof(out.txPublicKey));
+      file.write(reinterpret_cast<const char *>(&out.keyImage), sizeof(out.keyImage)); // v3
       writePod(file, static_cast<uint8_t>(out.spent ? 1 : 0));
       writePod(file, static_cast<uint8_t>(out.isDeposit ? 1 : 0));
       writePod(file, out.term);
@@ -88,6 +89,9 @@ namespace BoltRPC
       if (!file.good())
         return false;
       file.read(reinterpret_cast<char *>(&out.txPublicKey), sizeof(out.txPublicKey));
+      if (!file.good())
+        return false;
+      file.read(reinterpret_cast<char *>(&out.keyImage), sizeof(out.keyImage)); // v3
       if (!file.good())
         return false;
       uint8_t spent = 0, isDep = 0;

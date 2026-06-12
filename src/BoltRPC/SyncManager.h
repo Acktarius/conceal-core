@@ -40,9 +40,12 @@ namespace BoltRPC
     bool hasGlobalOutputIndex = false;
     crypto::PublicKey outputKey;
     crypto::PublicKey txPublicKey;
+    crypto::KeyImage keyImage;
     bool spent;
     bool isDeposit;
     uint32_t term;
+    uint32_t keyDerivationIndex = 0;
+    bool hasKeyDerivationIndex = false;
   };
 
   struct FilterCandidate
@@ -120,7 +123,8 @@ namespace BoltRPC
     // ── Post-fork: direct block scanning with on-chain view tags ───────────
     void scanPostForkBlocks(uint32_t startHeight, uint32_t endHeight,
                             SyncProgress &progress,
-                            std::vector<OutputInfo> &owned);
+                            std::vector<OutputInfo> &owned,
+                            std::vector<crypto::KeyImage> &spentKeyImages);
 
     // ── Daemon communication ───────────────────────────────────────────────
     bool callGetFilterRecords(uint32_t startHeight, uint32_t endHeight,
