@@ -50,7 +50,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+          cmake .. -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DWITH_OPENCL=OFF
           msbuild concealX.sln /p:Configuration=Release /m:2
 
       - name: Prepare release
@@ -134,7 +134,7 @@ jobs:
           ls
           mkdir build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF
           cmake --build . --config Release
 
       - name: Prepare release
@@ -204,7 +204,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF
           make -j2
 
       - name: Prepare release
@@ -274,7 +274,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF
           make -j2
 
       - name: Prepare release
@@ -344,7 +344,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          CC=clang CXX=clang++ cmake .. -DCMAKE_BUILD_TYPE=Release  -DBUILD_TESTS=ON -DSTATIC=ON
+          CC=clang CXX=clang++ cmake .. -DCMAKE_BUILD_TYPE=Release  -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF
           make -j2
 
       - name: Prepare release
@@ -413,7 +413,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DBOOST_ROOT=/usr/local/opt/boost@1.85
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF -DBOOST_ROOT=/usr/local/opt/boost@1.85
           make -j2
 
       - name: Prepare release
