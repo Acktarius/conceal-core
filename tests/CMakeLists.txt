@@ -20,6 +20,9 @@ file(GLOB_RECURSE SystemTests System/*)
 file(GLOB_RECURSE TestGenerator TestGenerator/*)
 file(GLOB_RECURSE TransfersTests TransfersTests/*)
 file(GLOB_RECURSE UnitTests UnitTests/*)
+# PaymentGate/walletd removed in favor of conceal-rpc; these tests no longer compile.
+# TestUpgradeDetector targets the old BasicUpgradeDetector<BlockVector> API.
+list(FILTER UnitTests EXCLUDE REGEX ".*/(PaymentGateTests|TestWalletService|TestUpgradeDetector)\\.cpp$")
 
 file(GLOB_RECURSE CryptoNoteProtocol ../src/CryptoNoteProtocol/*)
 file(GLOB_RECURSE P2p ../src/P2p/*)
@@ -63,7 +66,12 @@ target_link_libraries(IntegrationTests
   Serialization System Logging Common crypto BlockchainExplorer gtest libminiupnpc-static ${Boost_LIBRARIES})
 # pow/CryptoNoteCore are linked again via INTERFACE deps; Blockchain must follow.
 target_link_libraries(IntegrationTests Blockchain Storage)
-target_link_libraries(NodeRpcProxyTests NodeRpcProxy CryptoNoteCore Rpc HTTP Serialization System Logging Common crypto ${Boost_LIBRARIES})
+target_link_libraries(NodeRpcProxyTests
+  -Wl,--start-group
+  NodeRpcProxy CryptoNoteCore pow Rpc HTTP
+  -Wl,--end-group
+  Serialization System Logging Common crypto ${Boost_LIBRARIES})
+target_link_libraries(PowGpuEquivalenceTests crypto pow CryptoNoteCore ${Boost_LIBRARIES})
 target_link_libraries(PerformanceTests
   -Wl,--start-group
   CryptoNoteCore Blockchain Storage
@@ -75,10 +83,15 @@ if (MSVC)
   target_link_libraries(NodeRpcProxyTests ws2_32)
   target_link_libraries(CoreTests ws2_32)
 endif ()
-target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc HTTP BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Common crypto libminiupnpc-static ${Boost_LIBRARIES})
+target_link_libraries(TransfersTests
+  -Wl,--start-group
+  IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc HTTP BlockchainExplorer
+  CryptoNoteCore Blockchain Storage Transfers
+  -Wl,--end-group
+  Serialization System Logging Common crypto libminiupnpc-static ${Boost_LIBRARIES})
 target_link_libraries(UnitTests
   -Wl,--start-group
-  TestGenerator PaymentGate Wallet NodeRpcProxy InProcessNode P2P Rpc HTTP Transfers
+  TestGenerator Wallet NodeRpcProxy InProcessNode P2P Rpc HTTP Transfers
   CryptoNoteCore Blockchain Storage
   -Wl,--end-group
   Serialization System Logging Common crypto BlockchainExplorer gtest ${Boost_LIBRARIES})
@@ -86,7 +99,6 @@ target_link_libraries(UnitTests
 target_link_libraries(DifficultyTests CryptoNoteCore Serialization crypto Logging Common ${Boost_LIBRARIES})
 target_link_libraries(HashTargetTests CryptoNoteCore crypto)
 target_link_libraries(HashTests crypto)
-target_link_libraries(PowGpuEquivalenceTests crypto pow CryptoNoteCore)
 target_link_libraries(PowGpuMineEquivalenceTests pow CryptoNoteCore ${Boost_LIBRARIES})
 target_link_libraries(BoltCoreBalanceTrackerTests BoltCore CryptoNoteCore Logging Common crypto gtest ${Boost_LIBRARIES})
 
