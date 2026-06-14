@@ -82,8 +82,10 @@ namespace BoltCore
 
   struct FusionEstimate
   {
-    size_t fusionReadyCount;
-    size_t totalOutputCount;
+    size_t fusionReadyCount = 0;   // total outputs across buckets meeting min (aggregate)
+    size_t totalOutputCount = 0;
+    size_t readyBucketCount = 0;   // buckets with >= fusionTxMinInputCount outputs
+    size_t largestReadyBucket = 0;   // max outputs in one ready bucket (one tx uses one bucket)
   };
 
   struct SubAddress

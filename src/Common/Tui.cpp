@@ -126,17 +126,17 @@ namespace Tui
           switch (seq[1])
           {
           case 'A':
-            return 1000; // Up
+            return KEY_UP;
           case 'B':
-            return 1001; // Down
+            return KEY_DOWN;
           case 'C':
-            return 1002; // Right
+            return KEY_RIGHT;
           case 'D':
-            return 1003; // Left
+            return KEY_LEFT;
           case 'H':
-            return 1004; // Home
+            return KEY_HOME;
           case 'F':
-            return 1005; // End
+            return KEY_END;
           }
         }
       }

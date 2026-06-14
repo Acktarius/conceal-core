@@ -313,6 +313,33 @@ namespace BoltCore
       tx.appendExtra(common::asBinaryArray(params.extra));
   }
 
+  bool TransactionBuilder::ensureGlobalOutputIndices(std::vector<OutputInfo> &outputs,
+                                                      std::string &error) const
+  {
+    error.clear();
+    for (auto &out : outputs)
+    {
+      if (out.blockHeight == 0)
+      {
+        error = "Global output index unavailable until transaction is confirmed in a block";
+        return false;
+      }
+      if (out.hasGlobalOutputIndex)
+        continue;
+
+      uint32_t globalIndex = 0;
+      if (!resolveGlobalOutputIndex(out, globalIndex, &error))
+      {
+        if (error.empty())
+          error = "Missing global output index on UTXO (wait for sync or rescan wallet)";
+        return false;
+      }
+      out.globalOutputIndex = globalIndex;
+      out.hasGlobalOutputIndex = true;
+    }
+    return true;
+  }
+
   TransferResult TransactionBuilder::finalizeAndRelay(cn::ITransaction &tx)
   {
     TransferResult result;
@@ -335,6 +362,65 @@ namespace BoltCore
     result.success = true;
     result.transaction = rawTx;
     result.txHash = common::podToHex(cn::getObjectHash(rawTx));
+    return result;
+  }
+
+  bool TransactionBuilder::signFusionKeyInputs(cn::ITransaction &tx,
+                                             const std::vector<OutputInfo> &selectedOutputs,
+                                             uint64_t mixin,
+                                             std::string &error) const
+  {
+    error.clear();
+    std::vector<outs_for_amount> mixinResult;
+    if (mixin > 0)
+    {
+      if (!requestMixinOutputs(selectedOutputs, mixin, mixinResult, error))
+      {
+        if (error.empty())
+          error = "Failed to obtain mixin outputs";
+        return false;
+      }
+    }
+
+    std::vector<KeyInputBundle> keyInputs;
+    if (!prepareKeyInputs(selectedOutputs, mixinResult, mixin, keyInputs, error))
+    {
+      if (error.empty())
+        error = "Failed to prepare transaction inputs (connect daemon for global output indices, or rescan wallet)";
+      return false;
+    }
+
+    if (!addKeyInputsAndSign(tx, keyInputs))
+    {
+      error = "Failed to sign transaction inputs";
+      return false;
+    }
+    return true;
+  }
+
+  TransferResult TransactionBuilder::fundFusionKeyInputs(std::unique_ptr<cn::ITransaction> &tx,
+                                                       const std::vector<OutputInfo> &selectedOutputs,
+                                                       uint64_t mixin)
+  {
+    TransferResult result;
+    result.success = false;
+
+    if (!tx)
+    {
+      result.error = "Invalid transaction";
+      return result;
+    }
+
+    std::string signError;
+    if (!signFusionKeyInputs(*tx, selectedOutputs, mixin, signError))
+    {
+      result.error = signError;
+      return result;
+    }
+
+    result = finalizeAndRelay(*tx);
+    if (result.success)
+      result.spentInputs = selectedOutputs;
     return result;
   }
 

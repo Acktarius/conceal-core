@@ -47,7 +47,7 @@ namespace ClientWallet
       break; // Ignore input while sending
     case State::Sent:
     case State::Error:
-      if (key == 13 || key == 10 || key == ' ')
+      if (key == Tui::KEY_ENTER || key == Tui::KEY_LF || key == ' ')
       {            // Enter or Space to go back
         onEnter(); // Reset form
       }
@@ -57,7 +57,7 @@ namespace ClientWallet
 
   void SendScreen::handleAddressInput(int key)
   {
-    if (key == 13 || key == 10)
+    if (key == Tui::KEY_ENTER || key == Tui::KEY_LF)
     { // Enter
       if (m_address.empty())
       {
@@ -71,14 +71,14 @@ namespace ClientWallet
       return;
     }
 
-    if (key == 27)
+    if (key == Tui::KEY_ESC)
     {
       if (m_onAction)
         m_onAction(ScreenAction::Pop);
       return;
     }
 
-    if (key == 127 || key == 8)
+    if (key == Tui::KEY_BACKSPACE || key == Tui::KEY_DEL)
     { // Backspace
       if (!m_address.empty())
       {
@@ -97,7 +97,7 @@ namespace ClientWallet
 
   void SendScreen::handleAmountInput(int key)
   {
-    if (key == 13 || key == 10)
+    if (key == Tui::KEY_ENTER || key == Tui::KEY_LF)
     { // Enter
       try
       {
@@ -129,14 +129,14 @@ namespace ClientWallet
       return;
     }
 
-    if (key == 27)
+    if (key == Tui::KEY_ESC)
     {
       if (m_onAction)
         m_onAction(ScreenAction::Pop);
       return;
     }
 
-    if (key == 127 || key == 8)
+    if (key == Tui::KEY_BACKSPACE || key == Tui::KEY_DEL)
     {
       if (!m_amountStr.empty())
         m_amountStr.pop_back();
@@ -151,11 +151,11 @@ namespace ClientWallet
 
   void SendScreen::handleConfirm(int key)
   {
-    if (key == 'y' || key == 'Y' || key == 13 || key == 10)
+    if (key == 'y' || key == 'Y' || key == Tui::KEY_ENTER || key == Tui::KEY_LF)
     {
       doSend();
     }
-    else if (key == 'n' || key == 'N' || key == 27)
+    else if (key == 'n' || key == 'N' || key == Tui::KEY_ESC)
     {
       onEnter(); // Reset
     }

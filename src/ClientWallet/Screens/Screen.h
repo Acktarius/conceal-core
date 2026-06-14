@@ -21,6 +21,7 @@ namespace ClientWallet
     GoToReceive,
     GoToHistory,
     GoToDeposit,
+    GoToFusion,
     Pop,
     Quit
   };

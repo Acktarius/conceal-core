@@ -44,20 +44,21 @@ namespace ClientWallet
       if (!isViewOnly && m_onAction)
         m_onAction(ScreenAction::GoToDeposit);
       break;
+    case 'f':
+    case 'F':
+      if (!isViewOnly && m_onAction)
+        m_onAction(ScreenAction::GoToFusion);
+      break;
     case 'q':
     case 'Q':
       if (m_onAction)
         m_onAction(ScreenAction::Quit);
       break;
-    case 27:
-      if (m_onAction)
-        m_onAction(ScreenAction::Pop);
-      break;
-    case 1000:
+    case Tui::KEY_UP:
       if (m_selectedRow > 0)
         m_selectedRow--;
       break;
-    case 1001:
+    case Tui::KEY_DOWN:
       m_selectedRow++;
       break;
     }
@@ -220,7 +221,7 @@ namespace ClientWallet
     if (isViewOnly)
       drawMenuBar(buf, {"Receive", "History", "Quit"}, {"R", "H", "Q"}, 3);
     else
-      drawMenuBar(buf, {"Send", "Receive", "History", "Deposit", "Quit"}, {"S", "R", "H", "D", "Q"}, 3);
+      drawMenuBar(buf, {"Send", "Receive", "History", "Deposit", "Fusion", "Quit"}, {"S", "R", "H", "D", "F", "Q"}, 3);
   }
 
 } // namespace ClientWallet

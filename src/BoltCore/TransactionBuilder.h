@@ -81,8 +81,22 @@ namespace BoltCore
                                  const std::vector<OutputInfo> &selectedOutputs,
                                  uint64_t mixin);
 
+    // Fusion path: mixin 0 means anonymity 1 (no effectiveMixin remapping).
+    TransferResult fundFusionKeyInputs(std::unique_ptr<cn::ITransaction> &tx,
+                                       const std::vector<OutputInfo> &selectedOutputs,
+                                       uint64_t mixin);
+
+    // Sign fusion inputs without relaying (for size-trim loop).
+    bool signFusionKeyInputs(cn::ITransaction &tx,
+                             const std::vector<OutputInfo> &selectedOutputs,
+                             uint64_t mixin,
+                             std::string &error) const;
+
     // Serialize and relay a fully signed transaction.
     TransferResult finalizeAndRelay(cn::ITransaction &tx);
+
+    // Resolve missing global output indices on selected key inputs (same requirement as transfer).
+    bool ensureGlobalOutputIndices(std::vector<OutputInfo> &outputs, std::string &error) const;
 
     // Daemon RPC lookup when MDBX / stored index is unavailable.
     bool resolveGlobalOutputIndex(const OutputInfo &output, uint32_t &globalOutputIndex,

@@ -109,7 +109,7 @@ namespace BoltCore
           accountKeys({sp, vp, sk, vk}),
           transactionBuilder(c, node, outputSelector, signatureBuilder, relayHandler, accountKeys),
           depositManager(c, transactionBuilder, signatureBuilder, outputSelector, {sp, vp}),
-          fusionManager(c, outputSelector, transactionBuilder, signatureBuilder, relayHandler),
+          fusionManager(c, transactionBuilder),
           subAddressManager(c, vp, vk, sk),
           mainAddress{sp, vp}
     {
@@ -508,7 +508,8 @@ namespace BoltCore
 
   FusionEstimate Wallet::estimateFusion(uint64_t threshold, uint64_t mixin) const
   {
-    return m_impl->fusionManager.estimate(threshold, mixin, getUnspentOutputs());
+    return m_impl->fusionManager.estimate(threshold, mixin, getUnspentOutputs(),
+                                          getCurrentHeight());
   }
 
   TransferResult Wallet::createFusion(uint64_t threshold, uint64_t mixin)
@@ -522,16 +523,26 @@ namespace BoltCore
       return result;
     }
 
+    if (const std::string nodeError = ensureDaemonReady(m_impl->node); !nodeError.empty())
+    {
+      result.error = nodeError;
+      return result;
+    }
+
     auto fusionResult = m_impl->fusionManager.createFusion(
-        threshold, mixin, getUnspentOutputs(), m_impl->mainAddress);
+        threshold, mixin, getUnspentOutputs(), m_impl->mainAddress, getCurrentHeight());
 
     result.success = fusionResult.success;
     result.txHash = fusionResult.txHash;
     result.fee = fusionResult.fee;
     result.error = fusionResult.error;
+    result.transaction = fusionResult.transaction;
+    result.spentInputs = fusionResult.spentInputs;
 
     if (result.success)
     {
+      markOutputsSpent(fusionResult.spentInputs);
+
       TransactionRecord record;
       if (common::podFromHex(result.txHash, record.txHash))
       {
@@ -542,6 +553,7 @@ namespace BoltCore
         record.type = TransactionType::Fusion;
         record.confirmed = false;
         m_impl->balanceTracker.addTransaction(record);
+        m_impl->balanceTracker.addPendingOutgoing(record.txHash, 0, fusionResult.fee);
       }
     }
 

@@ -10,6 +10,7 @@
 #include "Screens/SendScreen.h"
 #include "Screens/HistoryScreen.h"
 #include "Screens/DepositScreen.h"
+#include "Screens/FusionScreen.h"
 #include "Screens/ReceiveScreen.h"
 
 #include "Common/Tui.h"
@@ -341,6 +342,10 @@ namespace ClientWallet
           if (m_currency)
             pushScreen(std::make_shared<DepositScreen>(m_wallet, *m_currency));
           break;
+        case ScreenAction::GoToFusion:
+          if (m_currency)
+            pushScreen(std::make_shared<FusionScreen>(m_wallet, *m_currency));
+          break;
         case ScreenAction::Pop:
           popScreen();
           break;
@@ -359,11 +364,11 @@ namespace ClientWallet
 
   void EventLoop::popScreen()
   {
-    if (!m_screens.empty())
-    {
-      m_screens.back()->onExit();
-      m_screens.pop_back();
-    }
+    if (m_screens.size() <= 1)
+      return;
+
+    m_screens.back()->onExit();
+    m_screens.pop_back();
     if (!m_screens.empty())
       m_screens.back()->onEnter();
     m_needsRedraw = true;
@@ -382,13 +387,6 @@ namespace ClientWallet
         if (m_screens.size() <= 1)
         {
           processEvent(Event(EventType::Quit));
-          return;
-        }
-        break;
-      case 27:
-        if (m_screens.size() > 1)
-        {
-          popScreen();
           return;
         }
         break;

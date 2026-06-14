@@ -138,11 +138,11 @@ namespace ClientWallet
 
     switch (key)
     {
-    case 1000:
+    case Tui::KEY_UP:
       if (m_selectedIndex > 0)
         m_selectedIndex--;
       break;
-    case 1001:
+    case Tui::KEY_DOWN:
       if (m_selectedIndex < maxIndex - 1)
         m_selectedIndex++;
       break;
@@ -155,7 +155,7 @@ namespace ClientWallet
         m_showNewSub = true;
       }
       break;
-    case 27:
+    case Tui::KEY_ESC:
       if (m_onAction)
         m_onAction(ScreenAction::Pop);
       break;

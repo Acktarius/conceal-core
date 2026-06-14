@@ -4032,7 +4032,7 @@ namespace cn
         validateSourceAddresses(sourceAddresses);
         validateChangeDestination(sourceAddresses, destinationAddress, true);
 
-        const size_t MAX_FUSION_OUTPUT_COUNT = 8;
+        const size_t MAX_FUSION_OUTPUT_COUNT = m_currency.fusionTxMaxOutputCount();
         uint64_t fusionTreshold = m_currency.defaultDustThreshold();
         
         if (threshold <= fusionTreshold) {
@@ -4203,19 +4203,19 @@ namespace cn
 
   size_t WalletGreen::createOptimizationTransaction(const std::string &address)
   {
-    if (getUnspentOutputsCount() < 100)
+    if (getUnspentOutputsCount() < m_currency.fusionOptimizationMinUnspentCount())
     {
       throw std::system_error(make_error_code(error::NOTHING_TO_OPTIMIZE));
       return WALLET_INVALID_TRANSACTION_ID;
     }
 
     uint64_t balance = getActualBalance(address);
-    uint64_t threshold = 100;
+    uint64_t threshold = m_currency.fusionStartingThreshold();
     bool fusionReady = false;
     while (threshold <= balance && !fusionReady)
     {
       EstimateResult estimation = estimate(threshold, {address});
-      if (estimation.fusionReadyCount > 50)
+      if (estimation.fusionReadyCount > m_currency.fusionOptimizationReadyCount())
       {
         fusionReady = true;
         break;

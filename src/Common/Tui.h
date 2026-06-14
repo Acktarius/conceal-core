@@ -296,6 +296,19 @@ namespace Tui
 
   // ── Input helpers ───────────────────────────────────────────────────────
 
+  // Virtual key codes returned by readKey() for arrow keys (ANSI escape sequences).
+  constexpr int KEY_UP = 1000;
+  constexpr int KEY_DOWN = 1001;
+  constexpr int KEY_RIGHT = 1002;
+  constexpr int KEY_LEFT = 1003;
+  constexpr int KEY_HOME = 1004;
+  constexpr int KEY_END = 1005;
+  constexpr int KEY_ESC = 27;
+  constexpr int KEY_BACKSPACE = 127;
+  constexpr int KEY_DEL = 8;
+  constexpr int KEY_ENTER = '\r';
+  constexpr int KEY_LF = '\n';
+
   void enableRawMode();
   void disableRawMode();
   bool keyAvailable();

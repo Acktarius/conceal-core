@@ -41,19 +41,19 @@ namespace ClientWallet
   {
     if (m_state == State::Done || m_state == State::Error)
     {
-      if (key == 13 || key == 10 || key == 27)
+      if (key == Tui::KEY_ENTER || key == Tui::KEY_LF || key == Tui::KEY_ESC)
         onEnter();
       return;
     }
 
     // Tab switching
-    if (key == 1002 && m_tab == Tab::Create)
+    if (key == Tui::KEY_RIGHT && m_tab == Tab::Create)
     {
       m_tab = Tab::Withdraw;
       m_selectedRow = 0;
       return;
     } // Right
-    if (key == 1003 && m_tab == Tab::Withdraw)
+    if (key == Tui::KEY_LEFT && m_tab == Tab::Withdraw)
     {
       m_tab = Tab::Create;
       return;
@@ -62,7 +62,7 @@ namespace ClientWallet
     if (m_state == State::Creating || m_state == State::Withdrawing)
       return;
 
-    if (key == 27)
+    if (key == Tui::KEY_ESC)
     {
       if (m_onAction)
         m_onAction(ScreenAction::Pop);
@@ -86,16 +86,16 @@ namespace ClientWallet
     {
       switch (key)
       {
-      case 1000:
+      case Tui::KEY_UP:
         if (m_selectedMonth > 0)
           m_selectedMonth--;
         break;
-      case 1001:
+      case Tui::KEY_DOWN:
         if (m_selectedMonth < 11)
           m_selectedMonth++;
         break;
-      case 10:
-      case 13:
+      case Tui::KEY_LF:
+      case Tui::KEY_ENTER:
         m_amountStr.clear();
         m_state = State::EnterAmount;
         m_error.clear();
@@ -106,7 +106,7 @@ namespace ClientWallet
 
     if (m_state == State::ConfirmCreate)
     {
-      if (key == 'y' || key == 'Y' || key == 13 || key == 10)
+      if (key == 'y' || key == 'Y' || key == Tui::KEY_ENTER || key == Tui::KEY_LF)
         doCreateDeposit();
       else if (key == 'n' || key == 'N')
         onEnter();
@@ -117,7 +117,7 @@ namespace ClientWallet
       return;
 
     // Amount entry
-    if (key == 13 || key == 10)
+    if (key == Tui::KEY_ENTER || key == Tui::KEY_LF)
     {
       try
       {
@@ -140,7 +140,7 @@ namespace ClientWallet
       }
       return;
     }
-    if (key == 127 || key == 8)
+    if (key == Tui::KEY_BACKSPACE || key == Tui::KEY_DEL)
     {
       if (!m_amountStr.empty())
         m_amountStr.pop_back();
@@ -204,7 +204,7 @@ namespace ClientWallet
 
     if (m_state == State::ConfirmWithdraw)
     {
-      if (key == 'y' || key == 'Y' || key == 13 || key == 10)
+      if (key == 'y' || key == 'Y' || key == Tui::KEY_ENTER || key == Tui::KEY_LF)
         doWithdrawDeposit();
       else if (key == 'n' || key == 'N')
       {
@@ -216,21 +216,21 @@ namespace ClientWallet
     int maxOffset = std::max(0, static_cast<int>(m_unlockedDeposits.size()) - VISIBLE_ROWS);
     switch (key)
     {
-    case 1000:
+    case Tui::KEY_UP:
       if (m_selectedRow > 0)
         m_selectedRow--;
       else if (m_scrollOffset > 0)
         m_scrollOffset--;
       break;
-    case 1001:
+    case Tui::KEY_DOWN:
       if (m_selectedRow < VISIBLE_ROWS - 1 &&
           m_selectedRow + m_scrollOffset < static_cast<int>(m_unlockedDeposits.size()) - 1)
         m_selectedRow++;
       else if (m_scrollOffset < maxOffset)
         m_scrollOffset++;
       break;
-    case 10:
-    case 13:
+    case Tui::KEY_LF:
+    case Tui::KEY_ENTER:
       if (!m_unlockedDeposits.empty())
       {
         int idx = m_scrollOffset + m_selectedRow;

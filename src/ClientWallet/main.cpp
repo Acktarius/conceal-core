@@ -252,16 +252,16 @@ StartupChoice showStartupMenu()
 
     switch (key)
     {
-    case 1000:
+    case Tui::KEY_UP:
       if (selected > 0)
         selected--;
       break;
-    case 1001:
+    case Tui::KEY_DOWN:
       if (selected < (int)items.size() - 1)
         selected++;
       break;
-    case 10:
-    case 13:
+    case Tui::KEY_LF:
+    case Tui::KEY_ENTER:
       return static_cast<StartupChoice>(selected);
     case 'q':
     case 'Q':
@@ -306,16 +306,16 @@ ConnectionConfig simpleSetupScreen(const std::string &defaultDataDir)
 
     switch (key)
     {
-    case 1000:
+    case Tui::KEY_UP:
       if (selected > 0)
         selected--;
       break;
-    case 1001:
+    case Tui::KEY_DOWN:
       if (selected < 2)
         selected++;
       break;
-    case 10:
-    case 13:
+    case Tui::KEY_LF:
+    case Tui::KEY_ENTER:
       config.mode = static_cast<ConnectionMode>(selected);
       Tui::disableRawMode();
       if (config.mode == ConnectionMode::Local)
@@ -348,7 +348,7 @@ ConnectionConfig simpleSetupScreen(const std::string &defaultDataDir)
       }
       Tui::enableRawMode();
       return config;
-    case 27:
+    case Tui::KEY_ESC:
     case 'q':
     case 'Q':
       return config;
@@ -387,7 +387,7 @@ bool createNewWallet(Config &cfg)
   while (true)
   {
     int key = Tui::readKey();
-    if (key == 10 || key == 13 || key == 'q' || key == 'Q')
+    if (key == Tui::KEY_LF || key == Tui::KEY_ENTER || key == 'q' || key == 'Q')
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }

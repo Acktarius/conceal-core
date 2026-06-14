@@ -69,24 +69,24 @@ namespace ClientWallet
 
     switch (key)
     {
-    case 1000: // Up
+    case Tui::KEY_UP: // Up
       if (m_selectedRow > 0)
         m_selectedRow--;
       else if (m_scrollOffset > 0)
         m_scrollOffset--;
       break;
-    case 1001: // Down
+    case Tui::KEY_DOWN: // Down
       if (m_selectedRow < VISIBLE_ROWS - 1 &&
           m_selectedRow + m_scrollOffset < static_cast<int>(m_filtered.size()) - 1)
         m_selectedRow++;
       else if (m_scrollOffset < maxOffset)
         m_scrollOffset++;
       break;
-    case 1004: // Home
+    case Tui::KEY_HOME: // Home
       m_scrollOffset = 0;
       m_selectedRow = 0;
       break;
-    case 1005: // End
+    case Tui::KEY_END: // End
       m_scrollOffset = maxOffset;
       m_selectedRow = std::min(VISIBLE_ROWS - 1,
                                static_cast<int>(m_filtered.size()) - m_scrollOffset - 1);
@@ -103,7 +103,7 @@ namespace ClientWallet
     case 'D':
       toggleFilter(m_showDeposits);
       break;
-    case 27: // Escape
+    case Tui::KEY_ESC: // Escape
       if (m_onAction)
         m_onAction(ScreenAction::Pop);
       break;
