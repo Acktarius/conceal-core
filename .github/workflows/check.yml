@@ -79,7 +79,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DWITH_OPENCL=OFF `
+          cmake .. -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DBUILD_MIGRATION_GUI=ON -DWITH_OPENCL=OFF `
             -DwxWidgets_ROOT_DIR="$env:WXWIN" `
             -DwxWidgets_LIB_DIR="$env:WXWIN/lib/vc14x_x64_dll"
           msbuild concealX.sln /p:Configuration=Release /m:2
@@ -92,6 +92,9 @@ jobs:
           mv build/src/Release/concealwallet.exe build/conceal
           mv build/src/Tools/Release/conceal-optimizer.exe build/conceal
           mv build/src/Release/conceal-rpc.exe build/conceal
+          mv build/src/Tools/Release/conceald-migrate.exe build/conceal
+          mv build/src/Tools/Migration-gui/Release/conceald-migrate-gui.exe build/conceal
+          cp $env:WXWIN/lib/vc14x_x64_dll/wx*.dll build/conceal
           cp build/tests/Release/*_tests.exe build/conceal
 
       - name: Upload To GH Artifacts
@@ -148,6 +151,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -U --noconfirm https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-boost-1.85.0-4-any.pkg.tar.zst
+          pacman -S --noconfirm mingw-w64-x86_64-wxwidgets
 
       - name: Prepare version
         shell: powershell
@@ -165,7 +169,7 @@ jobs:
           ls
           mkdir build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DBUILD_MIGRATION_GUI=OFF -DWITH_OPENCL=OFF
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DBUILD_MIGRATION_GUI=ON -DWITH_OPENCL=OFF
           cmake --build . --config Release
 
       - name: Prepare release
@@ -176,6 +180,9 @@ jobs:
           mv build/src/concealwallet.exe build/conceal
           mv build/src/Tools/conceal-optimizer.exe build/conceal
           mv build/src/conceal-rpc.exe build/conceal
+          mv build/src/Tools/conceald-migrate.exe build/conceal
+          mv build/src/Tools/Migration-gui/conceald-migrate-gui.exe build/conceal
+          cp /mingw64/bin/wx*.dll build/conceal
           cp build/tests/*_tests.exe build/conceal
 
       - name: Upload To GH Artifacts
@@ -229,6 +236,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y make cmake gcc g++ libboost-all-dev
+          sudo apt-get install -y libwxgtk3.2-gtk3-dev || sudo apt-get install -y libwxgtk3.0-gtk3-dev
 
       - name: Build
         id: build
@@ -245,6 +253,8 @@ jobs:
           mv build/src/concealwallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
+          mv build/src/Tools/conceald-migrate build/conceal
+          mv build/src/Tools/Migration-gui/conceald-migrate-gui build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
@@ -298,7 +308,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y make cmake gcc g++ libboost-all-dev
+          sudo apt-get install -y make cmake gcc g++ libboost-all-dev libwxgtk3.2-gtk3-dev
 
       - name: Build
         id: build
@@ -315,6 +325,8 @@ jobs:
           mv build/src/concealwallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
+          mv build/src/Tools/conceald-migrate build/conceal
+          mv build/src/Tools/Migration-gui/conceald-migrate-gui build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
@@ -369,6 +381,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y make cmake clang libboost-all-dev
+          sudo apt-get install -y libwxgtk3.2-gtk3-dev || sudo apt-get install -y libwxgtk3.0-gtk3-dev
 
       - name: Build
         id: build
@@ -385,6 +398,8 @@ jobs:
           mv build/src/concealwallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
+          mv build/src/Tools/conceald-migrate build/conceal
+          mv build/src/Tools/Migration-gui/conceald-migrate-gui build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
@@ -437,7 +452,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install boost@1.85
+          brew install boost@1.85 wxwidgets
 
       - name: Build
         id: build
@@ -454,6 +469,8 @@ jobs:
           mv build/src/concealwallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
+          mv build/src/Tools/conceald-migrate build/conceal
+          mv build/src/Tools/Migration-gui/conceald-migrate-gui build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
