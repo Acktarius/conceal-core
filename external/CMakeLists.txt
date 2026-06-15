@@ -13,6 +13,7 @@ endif()
 if(ENABLE_MDBX)
     set(MDBX_BUILD_TOOLS OFF CACHE BOOL "Disable MDBX tools")
     set(MDBX_BUILD_TESTS OFF CACHE BOOL "Disable MDBX tests")
+    set(MDBX_BUILD_CXX OFF CACHE BOOL "Disable MDBX C++ API (conceal uses C API only)")
 
     set(CMAKE_C_FLAGS_BAK "${CMAKE_C_FLAGS}")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-undef -Wno-logical-op -Wno-aggregate-return -Wno-nested-externs -Wno-discarded-qualifiers -Wno-strict-prototypes -Wno-old-style-definition")
