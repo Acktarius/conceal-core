@@ -32,6 +32,7 @@
 #include "version.h"
 
 #undef ERROR
+#include "Common/WindowsMacroUndef.h"
 
 using namespace logging;
 using namespace crypto;
