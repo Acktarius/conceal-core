@@ -337,7 +337,8 @@ namespace BoltCore
       return result;
     }
 
-    if (const std::string nodeError = ensureDaemonReady(m_impl->node); !nodeError.empty())
+    const std::string nodeError = ensureDaemonReady(m_impl->node);
+    if (!nodeError.empty())
     {
       result.error = nodeError;
       return result;
@@ -392,7 +393,8 @@ namespace BoltCore
       return result;
     }
 
-    if (const std::string nodeError = ensureDaemonReady(m_impl->node); !nodeError.empty())
+    const std::string nodeError = ensureDaemonReady(m_impl->node);
+    if (!nodeError.empty())
     {
       result.error = nodeError;
       return result;
@@ -523,7 +525,8 @@ namespace BoltCore
       return result;
     }
 
-    if (const std::string nodeError = ensureDaemonReady(m_impl->node); !nodeError.empty())
+    const std::string nodeError = ensureDaemonReady(m_impl->node);
+    if (!nodeError.empty())
     {
       result.error = nodeError;
       return result;

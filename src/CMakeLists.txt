@@ -99,6 +99,9 @@ add_dependencies(NodeClientLib version)
 add_library(Storage STATIC ${MDBX_STORAGE_FILES})
 add_dependencies(Storage version)
 target_link_libraries(Storage PRIVATE ${MDBX_LIBRARY_TARGET} Blockchain Serialization Common crypto)
+if(WIN32)
+  target_link_libraries(Storage PUBLIC psapi)
+endif()
 
 # Sidechain static library
 add_library(SidechainLib STATIC ${SIDECHAIN_FILES})
