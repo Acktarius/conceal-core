@@ -2,6 +2,7 @@
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #ifdef _WIN32
@@ -107,6 +108,11 @@ inline int boltInetPton(int af, const char *src, void *dst)
   return InetPtonA(af, src, dst);
 }
 
+inline const char *boltInetNtop(int af, const void *src, char *dst, size_t size)
+{
+  return InetNtopA(af, const_cast<PVOID>(src), dst, static_cast<DWORD>(size));
+}
+
 inline int boltSetRecvTimeoutMs(int fd, int timeoutMs)
 {
   const DWORD timeoutMsValue = static_cast<DWORD>(timeoutMs);
@@ -129,6 +135,12 @@ inline int boltBind(int fd, const sockaddr *addr, int addrlen)
 inline int boltListen(int fd, int backlog)
 {
   return listen(socket_detail::toHandle(fd), backlog);
+}
+
+inline int boltAccept(int fd, sockaddr *addr, int *addrlen)
+{
+  const SOCKET client = accept(socket_detail::toHandle(fd), addr, addrlen);
+  return socket_detail::fromHandle(client);
 }
 
 inline int boltAcceptNonBlocking(int fd, sockaddr *addr, int *addrlen)
@@ -232,6 +244,11 @@ inline int boltInetPton(int af, const char *src, void *dst)
   return inet_pton(af, src, dst);
 }
 
+inline const char *boltInetNtop(int af, const void *src, char *dst, size_t size)
+{
+  return inet_ntop(af, src, dst, static_cast<socklen_t>(size));
+}
+
 inline int boltSetRecvTimeoutMs(int fd, int timeoutMs)
 {
   timeval tv;
@@ -254,6 +271,11 @@ inline int boltBind(int fd, const sockaddr *addr, socklen_t addrlen)
 inline int boltListen(int fd, int backlog)
 {
   return listen(fd, backlog);
+}
+
+inline int boltAccept(int fd, sockaddr *addr, socklen_t *addrlen)
+{
+  return accept(fd, addr, addrlen);
 }
 
 inline int boltAcceptNonBlocking(int fd, sockaddr *addr, socklen_t *addrlen)
