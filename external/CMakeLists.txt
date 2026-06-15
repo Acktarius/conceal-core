@@ -11,9 +11,9 @@ if (DO_TESTS)
 endif()
 
 if(ENABLE_MDBX)
-    set(MDBX_BUILD_TOOLS OFF CACHE BOOL "Disable MDBX tools")
-    set(MDBX_BUILD_TESTS OFF CACHE BOOL "Disable MDBX tests")
-    set(MDBX_BUILD_CXX OFF CACHE BOOL "Disable MDBX C++ API (conceal uses C API only)")
+    set(MDBX_BUILD_TOOLS OFF CACHE BOOL "Disable MDBX tools" FORCE)
+    set(MDBX_ENABLE_TESTS OFF CACHE BOOL "Disable MDBX tests" FORCE)
+    set(MDBX_BUILD_CXX OFF CACHE BOOL "Disable MDBX C++ API (conceal uses C API only)" FORCE)
 
     set(CMAKE_C_FLAGS_BAK "${CMAKE_C_FLAGS}")
     if(NOT MSVC)
