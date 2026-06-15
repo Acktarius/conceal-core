@@ -41,6 +41,8 @@ inline int fromHandle(SOCKET handle)
 } // namespace socket_detail
 
 constexpr int BOLT_INVALID_SOCKET = -1;
+// Linux SOCK_NONBLOCK (0x800); internal flag for boltSocket, not passed to ::socket() on Windows.
+constexpr int BOLT_SOCK_NONBLOCK = 0x800;
 constexpr int BOLT_SHUT_RDWR = SD_BOTH;
 constexpr int BOLT_MSG_NOSIGNAL = 0;
 constexpr int BOLT_EINPROGRESS = WSAEWOULDBLOCK;
@@ -81,8 +83,8 @@ inline int boltSetNonBlocking(int fd, bool enable)
 inline int boltSocket(int domain, int type, int protocol)
 {
   socket_detail::ensureInit();
-  const bool nonBlocking = (type & SOCK_NONBLOCK) != 0;
-  const int baseType = type & ~SOCK_NONBLOCK;
+  const bool nonBlocking = (type & BOLT_SOCK_NONBLOCK) != 0;
+  const int baseType = type & ~BOLT_SOCK_NONBLOCK;
   const SOCKET handle = ::socket(domain, baseType, protocol);
   const int fd = socket_detail::fromHandle(handle);
   if (fd < 0)
@@ -175,6 +177,7 @@ inline int boltGetSocketError(int fd)
 namespace BoltHttp
 {
 constexpr int BOLT_INVALID_SOCKET = -1;
+constexpr int BOLT_SOCK_NONBLOCK = SOCK_NONBLOCK;
 constexpr int BOLT_SHUT_RDWR = SHUT_RDWR;
 constexpr int BOLT_MSG_NOSIGNAL = MSG_NOSIGNAL;
 constexpr int BOLT_EINPROGRESS = EINPROGRESS;
@@ -255,7 +258,7 @@ inline int boltListen(int fd, int backlog)
 
 inline int boltAcceptNonBlocking(int fd, sockaddr *addr, socklen_t *addrlen)
 {
-  return accept4(fd, addr, addrlen, SOCK_NONBLOCK);
+  return accept4(fd, addr, addrlen, BOLT_SOCK_NONBLOCK);
 }
 
 inline int boltSelectWrite(int fd, int timeoutSec, int timeoutUsec)

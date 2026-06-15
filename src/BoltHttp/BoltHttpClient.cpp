@@ -29,7 +29,7 @@ namespace BoltHttp
 
   bool HttpClient::connect(int timeoutMs)
   {
-    m_socket = boltSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    m_socket = boltSocket(AF_INET, SOCK_STREAM | BOLT_SOCK_NONBLOCK, 0);
     if (m_socket < 0)
       return false;
 
