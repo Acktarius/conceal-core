@@ -59,8 +59,8 @@ jobs:
           mkdir build/conceal
           mv build/src/Release/conceald.exe build/conceal
           mv build/src/Release/concealwallet.exe build/conceal
-          mv build/src/Release/optimizer.exe build/conceal
-          mv build/src/Release/walletd.exe build/conceal
+          mv build/src/Tools/Release/conceal-optimizer.exe build/conceal
+          mv build/src/Release/conceal-rpc.exe build/conceal
           cp build/tests/Release/*_tests.exe build/conceal
 
       - name: Upload To GH Artifacts
@@ -143,8 +143,8 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald.exe build/conceal
           mv build/src/concealwallet.exe build/conceal
-          mv build/src/optimizer.exe build/conceal
-          mv build/src/walletd.exe build/conceal
+          mv build/src/Tools/conceal-optimizer.exe build/conceal
+          mv build/src/conceal-rpc.exe build/conceal
           cp build/tests/*_tests.exe build/conceal
 
       - name: Upload To GH Artifacts
@@ -212,8 +212,8 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
-          mv build/src/optimizer build/conceal
-          mv build/src/walletd build/conceal
+          mv build/src/Tools/conceal-optimizer build/conceal
+          mv build/src/conceal-rpc build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
@@ -282,8 +282,8 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
-          mv build/src/optimizer build/conceal
-          mv build/src/walletd build/conceal
+          mv build/src/Tools/conceal-optimizer build/conceal
+          mv build/src/conceal-rpc build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
@@ -352,8 +352,8 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
-          mv build/src/optimizer build/conceal
-          mv build/src/walletd build/conceal
+          mv build/src/Tools/conceal-optimizer build/conceal
+          mv build/src/conceal-rpc build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
@@ -421,8 +421,8 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
-          mv build/src/optimizer build/conceal
-          mv build/src/walletd build/conceal
+          mv build/src/Tools/conceal-optimizer build/conceal
+          mv build/src/conceal-rpc build/conceal
           cp build/tests/*_tests build/conceal
 
       - name: Upload To GH Artifacts
