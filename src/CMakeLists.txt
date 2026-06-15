@@ -112,6 +112,9 @@ target_link_libraries(SidechainLib PUBLIC Blockchain NodeRpcProxy System Rpc HTT
     crypto
   -Wl,--end-group
   ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+if(WIN32)
+  target_link_libraries(SidechainLib PUBLIC ws2_32)
+endif()
 add_dependencies(SidechainLib version)
 
 # BoltRPC static library — uses NodeClientLib instead of NodeRpcProxy
@@ -137,6 +140,9 @@ target_link_libraries(BoltRpcLib PUBLIC
     crypto
     -Wl,--end-group
 )
+if(WIN32)
+  target_link_libraries(BoltRpcLib PUBLIC ws2_32)
+endif()
 add_dependencies(BoltRpcLib version)
 
 # ── Link dependencies ─────────────────────────────────────────────────────

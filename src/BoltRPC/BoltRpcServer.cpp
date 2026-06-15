@@ -18,7 +18,9 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
-#pragma comment(lib, "ws2_32.lib")
+#include <ws2tcpip.h>
+typedef int socklen_t;
+typedef int ssize_t;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -219,7 +221,11 @@ namespace BoltRPC
     while (m_running.load())
     {
       sockaddr_in clientAddr;
+#ifdef _WIN32
+      int clientLen = sizeof(clientAddr);
+#else
       socklen_t clientLen = sizeof(clientAddr);
+#endif
       int clientSocket = accept(m_serverSocket,
                                 reinterpret_cast<sockaddr *>(&clientAddr),
                                 &clientLen);
@@ -233,7 +239,7 @@ namespace BoltRPC
 
       char buffer[65536];
       std::memset(buffer, 0, sizeof(buffer));
-      ssize_t bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+      int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
 
       std::string response;
       if (bytesRead > 0)

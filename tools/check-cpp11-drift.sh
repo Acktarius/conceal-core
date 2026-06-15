@@ -14,6 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${ROOT}/src"
+TESTS="${ROOT}/tests"
 RUN_CLANG=0
 FAILED=0
 
@@ -41,7 +42,7 @@ if ! command -v rg >/dev/null 2>&1; then
 fi
 
 echo "== C++11 drift check (project standard: C++11) =="
-echo "Scanning: ${SRC}"
+echo "Scanning: ${SRC} and ${TESTS}"
 echo
 
 # label|regex|note
@@ -61,7 +62,7 @@ PATTERNS=(
 echo "-- Static pattern scan (rg) --"
 for entry in "${PATTERNS[@]}"; do
   IFS='|' read -r label regex note <<<"$entry"
-  matches="$(rg -n --glob '*.{cpp,h,hpp,hxx,c++}' --glob '!**/external/**' "$regex" "$SRC" 2>/dev/null || true)"
+  matches="$(rg -n --glob '*.{cpp,h,hpp,hxx,c++}' --glob '!**/external/**' "$regex" "$SRC" "$TESTS" 2>/dev/null || true)"
   if [[ -n "$matches" ]]; then
     echo "FAIL [${label}] (${note})"
     echo "$matches"

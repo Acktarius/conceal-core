@@ -3,10 +3,36 @@
 // Distributed under the MIT/X11 software license
 
 #include "GossipManager.h"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef int ssize_t;
+#define close closesocket
+#define SHUT_RDWR SD_BOTH
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+inline int gossipInetPton(int af, const char *src, void *dst)
+{
+  return InetPtonA(af, src, dst);
+}
+inline const char *gossipInetNtop(int af, const void *src, char *dst, size_t size)
+{
+  return InetNtopA(af, const_cast<PVOID>(src), dst, static_cast<DWORD>(size));
+}
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#define gossipInetPton inet_pton
+#define gossipInetNtop inet_ntop
+#endif
+
 #include <cstring>
 #include <iostream>
 #include <algorithm>
@@ -29,6 +55,11 @@ namespace Sidechain
       return;
     m_running = true;
 
+#ifdef _WIN32
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
     // Create server socket
     m_serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (m_serverSocket < 0)
@@ -37,8 +68,14 @@ namespace Sidechain
       return;
     }
 
+#ifdef _WIN32
+    BOOL reuseAddr = TRUE;
+    setsockopt(m_serverSocket, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char *>(&reuseAddr), sizeof(reuseAddr));
+#else
     int opt = 1;
     setsockopt(m_serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -140,7 +177,7 @@ namespace Sidechain
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    gossipInetPton(AF_INET, host.c_str(), &addr.sin_addr);
 
     if (connect(sock, (sockaddr *)&addr, sizeof(addr)) == 0)
     {
@@ -170,14 +207,18 @@ namespace Sidechain
     while (m_running)
     {
       sockaddr_in clientAddr{};
+#ifdef _WIN32
+      int clientLen = sizeof(clientAddr);
+#else
       socklen_t clientLen = sizeof(clientAddr);
+#endif
       int clientSock = accept(m_serverSocket, (sockaddr *)&clientAddr, &clientLen);
 
       if (clientSock < 0)
         continue;
 
       char clientIp[INET_ADDRSTRLEN];
-      inet_ntop(AF_INET, &clientAddr.sin_addr, clientIp, INET_ADDRSTRLEN);
+      gossipInetNtop(AF_INET, &clientAddr.sin_addr, clientIp, INET_ADDRSTRLEN);
       std::string peerAddr = std::string(clientIp) + ":" + std::to_string(ntohs(clientAddr.sin_port));
 
       std::lock_guard<std::mutex> lock(m_peersMutex);
@@ -201,7 +242,7 @@ namespace Sidechain
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
-        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+        gossipInetPton(AF_INET, host.c_str(), &addr.sin_addr);
 
         if (connect(sock, (sockaddr *)&addr, sizeof(addr)) == 0)
         {
