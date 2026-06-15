@@ -16,7 +16,9 @@ if(ENABLE_MDBX)
     set(MDBX_BUILD_CXX OFF CACHE BOOL "Disable MDBX C++ API (conceal uses C API only)")
 
     set(CMAKE_C_FLAGS_BAK "${CMAKE_C_FLAGS}")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-undef -Wno-logical-op -Wno-aggregate-return -Wno-nested-externs -Wno-discarded-qualifiers -Wno-strict-prototypes -Wno-old-style-definition")
+    if(NOT MSVC)
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-undef -Wno-logical-op -Wno-aggregate-return -Wno-nested-externs -Wno-discarded-qualifiers -Wno-strict-prototypes -Wno-old-style-definition")
+    endif()
 
     add_subdirectory(mdbx)
     
