@@ -4,14 +4,14 @@
 # Options:
 #   MIGRATION_GUI_AUTO_INSTALL_DEPS — try platform package manager (default: ON)
 #
-# Sets: wxWidgets_FOUND, includes wxWidgets_USE_FILE via conceal_find_or_install_wxwidgets()
+# Sets: wxWidgets_FOUND, and either _wxwidgetsUseCmakeTargets + wx:: targets (MinGW)
+#       or legacy FindwxWidgets variables via conceal_find_or_install_wxwidgets().
 
 option(MIGRATION_GUI_AUTO_INSTALL_DEPS
        "Try to install wxWidgets development packages if not found (Linux/macOS)"
        ON)
 
 function(_conceal_run_elevated out_var)
-  # Prefer non-interactive sudo (CI); then interactive sudo; then raw command (root).
   execute_process(
     COMMAND sudo -n ${ARGN}
     RESULT_VARIABLE _rv
@@ -144,43 +144,13 @@ function(_conceal_wxwidgets_manual_hint)
   message(STATUS "  Fedora:        sudo dnf install -y wxGTK3-devel")
   message(STATUS "  Arch:          sudo pacman -S --needed wxwidgets-gtk3")
   message(STATUS "  macOS:         brew install wxwidgets")
+  message(STATUS "  MSYS2 MinGW:   pacman -S mingw-w64-x86_64-wxwidgets3.2-msw mingw-w64-x86_64-wxwidgets3.2-common")
   message(STATUS "  Or disable auto-install: -DMIGRATION_GUI_AUTO_INSTALL_DEPS=OFF")
   message(STATUS "")
 endfunction()
 
-function(_conceal_wxwidgets_mingw_link_libs out_var)
-  find_program(_wxConfigExe
-    NAMES wx-config-static wx-config-3.2 wx-config
-    HINTS "$ENV{MINGW_PREFIX}/bin" "/mingw64/bin")
-  if(NOT _wxConfigExe)
-    set(${out_var} "" PARENT_SCOPE)
-    return()
-  endif()
-
-  set(_wxConfigArgs --unicode --release --libs core,base)
-  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(_wxConfigArgs --unicode --debug --libs core,base)
-  endif()
-
-  execute_process(
-    COMMAND ${_wxConfigExe} ${_wxConfigArgs}
-    OUTPUT_VARIABLE _wxLibs
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_VARIABLE _wxErr
-    RESULT_VARIABLE _wxRv)
-  if(NOT _wxRv EQUAL 0 OR NOT _wxLibs)
-    message(STATUS "wx-config failed (${_wxConfigExe}): ${_wxErr}")
-    set(${out_var} "" PARENT_SCOPE)
-    return()
-  endif()
-
-  separate_arguments(_wxLibList NATIVE_COMMAND "${_wxLibs}")
-  set(${out_var} "${_wxLibList}" PARENT_SCOPE)
-endfunction()
-
-# Macro (not function): find_package + include(wxWidgets_USE_FILE) must set
-# wxWidgets_LIBRARIES in the caller's scope for target_link_libraries to work.
-macro(conceal_find_or_install_wxwidgets)
+# Macro (not function): find_package must set variables in the caller's scope.
+macro(_conceal_find_wxwidgets_module)
   set(wxWidgets_USE_FILE "${wxWidgets_USE_FILE}" CACHE FILEPATH "" FORCE)
 
   if(WIN32)
@@ -196,31 +166,50 @@ macro(conceal_find_or_install_wxwidgets)
     endif()
   endif()
 
-  find_package(wxWidgets 3.0 QUIET COMPONENTS core base)
-
+  find_package(wxWidgets 3.0 QUIET MODULE COMPONENTS core base)
   if(wxWidgets_FOUND)
-    message(STATUS "wxWidgets ${wxWidgets_VERSION_STRING} found")
+    message(STATUS "wxWidgets ${wxWidgets_VERSION_STRING} found (FindwxWidgets)")
     include(${wxWidgets_USE_FILE})
-    if(MINGW)
-      _conceal_wxwidgets_mingw_link_libs(_mingwWxLibs)
-      if(_mingwWxLibs)
-        set(wxWidgets_LIBRARIES ${_mingwWxLibs})
-      endif()
-    endif()
-  elseif(MIGRATION_GUI_AUTO_INSTALL_DEPS)
+  endif()
+endmacro()
+
+macro(_conceal_find_wxwidgets_config)
+  if(STATIC)
+    set(wxWidgets_USE_STATIC ON CACHE BOOL "Link wxWidgets statically" FORCE)
+  endif()
+
+  find_package(wxWidgets 3.2 QUIET CONFIG COMPONENTS core base
+    HINTS
+      "$ENV{MINGW_PREFIX}/lib/cmake/wxWidgets-3.2"
+      "/mingw64/lib/cmake/wxWidgets-3.2"
+      "${CMAKE_PREFIX_PATH}")
+
+  if(wxWidgets_FOUND AND TARGET wx::core)
+    set(_wxwidgetsUseCmakeTargets TRUE)
+    message(STATUS "wxWidgets found (CMake package config, static=${wxWidgets_USE_STATIC})")
+  endif()
+endmacro()
+
+macro(conceal_find_or_install_wxwidgets)
+  set(_wxwidgetsUseCmakeTargets FALSE)
+
+  if(MINGW)
+    _conceal_find_wxwidgets_config()
+  endif()
+
+  if(NOT _wxwidgetsUseCmakeTargets)
+    _conceal_find_wxwidgets_module()
+  endif()
+
+  if(NOT wxWidgets_FOUND AND MIGRATION_GUI_AUTO_INSTALL_DEPS)
     message(STATUS "wxWidgets not found — attempting to install dependencies...")
     _conceal_install_wxwidgets_deps()
     unset(wxWidgets_DIR CACHE)
-    find_package(wxWidgets 3.0 QUIET COMPONENTS core base)
-    if(wxWidgets_FOUND)
-      message(STATUS "wxWidgets ${wxWidgets_VERSION_STRING} found after install attempt")
-      include(${wxWidgets_USE_FILE})
-      if(MINGW)
-        _conceal_wxwidgets_mingw_link_libs(_mingwWxLibs)
-        if(_mingwWxLibs)
-          set(wxWidgets_LIBRARIES ${_mingwWxLibs})
-        endif()
-      endif()
+    if(MINGW)
+      _conceal_find_wxwidgets_config()
+    endif()
+    if(NOT _wxwidgetsUseCmakeTargets)
+      _conceal_find_wxwidgets_module()
     endif()
   endif()
 
