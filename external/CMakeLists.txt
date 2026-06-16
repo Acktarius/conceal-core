@@ -26,6 +26,7 @@ if(ENABLE_MDBX)
 
     if(TARGET mdbx-static)
       set_target_properties(mdbx-static PROPERTIES SYSTEM TRUE)
+      target_compile_definitions(mdbx-static INTERFACE MDBX_BUILD_SHARED_LIBRARY=0)
       if(WIN32)
         target_link_libraries(mdbx-static INTERFACE psapi)
       endif()

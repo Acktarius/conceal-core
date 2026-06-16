@@ -19,8 +19,10 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#ifdef _MSC_VER
 typedef int socklen_t;
 typedef int ssize_t;
+#endif
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
