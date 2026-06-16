@@ -36,6 +36,12 @@ foreach(_wxLib ${wxWidgets_LIBRARIES})
   endif()
 endforeach()
 target_link_libraries(MigrationToolGui PRIVATE ${_migrationGuiWxLibs})
+# wxMSW uses VerQueryValueW / StrCmpLogicalW; MSYS2 MinGW wx config omits these libs.
+if(MINGW)
+  target_link_libraries(MigrationToolGui PRIVATE "-lversion" "-lshlwapi")
+elseif(MSVC)
+  target_link_libraries(MigrationToolGui PRIVATE shlwapi.lib)
+endif()
 add_dependencies(MigrationToolGui version)
 set_property(TARGET MigrationToolGui PROPERTY OUTPUT_NAME "conceald-migrate-gui")
 
