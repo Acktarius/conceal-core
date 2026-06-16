@@ -29,16 +29,18 @@ endif()
 # wxMSW links version.lib; avoid CMake resolving "version" to our version UTILITY target.
 set(_migrationGuiWxLibs)
 foreach(_wxLib ${wxWidgets_LIBRARIES})
-  if(WIN32 AND _wxLib STREQUAL "version")
+  if(MSVC AND _wxLib STREQUAL "version")
     list(APPEND _migrationGuiWxLibs "version.lib")
   else()
     list(APPEND _migrationGuiWxLibs ${_wxLib})
   endif()
 endforeach()
 target_link_libraries(MigrationToolGui PRIVATE ${_migrationGuiWxLibs})
-# wxMSW uses VerQueryValueW / StrCmpLogicalW / CloseThemeData; MSYS2 MinGW wx config omits these.
-if(MINGW)
-  target_link_libraries(MigrationToolGui PRIVATE "-lversion" "-lshlwapi" "-luxtheme")
+# MSYS2 FindwxWidgets lists core/base only; wx-config-static adds bundled png/jpeg/zlib/etc.
+if(MINGW AND NOT _mingwWxLibs)
+  target_link_libraries(MigrationToolGui PRIVATE
+    "-lwxpng-3.2" "-lwxzlib-3.2" "-lwxjpeg-3.2" "-lwxregexu-3.2" "-lwxtiff-3.2" "-lwxexpat-3.2"
+    "-lversion" "-lshlwapi" "-luxtheme")
 elseif(MSVC)
   target_link_libraries(MigrationToolGui PRIVATE shlwapi.lib uxtheme.lib)
 endif()

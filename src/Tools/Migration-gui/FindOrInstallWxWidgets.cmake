@@ -148,6 +148,36 @@ function(_conceal_wxwidgets_manual_hint)
   message(STATUS "")
 endfunction()
 
+function(_conceal_wxwidgets_mingw_link_libs out_var)
+  find_program(_wxConfigExe
+    NAMES wx-config-static wx-config-3.2 wx-config
+    HINTS "$ENV{MINGW_PREFIX}/bin" "/mingw64/bin")
+  if(NOT _wxConfigExe)
+    set(${out_var} "" PARENT_SCOPE)
+    return()
+  endif()
+
+  set(_wxConfigArgs --unicode --release --libs core,base)
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_wxConfigArgs --unicode --debug --libs core,base)
+  endif()
+
+  execute_process(
+    COMMAND ${_wxConfigExe} ${_wxConfigArgs}
+    OUTPUT_VARIABLE _wxLibs
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_VARIABLE _wxErr
+    RESULT_VARIABLE _wxRv)
+  if(NOT _wxRv EQUAL 0 OR NOT _wxLibs)
+    message(STATUS "wx-config failed (${_wxConfigExe}): ${_wxErr}")
+    set(${out_var} "" PARENT_SCOPE)
+    return()
+  endif()
+
+  separate_arguments(_wxLibList NATIVE_COMMAND "${_wxLibs}")
+  set(${out_var} "${_wxLibList}" PARENT_SCOPE)
+endfunction()
+
 # Macro (not function): find_package + include(wxWidgets_USE_FILE) must set
 # wxWidgets_LIBRARIES in the caller's scope for target_link_libraries to work.
 macro(conceal_find_or_install_wxwidgets)
@@ -171,6 +201,12 @@ macro(conceal_find_or_install_wxwidgets)
   if(wxWidgets_FOUND)
     message(STATUS "wxWidgets ${wxWidgets_VERSION_STRING} found")
     include(${wxWidgets_USE_FILE})
+    if(MINGW)
+      _conceal_wxwidgets_mingw_link_libs(_mingwWxLibs)
+      if(_mingwWxLibs)
+        set(wxWidgets_LIBRARIES ${_mingwWxLibs})
+      endif()
+    endif()
   elseif(MIGRATION_GUI_AUTO_INSTALL_DEPS)
     message(STATUS "wxWidgets not found — attempting to install dependencies...")
     _conceal_install_wxwidgets_deps()
@@ -179,6 +215,12 @@ macro(conceal_find_or_install_wxwidgets)
     if(wxWidgets_FOUND)
       message(STATUS "wxWidgets ${wxWidgets_VERSION_STRING} found after install attempt")
       include(${wxWidgets_USE_FILE})
+      if(MINGW)
+        _conceal_wxwidgets_mingw_link_libs(_mingwWxLibs)
+        if(_mingwWxLibs)
+          set(wxWidgets_LIBRARIES ${_mingwWxLibs})
+        endif()
+      endif()
     endif()
   endif()
 
