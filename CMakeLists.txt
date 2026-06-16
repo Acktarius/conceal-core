@@ -17,6 +17,15 @@ set(CMAKE_SUPPRESS_REGENERATION ON)
 
 project(concealX)
 
+# GNU ld only: macOS ld does not support --start-group/--end-group.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
+  set(CN_LINK_GROUP_START "-Wl,--start-group")
+  set(CN_LINK_GROUP_END "-Wl,--end-group")
+else()
+  set(CN_LINK_GROUP_START "")
+  set(CN_LINK_GROUP_END "")
+endif()
+
 include_directories(include src external "${CMAKE_BINARY_DIR}/version")
 
 if(APPLE OR FREEBSD)
@@ -106,10 +115,10 @@ else()
 	endif()
 
   set(WARNINGS "-Wall -Wextra -Wpointer-arith -Wundef -Wvla -Wwrite-strings -Wno-error=extra -Wno-error=unused-function -Wno-error=deprecated-declarations -Wno-error=sign-compare -Wno-error=strict-aliasing -Wno-error=type-limits -Wno-unused-parameter -Wno-error=unused-variable -Wno-error=undef -Wno-error=uninitialized -Wno-error=unused-result")
-  if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     set(WARNINGS "${WARNINGS} -Wno-error=mismatched-tags -Wno-error=null-conversion -Wno-overloaded-shift-op-parentheses -Wno-error=shift-count-overflow -Wno-error=tautological-constant-out-of-range-compare -Wno-error=unused-private-field -Wno-error=unneeded-internal-declaration -Wno-error=unused-function")
     add_definitions(/DHAVE_ROTR)
-  else()
+  elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     set(WARNINGS "${WARNINGS} -Wlogical-op -Wno-error=maybe-uninitialized -Wno-error=clobbered -Wno-error=unused-but-set-variable")
   endif()
   if(MINGW)

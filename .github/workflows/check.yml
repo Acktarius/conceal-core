@@ -155,8 +155,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pacman -U --noconfirm https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-boost-1.85.0-4-any.pkg.tar.zst
-          pacman -S --noconfirm mingw-w64-x86_64-wxwidgets
+          pacman -S --noconfirm mingw-w64-x86_64-boost mingw-w64-x86_64-wxwidgets
 
       - name: Prepare version
         shell: powershell

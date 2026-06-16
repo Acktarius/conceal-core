@@ -106,11 +106,11 @@ endif()
 # Sidechain static library
 add_library(SidechainLib STATIC ${SIDECHAIN_FILES})
 target_link_libraries(SidechainLib PUBLIC Blockchain NodeRpcProxy System Rpc HTTP BoltSync BoltCore BoltHttp CryptoNoteCore Serialization
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
     Common
     Logging
     crypto
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 if(WIN32)
   target_link_libraries(SidechainLib PUBLIC ws2_32)
@@ -134,11 +134,11 @@ target_link_libraries(BoltRpcLib PUBLIC
     Serialization
     ${Boost_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
-    -Wl,--start-group
+    ${CN_LINK_GROUP_START}
     Common
     Logging
     crypto
-    -Wl,--end-group
+    ${CN_LINK_GROUP_END}
 )
 if(WIN32)
   target_link_libraries(BoltRpcLib PUBLIC ws2_32)
@@ -208,12 +208,12 @@ target_link_libraries(ClientWallet
     System
     Serialization
     ${CMAKE_THREAD_LIBS_INIT}
-    -Wl,--start-group
+    ${CN_LINK_GROUP_START}
     Common
     Logging
     crypto
     ${Boost_LIBRARIES}
-    -Wl,--end-group
+    ${CN_LINK_GROUP_END}
 )
 
 # ── BoltRPC — uses NodeClientLib instead of NodeRpcProxy ──────────────────
@@ -232,21 +232,21 @@ target_link_libraries(BoltRPC
     CryptoNoteCore
     Serialization
     ${CMAKE_THREAD_LIBS_INIT}
-    -Wl,--start-group
+    ${CN_LINK_GROUP_START}
     Common
     Logging
     crypto
     ${Boost_LIBRARIES}
-    -Wl,--end-group
+    ${CN_LINK_GROUP_END}
 )
 
 # ── Sidechain ─────────────────────────────────────────────────────────────
 target_link_libraries(Sidechain BoltSync BoltCore BoltHttp NodeRpcProxy Rpc HTTP System Blockchain CryptoNoteCore Serialization
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
       Common
       Logging
       crypto
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   ${Boost_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
 )

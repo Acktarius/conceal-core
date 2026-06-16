@@ -54,28 +54,28 @@ if(WITH_OPENCL AND OpenCL_FOUND)
 endif()
 
 target_link_libraries(CoreTests
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
   TestGenerator CryptoNoteCore Blockchain Storage
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   Serialization System Logging Common crypto BlockchainExplorer ${Boost_LIBRARIES})
 target_link_libraries(IntegrationTests
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
   IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc HTTP Transfers
   CryptoNoteCore Blockchain Storage
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   Serialization System Logging Common crypto BlockchainExplorer gtest libminiupnpc-static ${Boost_LIBRARIES})
 # pow/CryptoNoteCore are linked again via INTERFACE deps; Blockchain must follow.
 target_link_libraries(IntegrationTests Blockchain Storage)
 target_link_libraries(NodeRpcProxyTests
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
   NodeRpcProxy CryptoNoteCore pow Rpc HTTP
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   Serialization System Logging Common crypto ${Boost_LIBRARIES})
 target_link_libraries(PowGpuEquivalenceTests crypto pow CryptoNoteCore ${Boost_LIBRARIES})
 target_link_libraries(PerformanceTests
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
   CryptoNoteCore Blockchain Storage
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   Serialization Logging Common crypto ${Boost_LIBRARIES})
 target_link_libraries(SystemTests System gtest_main)
 if (MSVC)
@@ -84,16 +84,16 @@ if (MSVC)
   target_link_libraries(CoreTests ws2_32)
 endif ()
 target_link_libraries(TransfersTests
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
   IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc HTTP BlockchainExplorer
   CryptoNoteCore Blockchain Storage Transfers
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   Serialization System Logging Common crypto libminiupnpc-static ${Boost_LIBRARIES})
 target_link_libraries(UnitTests
-  -Wl,--start-group
+  ${CN_LINK_GROUP_START}
   TestGenerator Wallet NodeRpcProxy InProcessNode P2P Rpc HTTP Transfers
   CryptoNoteCore Blockchain Storage
-  -Wl,--end-group
+  ${CN_LINK_GROUP_END}
   Serialization System Logging Common crypto BlockchainExplorer gtest ${Boost_LIBRARIES})
 
 target_link_libraries(DifficultyTests CryptoNoteCore Serialization crypto Logging Common ${Boost_LIBRARIES})
@@ -104,9 +104,9 @@ target_link_libraries(BoltCoreBalanceTrackerTests BoltCore CryptoNoteCore Loggin
 
 if(WITH_OPENCL AND OpenCL_FOUND)
   target_link_libraries(GpuVsCpuMiningHashTests
-    -Wl,--start-group
+    ${CN_LINK_GROUP_START}
     pow CryptoNoteCore ${Boost_LIBRARIES}
-    -Wl,--end-group)
+    ${CN_LINK_GROUP_END})
 endif()
 
 add_custom_target(tests DEPENDS NodeRpcProxyTests PerformanceTests SystemTests UnitTests DifficultyTests HashTargetTests PowGpuEquivalenceTests PowGpuMineEquivalenceTests BoltCoreBalanceTrackerTests)
