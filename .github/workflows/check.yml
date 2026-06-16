@@ -48,7 +48,7 @@ jobs:
           Start-Process -Wait -FilePath "$env:TEMP\boost.exe" "/SILENT","/SP-","/SUPPRESSMSGBOXES","/DIR=${env:BOOST_ROOT}"
 
       - name: Restore wxWidgets
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: restore-wxwidgets
         with:
           path: ${{ env.WXWIN }}
@@ -458,21 +458,22 @@ jobs:
       - name: Prepare version
         id: setup
         run: |
-          os=macos-13
+          os=macos-15-intel
           ccx_version=${GITHUB_SHA::7}
           release_name=ccx-cli-"$os"-dev-"$ccx_version"
           echo "release_name=${release_name}" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: |
-          brew install boost@1.85 wxwidgets
+          brew install boost wxwidgets
+          brew list --versions boost
 
       - name: Build
         id: build
         run: |
           mkdir build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF -DBOOST_ROOT=/usr/local/opt/boost@1.85
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DSTATIC=ON -DWITH_OPENCL=OFF -DBOOST_ROOT="$(brew --prefix boost)"
           make -j2
 
       - name: Prepare release
