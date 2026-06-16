@@ -1,4 +1,4 @@
-// BoltHttpServer_win.cpp — Windows stub (epoll server is Linux-only for now)
+// BoltHttpServer_win.cpp — stub (epoll server is Linux-only for now)
 // Copyright (c) 2018-2026 Conceal Network & Conceal Devs
 
 #include "BoltHttpServer.h"
@@ -41,7 +41,7 @@ namespace BoltHttp
 
   void Server::start(const std::string &bindIp, uint16_t port)
   {
-    std::cerr << "BoltHttp: HTTP server is not supported on Windows (" << bindIp << ":" << port << ")\n";
+    std::cerr << "BoltHttp: HTTP server is not supported on this platform (" << bindIp << ":" << port << ")\n";
   }
 
   void Server::stop() {}

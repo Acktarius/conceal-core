@@ -189,9 +189,18 @@ inline int boltGetSocketError(int fd)
 namespace BoltHttp
 {
 constexpr int BOLT_INVALID_SOCKET = -1;
+#if defined(__linux__)
 constexpr int BOLT_SOCK_NONBLOCK = SOCK_NONBLOCK;
+#else
+// Linux SOCK_NONBLOCK (0x800); internal flag for boltSocket, not passed to ::socket() on BSD/macOS.
+constexpr int BOLT_SOCK_NONBLOCK = 0x800;
+#endif
 constexpr int BOLT_SHUT_RDWR = SHUT_RDWR;
+#ifndef MSG_NOSIGNAL
+constexpr int BOLT_MSG_NOSIGNAL = 0;
+#else
 constexpr int BOLT_MSG_NOSIGNAL = MSG_NOSIGNAL;
+#endif
 constexpr int BOLT_EINPROGRESS = EINPROGRESS;
 constexpr int BOLT_EAGAIN = EAGAIN;
 constexpr int BOLT_EWOULDBLOCK = EWOULDBLOCK;
@@ -231,7 +240,21 @@ inline int boltSetNonBlocking(int fd, bool enable)
 
 inline int boltSocket(int domain, int type, int protocol)
 {
+#if defined(__linux__)
   return ::socket(domain, type, protocol);
+#else
+  const bool nonBlocking = (type & BOLT_SOCK_NONBLOCK) != 0;
+  const int baseType = type & ~BOLT_SOCK_NONBLOCK;
+  const int fd = ::socket(domain, baseType, protocol);
+  if (fd < 0)
+    return BOLT_INVALID_SOCKET;
+  if (nonBlocking && boltSetNonBlocking(fd, true) != 0)
+  {
+    boltClose(fd);
+    return BOLT_INVALID_SOCKET;
+  }
+  return fd;
+#endif
 }
 
 inline int boltConnect(int fd, const sockaddr *addr, socklen_t addrlen)
@@ -280,7 +303,19 @@ inline int boltAccept(int fd, sockaddr *addr, socklen_t *addrlen)
 
 inline int boltAcceptNonBlocking(int fd, sockaddr *addr, socklen_t *addrlen)
 {
+#if defined(__linux__)
   return accept4(fd, addr, addrlen, BOLT_SOCK_NONBLOCK);
+#else
+  const int clientFd = accept(fd, addr, addrlen);
+  if (clientFd < 0)
+    return BOLT_INVALID_SOCKET;
+  if (boltSetNonBlocking(clientFd, true) != 0)
+  {
+    boltClose(clientFd);
+    return BOLT_INVALID_SOCKET;
+  }
+  return clientFd;
+#endif
 }
 
 inline int boltSelectWrite(int fd, int timeoutSec, int timeoutUsec)

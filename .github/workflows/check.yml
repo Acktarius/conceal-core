@@ -92,6 +92,7 @@ jobs:
           mkdir build/conceal
           mv build/src/Release/conceald.exe build/conceal
           mv build/src/Release/concealwallet.exe build/conceal
+          mv build/src/Release/conceal-wallet.exe build/conceal
           mv build/src/Tools/Release/conceal-optimizer.exe build/conceal
           mv build/src/Release/conceal-rpc.exe build/conceal
           mv build/src/Tools/Release/conceald-migrate.exe build/conceal
@@ -182,6 +183,7 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald.exe build/conceal
           mv build/src/concealwallet.exe build/conceal
+          mv build/src/conceal-wallet.exe build/conceal
           mv build/src/Tools/conceal-optimizer.exe build/conceal
           mv build/src/conceal-rpc.exe build/conceal
           mv build/src/Tools/conceald-migrate.exe build/conceal
@@ -257,6 +259,7 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
+          mv build/src/conceal-wallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
           mv build/src/Tools/conceald-migrate build/conceal
@@ -332,6 +335,7 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
+          mv build/src/conceal-wallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
           mv build/src/Tools/conceald-migrate build/conceal
@@ -407,6 +411,7 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
+          mv build/src/conceal-wallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
           mv build/src/Tools/conceald-migrate build/conceal
@@ -481,6 +486,7 @@ jobs:
           mkdir build/conceal
           mv build/src/conceald build/conceal
           mv build/src/concealwallet build/conceal
+          mv build/src/conceal-wallet build/conceal
           mv build/src/Tools/conceal-optimizer build/conceal
           mv build/src/conceal-rpc build/conceal
           mv build/src/Tools/conceald-migrate build/conceal
