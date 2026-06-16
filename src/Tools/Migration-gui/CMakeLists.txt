@@ -36,11 +36,16 @@ foreach(_wxLib ${wxWidgets_LIBRARIES})
   endif()
 endforeach()
 target_link_libraries(MigrationToolGui PRIVATE ${_migrationGuiWxLibs})
-# MSYS2 FindwxWidgets lists core/base only; wx-config-static adds bundled png/jpeg/zlib/etc.
-if(MINGW AND NOT _mingwWxLibs)
+# wx-config-static lists wx/bundled libs but MSYS2 omits Win32 system libs (comctl32, etc.).
+if(MINGW)
+  if(NOT _mingwWxLibs)
+    target_link_libraries(MigrationToolGui PRIVATE
+      "-lwxpng-3.2" "-lwxzlib-3.2" "-lwxjpeg-3.2" "-lwxregexu-3.2" "-lwxtiff-3.2" "-lwxexpat-3.2")
+  endif()
   target_link_libraries(MigrationToolGui PRIVATE
-    "-lwxpng-3.2" "-lwxzlib-3.2" "-lwxjpeg-3.2" "-lwxregexu-3.2" "-lwxtiff-3.2" "-lwxexpat-3.2"
-    "-lversion" "-lshlwapi" "-luxtheme")
+    comctl32 shell32 ole32 oleaut32 uuid oleacc
+    gdi32 winspool comdlg32 advapi32 user32 kernel32
+    ws2_32 shlwapi uxtheme "-lversion")
 elseif(MSVC)
   target_link_libraries(MigrationToolGui PRIVATE shlwapi.lib uxtheme.lib)
 endif()
