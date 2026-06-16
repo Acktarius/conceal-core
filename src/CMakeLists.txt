@@ -175,7 +175,7 @@ endif ()
 
 if (MINGW)
   target_link_libraries(Common dnsapi)
-  target_link_libraries(P2P bcrypt)
+  target_link_libraries(P2P PUBLIC bcrypt)
   target_link_libraries(System ws2_32)
 endif ()
 
