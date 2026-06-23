@@ -14,6 +14,8 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <parallel_hashmap/phmap.h>
@@ -432,9 +434,13 @@ namespace cn
     bool pushBlock(const BlockEntry &block);
     bool pushBlockMdbx(const BlockEntry &block);
 
-    void popBlock(const crypto::Hash &blockHash);
+    void popBlock(const crypto::Hash &blockHash,
+                  std::vector<std::pair<uint32_t, Transaction>> *deferredPoolTxs = nullptr);
     void popBlockMdbx(const crypto::Hash &blockHash);
     bool removeLastBlock();
+
+    void restoreDeferredTransactionsToPool(
+        std::vector<std::pair<uint32_t, Transaction>> &deferredPoolTxs);
 
     bool pushTransaction(BlockEntry &block, const crypto::Hash &transactionHash,
                          TransactionIndex transactionIndex);
@@ -503,6 +509,13 @@ namespace cn
     bool checkCheckpoints(uint32_t &lastValidCheckpointHeight);
 
     //  Private methods — Reorg
+    struct ForkPoint
+    {
+      crypto::Hash ancestorHash;
+      uint32_t ancestorHeight;
+      uint32_t splitHeight;
+    };
+
     bool switch_to_alternative_blockchain(const std::list<crypto::Hash> &alt_chain,
                                           bool discard_disconnected_chain);
     bool handle_alternative_block(const Block &b, const crypto::Hash &id,
@@ -511,9 +524,26 @@ namespace cn
     bool rollback_blockchain_switching(const std::list<Block> &original_chain,
                                        size_t rollback_height);
     bool findPreviousBlockHeight(const crypto::Hash &prevHash,
-                                 uint32_t &height, bool &inMainChain);
-    bool verifyAlternativeChainTransactions(const std::list<crypto::Hash> &alt_chain,
-                                            uint32_t split_height);
+                                 uint32_t &height, bool &inMainChain) const;
+    bool getForkPoint(const std::list<crypto::Hash> &alt_chain, ForkPoint &out);
+    bool isAltChainHeavier(const BlockEntry &altTip) const;
+    void collectDisplacedMainChainSegment(
+        uint32_t splitHeight,
+        std::list<Block> &disconnectedBlocks,
+        std::unordered_map<crypto::Hash, Transaction> &displacedTxs);
+    static void collectAltChainTxHashes(
+        const std::list<crypto::Hash> &alt_chain,
+        const blocks_ext_by_hash &alternativeChains,
+        std::unordered_set<crypto::Hash> &out);
+    static size_t countTxsNotOnAltChain(
+        const std::unordered_set<crypto::Hash> &mainTxs,
+        const std::unordered_set<crypto::Hash> &altTxs);
+  bool resolveAltBlockTransactions(
+      const Block &block,
+      const BlockEntry &altEntry,
+      const std::unordered_map<crypto::Hash, Transaction> &displacedTxs,
+      std::vector<Transaction> &transactions);
+  bool findTransactionInAlternativeChains(const crypto::Hash &txHash, Transaction &tx) const;
 
     //  Private methods — Sync
     std::vector<crypto::Hash> doBuildSparseChain(const crypto::Hash &startBlockId) const;

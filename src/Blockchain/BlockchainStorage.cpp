@@ -461,7 +461,8 @@ namespace cn
   }
 
   // Block removal (pop)
-  void Blockchain::popBlock(const crypto::Hash &blockHash)
+  void Blockchain::popBlock(const crypto::Hash &blockHash,
+                            std::vector<std::pair<uint32_t, Transaction>> *deferredPoolTxs)
   {
     if (blocksEmpty())
     {
@@ -470,17 +471,25 @@ namespace cn
     }
 
     BlockEntry entry = blocksBack();
-    uint32_t height = static_cast<uint32_t>(blocksSize());
+    const uint32_t height = static_cast<uint32_t>(blocksSize());
 
-    // Save transactions back to the pool
     std::vector<Transaction> transactions(entry.transactions.size() - 1);
     for (size_t i = 0; i < entry.transactions.size() - 1; ++i)
       transactions[i] = entry.transactions[1 + i].tx;
 
-    saveTransactions(transactions, height);
+    if (deferredPoolTxs != nullptr)
+    {
+      deferredPoolTxs->reserve(deferredPoolTxs->size() + transactions.size());
+      for (const Transaction &tx : transactions)
+        deferredPoolTxs->push_back(std::make_pair(height, tx));
+    }
+    else
+    {
+      saveTransactions(transactions, height);
+    }
+
     popTransactions(entry, getObjectHash(entry.bl.baseTransaction));
 
-    // Remove from indices
     m_timestampIndex.remove(entry.bl.timestamp, blockHash);
     m_generatedTransactionsIndex.remove(entry.bl);
     m_depositIndex.popBlock();
@@ -753,6 +762,25 @@ namespace cn
     for (size_t i = 0; i < transactions.size(); ++i)
       if (!m_tx_pool.add_tx(transactions[transactions.size() - 1 - i], context, true, height))
         throw std::runtime_error("failed to add transaction to pool");
+  }
+
+  void Blockchain::restoreDeferredTransactionsToPool(
+      std::vector<std::pair<uint32_t, Transaction>> &deferredPoolTxs)
+  {
+    if (deferredPoolTxs.empty())
+      return;
+
+    // Pops run tip-down (youngest block first); restore oldest block / tx first.
+    std::reverse(deferredPoolTxs.begin(), deferredPoolTxs.end());
+
+    tx_verification_context context;
+    for (const auto &heightedTx : deferredPoolTxs)
+    {
+      if (!m_tx_pool.add_tx(heightedTx.second, context, true, heightedTx.first))
+        throw std::runtime_error("failed to restore deferred transaction to pool");
+    }
+
+    deferredPoolTxs.clear();
   }
 
 } // namespace cn

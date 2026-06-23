@@ -72,11 +72,11 @@ namespace cn
     {
       std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-      // Pop blocks down to the rollback point
+      std::vector<std::pair<uint32_t, Transaction>> deferredPoolTxs;
       for (size_t i = blocksSize() - 1; i >= rollback_height; i--)
-        popBlock(get_block_hash(blocksBack().bl));
+        popBlock(get_block_hash(blocksBack().bl), &deferredPoolTxs);
+      restoreDeferredTransactionsToPool(deferredPoolTxs);
 
-      // Re-push the original chain blocks
       auto height = static_cast<uint32_t>(rollback_height - 1);
       for (const auto &bl : original_chain)
       {
@@ -98,9 +98,8 @@ namespace cn
     }
   }
 
-  //  Previous block lookup (shared by alternative block handling)
   bool Blockchain::findPreviousBlockHeight(const crypto::Hash &prevHash,
-                                           uint32_t &height, bool &inMainChain)
+                                           uint32_t &height, bool &inMainChain) const
   {
     auto it = m_hashToHeight.find(prevHash);
     if (it != m_hashToHeight.end())
@@ -111,6 +110,140 @@ namespace cn
     }
     inMainChain = false;
     return false;
+  }
+
+  //  Reorg planning helpers
+  bool Blockchain::getForkPoint(const std::list<crypto::Hash> &alt_chain, ForkPoint &out)
+  {
+    if (alt_chain.empty())
+      return false;
+
+    const Block &firstAltBlock = m_alternative_chains.at(alt_chain.front()).bl;
+    uint32_t forkHeight = 0;
+    bool forkOnMain = false;
+    if (!findPreviousBlockHeight(firstAltBlock.previousBlockHash, forkHeight, forkOnMain) || !forkOnMain)
+      return false;
+
+    out.ancestorHash = firstAltBlock.previousBlockHash;
+    out.ancestorHeight = forkHeight;
+    out.splitHeight = forkHeight + 1;
+    return true;
+  }
+
+  bool Blockchain::isAltChainHeavier(const BlockEntry &altTip) const
+  {
+    return blocksBack().cumulative_difficulty < altTip.cumulative_difficulty;
+  }
+
+  void Blockchain::collectDisplacedMainChainSegment(
+      uint32_t splitHeight,
+      std::list<Block> &disconnectedBlocks,
+      std::unordered_map<crypto::Hash, Transaction> &displacedTxs)
+  {
+    disconnectedBlocks.clear();
+    displacedTxs.clear();
+
+    for (size_t i = blocksSize() - 1; i >= splitHeight; --i)
+    {
+      const BlockEntry entry = blocksAt(i);
+      disconnectedBlocks.push_front(entry.bl);
+      for (size_t j = 1; j < entry.transactions.size(); ++j)
+      {
+        const Transaction &tx = entry.transactions[j].tx;
+        displacedTxs[getObjectHash(tx)] = tx;
+      }
+    }
+  }
+
+  void Blockchain::collectAltChainTxHashes(
+      const std::list<crypto::Hash> &alt_chain,
+      const blocks_ext_by_hash &alternativeChains,
+      std::unordered_set<crypto::Hash> &out)
+  {
+    out.clear();
+    for (const crypto::Hash &blockHash : alt_chain)
+    {
+      const auto it = alternativeChains.find(blockHash);
+      if (it == alternativeChains.end())
+        continue;
+      const Block &altBlock = it->second.bl;
+      out.insert(altBlock.transactionHashes.begin(), altBlock.transactionHashes.end());
+    }
+  }
+
+  size_t Blockchain::countTxsNotOnAltChain(
+      const std::unordered_set<crypto::Hash> &mainTxs,
+      const std::unordered_set<crypto::Hash> &altTxs)
+  {
+    size_t dropped = 0;
+    for (const crypto::Hash &txHash : mainTxs)
+    {
+      if (altTxs.count(txHash) == 0)
+        ++dropped;
+    }
+    return dropped;
+  }
+
+  bool Blockchain::findTransactionInAlternativeChains(const crypto::Hash &txHash, Transaction &tx) const
+  {
+    for (const auto &altBlock : m_alternative_chains)
+    {
+      const BlockEntry &entry = altBlock.second;
+      for (size_t i = 1; i < entry.transactions.size(); ++i)
+      {
+        if (getObjectHash(entry.transactions[i].tx) == txHash)
+        {
+          tx = entry.transactions[i].tx;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool Blockchain::resolveAltBlockTransactions(
+      const Block &block,
+      const BlockEntry &altEntry,
+      const std::unordered_map<crypto::Hash, Transaction> &displacedTxs,
+      std::vector<Transaction> &transactions)
+  {
+    transactions.clear();
+    transactions.reserve(block.transactionHashes.size());
+
+    const bool hasStoredTxs = altEntry.transactions.size() == 1 + block.transactionHashes.size();
+
+    for (size_t i = 0; i < block.transactionHashes.size(); ++i)
+    {
+      const crypto::Hash &txHash = block.transactionHashes[i];
+
+      if (hasStoredTxs)
+      {
+        transactions.push_back(altEntry.transactions[1 + i].tx);
+      }
+      else if (displacedTxs.count(txHash) != 0)
+      {
+        transactions.push_back(displacedTxs.at(txHash));
+      }
+      else if (m_tx_pool.have_tx(txHash))
+      {
+        Transaction poolTx;
+        size_t blobSize = 0;
+        uint64_t fee = 0;
+        if (!m_tx_pool.take_tx(txHash, poolTx, blobSize, fee))
+          return false;
+        transactions.push_back(std::move(poolTx));
+      }
+      else
+      {
+        Transaction altChainTx;
+        if (findTransactionInAlternativeChains(txHash, altChainTx))
+          transactions.push_back(std::move(altChainTx));
+        else
+          return false;
+      }
+    }
+
+    return true;
   }
 
   //  Alternative block handling
@@ -172,7 +305,6 @@ namespace cn
         return true;
       }
 
-      // ── Build the alternative chain and timestamp vector ──────────────
       blocks_ext_by_hash::iterator alt_it = it_prev;
       std::list<crypto::Hash> alt_chain;
       std::vector<uint64_t> timestamps;
@@ -269,6 +401,36 @@ namespace cn
                                       : it_prev->second.cumulative_difficulty;
       bei.cumulative_difficulty += current_diff;
 
+      bei.transactions.resize(1 + b.transactionHashes.size());
+      bei.transactions[0].tx = b.baseTransaction;
+      std::vector<crypto::Hash> missedAltTxs;
+      for (size_t i = 0; i < b.transactionHashes.size(); ++i)
+      {
+        const crypto::Hash &txHash = b.transactionHashes[i];
+        std::vector<Transaction> foundTxs;
+        std::vector<crypto::Hash> missedOne;
+        getTransactions(std::vector<crypto::Hash>{txHash}, foundTxs, missedOne, true);
+        if (!foundTxs.empty())
+        {
+          bei.transactions[1 + i].tx = std::move(foundTxs.front());
+          continue;
+        }
+
+        Transaction altChainTx;
+        if (findTransactionInAlternativeChains(txHash, altChainTx))
+        {
+          bei.transactions[1 + i].tx = std::move(altChainTx);
+          continue;
+        }
+
+        missedAltTxs.push_back(txHash);
+      }
+      if (!missedAltTxs.empty())
+      {
+        logger(logging::DEBUGGING) << "Alternative block " << common::podToHex(id) << " has "
+                                   << missedAltTxs.size() << " unresolved transaction(s) at accept time";
+      }
+
       auto i_res = m_alternative_chains.insert(blocks_ext_by_hash::value_type(id, bei));
       if (!i_res.second)
       {
@@ -279,7 +441,6 @@ namespace cn
       m_orthanBlocksIndex.add(bei.bl);
       alt_chain.push_back(i_res.first->first);
 
-      // ── Decide: switch to this chain, store as alternative, or reject ─
       if (is_a_checkpoint)
       {
         logger(logging::INFO, logging::BRIGHT_GREEN) << "###### REORGANIZE on height: "
@@ -298,7 +459,7 @@ namespace cn
         return r;
       }
 
-      if (blocksBack().cumulative_difficulty < bei.cumulative_difficulty)
+      if (isAltChainHeavier(bei))
       {
         logger(logging::INFO, logging::BRIGHT_GREEN) << "###### REORGANIZE on height: "
                                                      << m_alternative_chains[alt_chain.front()].height
@@ -318,7 +479,6 @@ namespace cn
         return r;
       }
 
-      // Store as alternative
       logger(logging::INFO, logging::BRIGHT_BLUE) << "----- BLOCK ADDED AS ALTERNATIVE ON HEIGHT " << bei.height
                                                   << " id:\t" << id
                                                   << " PoW:\t" << proof_of_work
@@ -350,7 +510,14 @@ namespace cn
         return false;
       }
 
-      uint32_t split_height = m_alternative_chains[alt_chain.front()].height;
+      ForkPoint fork;
+      if (!getForkPoint(alt_chain, fork))
+      {
+        logger(logging::ERROR, logging::BRIGHT_RED) << "switch_to_alternative_blockchain: fork parent not on main chain";
+        return false;
+      }
+
+      const uint32_t split_height = fork.splitHeight;
       if (!(blocksSize() > split_height))
       {
         logger(logging::ERROR, logging::BRIGHT_RED) << "switch_to_alternative_blockchain: blockchain size "
@@ -358,41 +525,69 @@ namespace cn
         return false;
       }
 
-      // ── Verify transaction coverage ────────────────────────────────────
-      if (!verifyAlternativeChainTransactions(alt_chain, split_height))
-        return false;
-
-      // ── Verify block versions ──────────────────────────────────────────
-      for (const auto &hash : alt_chain)
+      for (const crypto::Hash &hash : alt_chain)
       {
         const Block &b = m_alternative_chains[hash].bl;
         if (!checkBlockVersion(b, get_block_hash(b)))
           return false;
       }
 
-      // ── Pop main chain blocks down to split point ─────────────────────
       std::list<Block> disconnected_chain;
-      for (size_t i = blocksSize() - 1; i >= split_height; i--)
-      {
-        Block b = blocksAt(i).bl;
-        popBlock(get_block_hash(b));
-        disconnected_chain.push_front(b);
-      }
+      std::unordered_map<crypto::Hash, Transaction> displacedTxs;
+      collectDisplacedMainChainSegment(split_height, disconnected_chain, displacedTxs);
 
-      // ── Push alternative chain blocks ─────────────────────────────────
-      uint32_t height = split_height - 1;
+      std::unordered_set<crypto::Hash> mainChainTxHashes;
+      mainChainTxHashes.reserve(displacedTxs.size());
+      for (const auto &kv : displacedTxs)
+        mainChainTxHashes.insert(kv.first);
+
+      std::unordered_set<crypto::Hash> altChainTxHashes;
+      collectAltChainTxHashes(alt_chain, m_alternative_chains, altChainTxHashes);
+
+      const size_t droppedToMempool = countTxsNotOnAltChain(mainChainTxHashes, altChainTxHashes);
+      logger(logging::INFO, logging::BRIGHT_GREEN) << "Reorg: common ancestor height " << fork.ancestorHeight
+                                                   << ", replacing " << disconnected_chain.size()
+                                                   << " main block(s) with " << alt_chain.size()
+                                                   << " alt block(s), " << droppedToMempool
+                                                   << " tx(s) from displaced chain not on winner -> mempool";
+
+      std::vector<std::pair<uint32_t, Transaction>> deferredPoolTxs;
+      deferredPoolTxs.reserve(displacedTxs.size());
+      for (size_t i = blocksSize() - 1; i >= split_height; --i)
+        popBlock(get_block_hash(blocksAt(i).bl), &deferredPoolTxs);
+      restoreDeferredTransactionsToPool(deferredPoolTxs);
+
       for (auto alt_ch_iter = alt_chain.begin(); alt_ch_iter != alt_chain.end(); ++alt_ch_iter)
       {
-        const auto &ch_ent = *alt_ch_iter;
+        const crypto::Hash &ch_ent = *alt_ch_iter;
         block_verification_context bvc = boost::value_initialized<block_verification_context>();
         const Block &b = m_alternative_chains[ch_ent].bl;
+        const BlockEntry &altEntry = m_alternative_chains[ch_ent];
+        const crypto::Hash blockHash = get_block_hash(b);
 
-        if (!pushBlock(b, get_block_hash(b), bvc, ++height) || !bvc.m_added_to_main_chain)
+        std::vector<Transaction> transactions;
+        if (!resolveAltBlockTransactions(b, altEntry, displacedTxs, transactions))
+        {
+          rollback_blockchain_switching(disconnected_chain, split_height);
+          return false;
+        }
+
+        for (const crypto::Hash &txHash : b.transactionHashes)
+        {
+          if (m_tx_pool.have_tx(txHash))
+          {
+            Transaction unused;
+            size_t blobSize = 0;
+            uint64_t fee = 0;
+            m_tx_pool.take_tx(txHash, unused, blobSize, fee);
+          }
+        }
+
+        if (!pushBlock(b, transactions, blockHash, bvc) || !bvc.m_added_to_main_chain)
         {
           logger(logging::INFO, logging::BRIGHT_WHITE) << "Failed to switch to alternative blockchain";
           rollback_blockchain_switching(disconnected_chain, split_height);
 
-          // Clean up remaining alternative blocks
           m_orthanBlocksIndex.remove(b);
           m_alternative_chains.erase(ch_ent);
           for (auto it = ++alt_ch_iter; it != alt_chain.end(); ++it)
@@ -405,10 +600,9 @@ namespace cn
         }
       }
 
-      // ── Optionally preserve the disconnected chain ────────────────────
       if (!discard_disconnected_chain)
       {
-        for (const auto &old_ch_ent : disconnected_chain)
+        for (const Block &old_ch_ent : disconnected_chain)
         {
           block_verification_context bvc = boost::value_initialized<block_verification_context>();
           if (!handle_alternative_block(old_ch_ent, get_block_hash(old_ch_ent), bvc, false))
@@ -420,14 +614,11 @@ namespace cn
         }
       }
 
-      // ── Build chain switch message ────────────────────────────────────
       std::vector<crypto::Hash> blocksFromCommonRoot;
       blocksFromCommonRoot.reserve(alt_chain.size() + 1);
+      blocksFromCommonRoot.push_back(fork.ancestorHash);
 
-      const Block &firstAltBlock = m_alternative_chains[alt_chain.front()].bl;
-      blocksFromCommonRoot.push_back(firstAltBlock.previousBlockHash);
-
-      for (const auto &ch_ent : alt_chain)
+      for (const crypto::Hash &ch_ent : alt_chain)
       {
         const Block &bl = m_alternative_chains[ch_ent].bl;
         blocksFromCommonRoot.push_back(get_block_hash(bl));
@@ -446,37 +637,6 @@ namespace cn
       logger(logging::ERROR, logging::BRIGHT_RED) << "Error during blockchain switching";
       return false;
     }
-  }
-
-  //  Transaction verification for chain switching
-  bool Blockchain::verifyAlternativeChainTransactions(
-      const std::list<crypto::Hash> &alt_chain, uint32_t split_height)
-  {
-    // Collect transaction hashes from the main chain segment being replaced
-    std::unordered_set<crypto::Hash> mainChainTxHashes;
-    for (size_t i = blocksSize() - 1; i >= split_height; i--)
-    {
-      const Block &b = blocksAt(i).bl;
-      mainChainTxHashes.insert(b.transactionHashes.begin(), b.transactionHashes.end());
-    }
-
-    // Check every main chain transaction exists in the alternative chain
-    for (const auto &hash : alt_chain)
-    {
-      const Block &b = m_alternative_chains[hash].bl;
-      for (const auto &tx_hash : b.transactionHashes)
-        mainChainTxHashes.erase(tx_hash);
-    }
-
-    if (!mainChainTxHashes.empty())
-    {
-      logger(logging::ERROR, logging::BRIGHT_RED) << "Alternative chain lacks transaction "
-                                                  << common::podToHex(*mainChainTxHashes.begin())
-                                                  << " from main chain, rejected";
-      return false;
-    }
-
-    return true;
   }
 
 } // namespace cn
