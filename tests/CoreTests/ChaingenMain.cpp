@@ -114,7 +114,7 @@ int main(int argc, char* argv[])
     // GENERATE_AND_PLAY(gen_simple_chain_001);
     // GENERATE_AND_PLAY(gen_simple_chain_split_1);
     GENERATE_AND_PLAY(one_block);
-    // GENERATE_AND_PLAY(gen_chain_switch_1);
+    GENERATE_AND_PLAY(gen_chain_switch_1);
     // GENERATE_AND_PLAY(gen_ring_signature_1);
     // GENERATE_AND_PLAY(gen_ring_signature_2);
     //GENERATE_AND_PLAY(gen_ring_signature_big); // Takes up to XXX hours (if CRYPTONOTE_MINED_MONEY_UNLOCK_WINDOW == 10)
