@@ -9,7 +9,7 @@ This file covers only what is specific to this directory.
 - `PKGBUILD`: source build of one exact commit. It installs `conceald`,
   `concealwallet`, `walletd`, and `optimizer` to `/usr/bin`, plus the license
   files to `/usr/share/licenses/conceal-core/`.
-- `../test-install.sh`: install, upgrade, and removal check that the workflow
+- `../test-install.sh`: install and removal check that the workflow
   runs in a disposable container. Do not run it on a machine you care about.
 
 The committed `PKGBUILD` has placeholder values for `_commit` and
