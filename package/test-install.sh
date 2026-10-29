@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Install, upgrade, and remove a conceal-core package, then check that the
-# package manager pulled the runtime libraries and left user data alone.
+# Install and remove a conceal-core package, then check that the package
+# manager pulled the runtime libraries and left user data alone.
 #
 # Runs as root and installs packages system-wide, so use it only in a
 # disposable container (the packaging workflows do). For a manual test on a
 # real machine, follow the checklist in docs/packaging.md instead.
 #
-# Usage: test-install.sh <package> <higher-revision-package> <commit-sha>
+# Usage: test-install.sh <package> <commit-sha>
 # The package type comes from the extension: .pkg.tar.zst or .deb.
 set -euo pipefail
 
 pkg=$(realpath "$1")
-upgrade=$(realpath "$2")
-commit=$3
+commit=$2
 bins=(conceald concealwallet walletd optimizer)
 
 case "$pkg" in
@@ -83,13 +82,6 @@ step "install $(basename "$pkg")"
 install_pkg "$pkg"
 has_boost_runtime || fail "Boost runtime was not installed as a dependency"
 [[ $(installed_version) == "$(file_version "$pkg")" ]] || fail "installed version mismatch"
-check_files
-smoke "$(installed_version)"
-
-step "upgrade to $(basename "$upgrade")"
-install_pkg "$upgrade"
-[[ $(installed_version) == "$(file_version "$upgrade")" ]] \
-  || fail "upgrade did not install $(file_version "$upgrade")"
 check_files
 smoke "$(installed_version)"
 

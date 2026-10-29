@@ -8,16 +8,13 @@ on:
 permissions:
   contents: read
 
-env:
-  # archlinux/archlinux:base-devel, digest pulled 2026-10-29. The image is
-  # rolling; each job runs pacman -Syu before use.
-  ARCH_IMAGE: archlinux/archlinux:base-devel@sha256:a3c048d95acbbf5acc15a9e9a727d3cae2ba2ac69aa8b24d8ccd4f60b3102f28
-
 jobs:
   build:
     name: Build .pkg.tar.zst
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    # archlinux/archlinux:base-devel, digest pulled 2026-10-29. The image is
+    # rolling; the job runs pacman -Syu before use.
     container:
       image: archlinux/archlinux:base-devel@sha256:a3c048d95acbbf5acc15a9e9a727d3cae2ba2ac69aa8b24d8ccd4f60b3102f28
     steps:
@@ -68,7 +65,6 @@ jobs:
             echo "commit=$commit"
             echo "pkgver=$pkgver"
             echo "pkgrel=$pkgrel"
-            echo "upgrade_pkgrel=0.$((stamp + 1))"
             echo "work=$work"
           } >> "$GITHUB_OUTPUT"
 
@@ -81,76 +77,57 @@ jobs:
         run: |
           set -euo pipefail
           pkg=$(ls conceal-core-*.pkg.tar.zst)
-          namcap PKGBUILD | tee namcap.txt
-          namcap -i "$pkg" | tee -a namcap.txt
+          namcap PKGBUILD "$pkg" | tee namcap.out
+          ! grep -q ' E: ' namcap.out || { echo "namcap reported errors"; exit 1; }
           pacman -Qip "$pkg"
-          pacman -Qlp "$pkg" | tee contents.txt
+          files=$(pacman -Qlp "$pkg")
+          echo "$files"
           for bin in conceald concealwallet walletd optimizer; do
             bsdtar -tvf "$pkg" "usr/bin/$bin" | grep -q '^-rwxr-xr-x' || { echo "usr/bin/$bin missing or not 755"; exit 1; }
             ldd "src/build/src/$bin" | sed "s|^|$bin: |"
-          done | tee ldd.txt
-          for f in LICENSE LICENSE.miniupnpc LICENSE.parallel_hashmap; do
-            grep -q "/usr/share/licenses/conceal-core/$f\$" contents.txt || { echo "license $f missing"; exit 1; }
           done
+          for f in LICENSE LICENSE.miniupnpc LICENSE.parallel_hashmap; do
+            grep -q "/usr/share/licenses/conceal-core/$f\$" <<< "$files" || { echo "license $f missing"; exit 1; }
+          done
+          echo "compiler: $(gcc --version | head -1)"
+          echo "cmake: $(cmake --version | head -1)"
+          echo "boost: $(pacman -Q boost)"
+          echo "compile flags: $(sed -n 's/^CXX_FLAGS = //p' src/build/src/CMakeFiles/Daemon.dir/flags.make)"
 
-      - name: Repackage at a higher pkgrel for the upgrade test
+      - name: Write SHA256SUMS and README.txt
         working-directory: ${{ steps.prep.outputs.work }}
         run: |
           set -euo pipefail
-          mkdir -p upgrade
-          cp PKGBUILD PKGBUILD.built
-          sed -i "s/^pkgrel=.*/pkgrel=${{ steps.prep.outputs.upgrade_pkgrel }}/" PKGBUILD
-          su builder -c 'makepkg --noconfirm --repackage --nocheck --skipinteg'
-          mv conceal-core-*-${{ steps.prep.outputs.upgrade_pkgrel }}-x86_64.pkg.tar.zst upgrade/
-          mv PKGBUILD.built PKGBUILD
-
-      - name: Write SHA256SUMS and build-info.txt
-        working-directory: ${{ steps.prep.outputs.work }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/dist" "$GITHUB_WORKSPACE/upgrade"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
           pkg=$(ls conceal-core-*.pkg.tar.zst)
           sha256sum "$pkg" > SHA256SUMS
-          cat > build-info.txt <<EOF
-          package: $pkg
-          upstream commit: ${{ steps.prep.outputs.commit }}
-          pkgver: ${{ steps.prep.outputs.pkgver }}
-          pkgrel: ${{ steps.prep.outputs.pkgrel }}
-          architecture: x86_64
-          build date (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')
-          workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-          build environment: ${ARCH_IMAGE} after pacman -Syu (isolated container, not a devtools clean chroot)
-          compiler: $(gcc --version | head -1)
-          cmake: $(cmake --version | head -1)
-          boost: $(pacman -Q boost)
-          pacman: $(pacman -Q pacman)
-          namcap: $(pacman -Q namcap)
-          CPU target: -DARCH=x86-64 (generic x86-64), AES-NI required (-maes, NO_AES off)
-          linking: -DSTATIC=OFF (shared Boost, libstdc++, glibc; in-tree libraries and miniupnpc static)
-          compile flags: $(sed -n 's/^CXX_FLAGS = //p' src/build/src/CMakeFiles/Daemon.dir/flags.make)
+          cat > README.txt <<EOF
+          Conceal Core ${{ steps.prep.outputs.pkgver }} for Arch Linux and Omarchy (x86_64)
+          Commit: ${{ steps.prep.outputs.commit }}
+
+          Verify:     sha256sum -c SHA256SUMS
+          Install:    sudo pacman -U ./$pkg
+          Check:      conceald --version
+          Uninstall:  sudo pacman -R conceal-core
+
+          Installs conceald, concealwallet, walletd, and optimizer in /usr/bin.
+          Needs an x86-64 CPU with AES-NI. Uninstalling keeps wallets and
+          blockchain data in ~/.conceal.
           EOF
-          cat build-info.txt SHA256SUMS
-          cp "$pkg" SHA256SUMS build-info.txt namcap.txt ldd.txt contents.txt "$GITHUB_WORKSPACE/dist/"
-          cp upgrade/*.pkg.tar.zst "$GITHUB_WORKSPACE/upgrade/"
+          cat README.txt SHA256SUMS
+          cp "$pkg" SHA256SUMS README.txt "$GITHUB_WORKSPACE/dist/"
 
       - name: Collect logs
         if: failure()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/logs"
-          cp /home/builder/pkg/*.log /home/builder/pkg/*.txt "$GITHUB_WORKSPACE/logs/" 2>/dev/null || true
+          cp /home/builder/pkg/*.log /home/builder/pkg/*.out "$GITHUB_WORKSPACE/logs/" 2>/dev/null || true
 
       # actions/upload-artifact v7.0.2
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: conceal-core-arch-x86_64
           path: dist/
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: conceal-core-arch-upgrade-test
-          path: upgrade/
-          retention-days: 3
           if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -161,7 +138,7 @@ jobs:
           if-no-files-found: warn
 
   test:
-    name: Install, upgrade, remove in a clean container
+    name: Install and remove in a clean container
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -185,20 +162,15 @@ jobs:
           name: conceal-core-arch-x86_64
           path: dist
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: conceal-core-arch-upgrade-test
-          path: upgrade
-
       - name: Verify SHA256SUMS
         working-directory: dist
         run: sha256sum -c SHA256SUMS
 
-      - name: Install, upgrade, remove, smoke test
+      - name: Install, remove, smoke test
         run: |
           set -o pipefail
           mkdir -p logs
-          bash package/test-install.sh dist/conceal-core-*.pkg.tar.zst upgrade/conceal-core-*.pkg.tar.zst "$GITHUB_SHA" 2>&1 | tee logs/test-install.log
+          bash package/test-install.sh dist/conceal-core-*.pkg.tar.zst "$GITHUB_SHA" 2>&1 | tee logs/test-install.log
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: failure()

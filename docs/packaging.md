@@ -9,7 +9,9 @@ link failures, and the observed Ubuntu dependencies and lintian results added.
 Container job hosts pinned to `ubuntu-24.04` before the `ubuntu-latest` move
 to 26.04. After the first Arch test passed on Omarchy, log artifacts are
 uploaded only on failure (both workflows). After the Ubuntu 22.04 test, the
-missing LGPL-3.0-or-later license was added to both packages.
+missing LGPL-3.0-or-later license was added to both packages. Artifacts
+slimmed to package, `SHA256SUMS`, and `README.txt`; the CI upgrade test
+package was dropped after it passed.
 
 ## Channels
 
@@ -76,7 +78,7 @@ is no Arch `.install` script and no Debian maintainer script.
 
 ```text
 package/
-  test-install.sh       install, upgrade, removal check (disposable containers only)
+  test-install.sh       install and removal check (disposable containers only)
   arch/
     PKGBUILD
     README.md
@@ -201,9 +203,9 @@ until `sudo apt-get -f install` runs.
 ## Versions, upgrade, uninstall
 
 The upstream version is CMake's `VERSION`, or the tag when the built commit
-has an exact `X.Y.Z` or `vX.Y.Z` tag. The commit is recorded in
-`build-info.txt` and in `--version` output, not in the package version, so
-versions stay ordered.
+has an exact `X.Y.Z` or `vX.Y.Z` tag. The commit is recorded in the
+artifact's `README.txt` and in `--version` output, not in the package
+version, so versions stay ordered.
 
 | Build | Arch | Debian |
 | --- | --- | --- |
@@ -257,10 +259,9 @@ Every container job runs on an `ubuntu-24.04` host. It is pinned because
      commit, and fills `pkgver`, `pkgrel`, `_commit`, and `sha256sums` in a
      copy of the PKGBUILD.
    - `makepkg` runs as the unprivileged `builder` user.
-   - Checks: `bash -n`, `namcap` on the PKGBUILD and package, file list,
-     mode `755`, `ldd`, and license files.
-   - `makepkg --repackage` at the next `pkgrel` produces a short-lived upgrade
-     test package from the same build.
+   - Checks: `bash -n`, `namcap` on the PKGBUILD and package (any `E:` fails
+     the job), file list, mode `755`, `ldd`, and license files. The output,
+     compiler, CMake, Boost, and compile flags are printed in the job log.
 2. `test`, in a fresh `archlinux/archlinux:base` container. `base-devel`
    cannot be used here, because its `gdb` already pulls in `boost-libs`.
    It verifies `SHA256SUMS`, then runs
@@ -270,9 +271,9 @@ Every container job runs on an `ubuntu-24.04` host. It is pinned because
 
 1. `build` on GitHub-hosted `ubuntu-22.04` and `ubuntu-24.04` runners. The
    build runs as the runner user; `sudo` is used only for swap and `apt-get`.
-   `dpkg-buildpackage -b -us -uc` builds the binary package, then `lintian`,
-   `dpkg-deb --contents`, and `ldd` check it. A repack at the next revision
-   is the upgrade test package.
+   `dpkg-buildpackage -b -us -uc` builds the binary package. Then
+   `lintian --fail-on error`, `dpkg-deb --contents`, and `ldd` check it. The
+   results and toolchain versions go to the job log.
 2. `test` in fresh `ubuntu:22.04` and `ubuntu:24.04` containers pinned by
    digest. Each verifies `SHA256SUMS` and runs `package/test-install.sh` on
    its own release's package.
@@ -289,24 +290,28 @@ Every container job runs on an `ubuntu-24.04` host. It is pinned because
    before any wallet, network, or mining code. `concealwallet --version`
    exits with status 1 after printing; the test checks the output, not the
    exit status.
-4. Upgrade to the higher revision installs that version, and the same checks
-   pass again.
-5. Removal deletes the four binaries and leaves a marker file in
+4. Removal deletes the four binaries and leaves a marker file in
    `~/.conceal`.
+
+The first version also ran an upgrade to a repackaged higher revision. It
+passed on Arch, Ubuntu 22.04, and Ubuntu 24.04 (2026-10-29). It was then
+removed, so CI builds only what users download. Upgrades are still checked
+by hand in step 5 of the developer test.
 
 ### Artifacts
 
+Each artifact holds only what a user needs:
+
 | Artifact | Contents |
 | --- | --- |
-| `conceal-core-arch-x86_64` | `.pkg.tar.zst`, `SHA256SUMS`, `build-info.txt`, `namcap.txt`, `ldd.txt`, `contents.txt` |
-| `conceal-core-deb-ubuntu-2204`, `conceal-core-deb-ubuntu-2404` | `.deb`, `SHA256SUMS`, `build-info.txt`, `lintian.txt`, `ldd.txt`, `contents.txt` |
-| `*-upgrade-test` | CI-only upgrade package, kept 3 days. Not for manual testing. |
-| `*-build-logs`, `*-test-logs` | build and install logs, uploaded only when the job fails. On success, read them in the run's job log. |
+| `conceal-core-arch-x86_64` | `.pkg.tar.zst`, `SHA256SUMS`, `README.txt` |
+| `conceal-core-deb-ubuntu-2204`, `conceal-core-deb-ubuntu-2404` | `.deb`, `SHA256SUMS`, `README.txt` |
+| `*-build-logs`, `*-test-logs` | build and install logs, uploaded only when the job fails |
 
-`build-info.txt` records the commit, version and revision, architecture,
-build time in UTC, build environment, compiler, CMake, Boost, and packaging
-tool versions, the CPU and AES settings, linking mode, and the full compile
-flags.
+`README.txt` gives the version, the commit, and the verify, install, check,
+and uninstall commands for that package. The namcap/lintian, `ldd`,
+file-list, and toolchain details are in the run's job log, not in the
+artifact.
 
 ## Testing plan
 
@@ -339,7 +344,7 @@ gh run download <run-id> --name conceal-core-arch-x86_64
 | `+ubuntu22.04` `.deb` | Ubuntu 22.04 x86_64 |
 | `+ubuntu24.04` `.deb` | Ubuntu 24.04 x86_64 |
 
-Record the OS, CPU, and the commit from `build-info.txt`, then:
+Record the OS, CPU, and the commit from `README.txt`, then:
 
 1. In the artifact directory, run `sha256sum -c SHA256SUMS`.
 2. Install with `sudo pacman -U ./conceal-core-*.pkg.tar.zst` or
@@ -348,7 +353,7 @@ Record the OS, CPU, and the commit from `build-info.txt`, then:
 3. Check `ls -l /usr/bin/conceald /usr/bin/concealwallet /usr/bin/walletd /usr/bin/optimizer`.
 4. Run `conceald --version`, `concealwallet --version`, `walletd --version`,
    and `optimizer --help`. The version must show the commit from
-   `build-info.txt`. Do not create a wallet, start a sync, or mine.
+   `README.txt`. Do not create a wallet, start a sync, or mine.
 5. Upgrade: run the workflow again later, then install the newer artifact.
    Confirm `pacman -Q conceal-core` or `dpkg -s conceal-core` shows the newer
    revision and the binaries still run.
