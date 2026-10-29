@@ -33,3 +33,6 @@ external/FTXUI/
 
 # Checkpoints
 /tools/checkpoints*/
+
+# Generated from package/deb by the Debian package build
+/debian/

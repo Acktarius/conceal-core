@@ -1,0 +1,208 @@
+name: Debian package
+
+# Manual test builds only, for GitHub distribution. See docs/packaging.md for
+# the requirements and the developer test plan. Tag-triggered release upload
+# is a later change.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build .deb (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            id: ubuntu-2204
+          - os: ubuntu-24.04
+            id: ubuntu-2404
+    steps:
+      - name: Add swap
+        run: |
+          sudo fallocate -l 6G /swapfile-ccx
+          sudo chmod 600 /swapfile-ccx
+          sudo mkswap /swapfile-ccx
+          sudo swapon /swapfile-ccx
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3-dev gcc g++ git cmake libboost-all-dev debhelper lintian
+
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare debian/ for this commit
+        id: prep
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          [[ $commit == "$GITHUB_SHA" ]] || { echo "checkout $commit is not $GITHUB_SHA"; exit 1; }
+
+          pkgver=$(sed -n 's/^set(VERSION "\(.*\)")$/\1/p' CMakeLists.txt)
+          tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
+          if [[ $tag =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            pkgver=${BASH_REMATCH[1]}
+          fi
+          . /etc/os-release
+          stamp=$(date -u +%Y%m%d%H%M)
+          version="$pkgver-0.$stamp+ubuntu$VERSION_ID"
+
+          rm -rf debian
+          cp -r package/deb debian
+          rm debian/README.md
+          sed -i "1s/^conceal-core ([^)]*) [^;]*;/conceal-core ($version) $VERSION_CODENAME;/" debian/changelog
+          head -1 debian/changelog
+          bash -n package/test-install.sh
+
+          {
+            echo "commit=$commit"
+            echo "version=$version"
+            echo "upgrade_version=$pkgver-0.$((stamp + 1))+ubuntu$VERSION_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build package
+        env:
+          DEB_BUILD_OPTIONS: parallel=2 noddebs
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          dpkg-buildpackage -b -us -uc 2>&1 | tee logs/build.log
+          mkdir -p dist upgrade
+          mv ../conceal-core_*_amd64.deb dist/
+
+      - name: Check package
+        run: |
+          set -euo pipefail
+          deb=$(ls dist/conceal-core_*_amd64.deb)
+          lintian --info --display-info "$deb" | tee dist/lintian.txt
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | tee dist/contents.txt
+          for bin in conceald concealwallet walletd optimizer; do
+            grep -qE "^-rwxr-xr-x root/root .* \./usr/bin/$bin\$" dist/contents.txt || { echo "usr/bin/$bin missing or not 755"; exit 1; }
+            ldd "build/src/$bin" | sed "s|^|$bin: |"
+          done | tee dist/ldd.txt
+          grep -q '\./usr/share/doc/conceal-core/copyright$' dist/contents.txt || { echo "copyright missing"; exit 1; }
+
+      - name: Repackage at a higher revision for the upgrade test
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d)
+          dpkg-deb -R dist/conceal-core_*_amd64.deb "$root"
+          sed -i "s/^Version: .*/Version: ${{ steps.prep.outputs.upgrade_version }}/" "$root/DEBIAN/control"
+          dpkg-deb --root-owner-group -b "$root" "upgrade/conceal-core_${{ steps.prep.outputs.upgrade_version }}_amd64.deb"
+
+      - name: Write SHA256SUMS and build-info.txt
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          deb=$(ls conceal-core_*_amd64.deb)
+          sha256sum "$deb" > SHA256SUMS
+          . /etc/os-release
+          cat > build-info.txt <<EOF
+          package: $deb
+          upstream commit: ${{ steps.prep.outputs.commit }}
+          version: ${{ steps.prep.outputs.version }}
+          architecture: amd64
+          target: $PRETTY_NAME (install only on this release)
+          build date (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')
+          workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          build environment: GitHub-hosted ${{ matrix.os }} runner
+          compiler: $(gcc --version | head -1)
+          cmake: $(cmake --version | head -1)
+          boost: libboost-all-dev $(dpkg-query -W -f='${Version}' libboost-all-dev)
+          dpkg: $(dpkg-query -W -f='${Version}' dpkg)
+          debhelper: $(dpkg-query -W -f='${Version}' debhelper)
+          lintian: $(dpkg-query -W -f='${Version}' lintian)
+          depends: $(dpkg-deb -f "$deb" Depends)
+          CPU target: -DARCH=x86-64 (generic x86-64), AES-NI required (-maes, NO_AES off)
+          linking: -DSTATIC=OFF (shared Boost, libstdc++, glibc; in-tree libraries and miniupnpc static)
+          compile flags: $(sed -n 's/^CXX_FLAGS = //p' ../build/src/CMakeFiles/Daemon.dir/flags.make)
+          EOF
+          cat build-info.txt SHA256SUMS
+
+      # actions/upload-artifact v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: conceal-core-deb-${{ matrix.id }}
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: conceal-core-deb-${{ matrix.id }}-upgrade-test
+          path: upgrade/
+          retention-days: 3
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: conceal-core-deb-${{ matrix.id }}-build-logs
+          path: logs/
+          if-no-files-found: warn
+
+  test:
+    name: Install, upgrade, remove in a clean ${{ matrix.id }} container
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu:22.04 and ubuntu:24.04, digests pulled 2026-10-29
+          - id: ubuntu-2204
+            image: ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
+          - id: ubuntu-2404
+            image: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Update base image
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git
+
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/download-artifact v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: conceal-core-deb-${{ matrix.id }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: conceal-core-deb-${{ matrix.id }}-upgrade-test
+          path: upgrade
+
+      - name: Verify SHA256SUMS
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+
+      - name: Install, upgrade, remove, smoke test
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          bash package/test-install.sh dist/conceal-core_*_amd64.deb upgrade/conceal-core_*_amd64.deb "$GITHUB_SHA" 2>&1 | tee logs/test-install.log
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: conceal-core-deb-${{ matrix.id }}-test-logs
+          path: logs/
+          if-no-files-found: warn
