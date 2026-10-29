@@ -30,3 +30,6 @@ cmake-build*
 
 # Local / optional third-party trees
 external/FTXUI/
+
+# Checkpoints
+/tools/checkpoints*/
