@@ -30,3 +30,9 @@ cmake-build*
 
 # Local / optional third-party trees
 external/FTXUI/
+
+# Checkpoints
+/tools/checkpoints*/
+
+# Generated from package/deb by the Debian package build
+/debian/
