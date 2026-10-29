@@ -376,10 +376,14 @@ tests pass:
    [`ubuntu24.yml`](../.github/workflows/ubuntu24.yml) does for the Ubuntu
    tarball. That job needs `contents: write`; keep the manual trigger for
    test builds.
-2. Omarchy: submit the Arch package to the Omarchy package repository, as
-   described in [`package/arch/README.md`](../package/arch/README.md). Users
-   then install it with `omarchy pkg add conceal-core` or Install > Package in
-   the Omarchy menu.
+2. Omarchy: submit a recipe to
+   [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs), as
+   described in [`package/arch/README.md`](../package/arch/README.md).
+   Omarchy builds from a pinned upstream tag, so this does not wait for tag
+   automation or release artifacts. The existing `6.7.5` tag is enough to
+   start, and Omarchy's upstream watch proposes later versions. Users then
+   install it with `omarchy pkg add conceal-core` or Install > Package in the
+   Omarchy menu.
 
 ## Known limitations
 
