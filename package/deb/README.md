@@ -16,8 +16,9 @@ These are the `debian/` files from the
   `${shlibs:Depends}` for runtime libraries.
 - `rules`: `dh` with the CMake build system. It copies the four binaries to
   `/usr/bin` because upstream CMake has no install rules for them.
-- `copyright`: machine-readable copyright for the project and for the bundled
-  miniupnpc and parallel-hashmap code.
+- `copyright`: machine-readable copyright for the project (MIT and
+  LGPL-3.0-or-later files) and for the bundled miniupnpc and parallel-hashmap
+  code.
 - `changelog`: template entry. The workflow replaces the version with the
   build version.
 - `source/format`: `3.0 (native)`.

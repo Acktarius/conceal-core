@@ -134,7 +134,7 @@ jobs:
           cp upgrade/*.pkg.tar.zst "$GITHUB_WORKSPACE/upgrade/"
 
       - name: Collect logs
-        if: always()
+        if: failure()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/logs"
           cp /home/builder/pkg/*.log /home/builder/pkg/*.txt "$GITHUB_WORKSPACE/logs/" 2>/dev/null || true
@@ -154,7 +154,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: failure()
         with:
           name: conceal-core-arch-build-logs
           path: logs/
@@ -201,7 +201,7 @@ jobs:
           bash package/test-install.sh dist/conceal-core-*.pkg.tar.zst upgrade/conceal-core-*.pkg.tar.zst "$GITHUB_SHA" 2>&1 | tee logs/test-install.log
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: failure()
         with:
           name: conceal-core-arch-test-logs
           path: logs/
