@@ -145,7 +145,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: failure()
         with:
           name: conceal-core-deb-${{ matrix.id }}-build-logs
           path: logs/
@@ -201,7 +201,7 @@ jobs:
           bash package/test-install.sh dist/conceal-core_*_amd64.deb upgrade/conceal-core_*_amd64.deb "$GITHUB_SHA" 2>&1 | tee logs/test-install.log
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: failure()
         with:
           name: conceal-core-deb-${{ matrix.id }}-test-logs
           path: logs/

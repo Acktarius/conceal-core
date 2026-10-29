@@ -7,7 +7,9 @@ Last updated because: first version, added with the `Arch Linux package` and
 `Debian package` workflows (2026-10-29). Same day: Debian LTO turned off after
 link failures, and the observed Ubuntu dependencies and lintian results added.
 Container job hosts pinned to `ubuntu-24.04` before the `ubuntu-latest` move
-to 26.04.
+to 26.04. After the first Arch test passed on Omarchy, log artifacts are
+uploaded only on failure (both workflows). After the Ubuntu 22.04 test, the
+missing LGPL-3.0-or-later license was added to both packages.
 
 ## Channels
 
@@ -41,7 +43,7 @@ Package name: `conceal-core` on both systems.
 | `/usr/bin/walletd` | payment gateway service |
 | `/usr/bin/optimizer` | wallet optimizer tool |
 | `/usr/share/licenses/conceal-core/` (Arch) | `LICENSE` (MIT), `LICENSE.miniupnpc` (BSD-3-Clause), `LICENSE.parallel_hashmap` (Apache-2.0) |
-| `/usr/share/doc/conceal-core/copyright` (Debian) | the same three licenses in Debian copyright format |
+| `/usr/share/doc/conceal-core/copyright` (Debian) | MIT, LGPL-3.0-or-later, BSD-3-Clause, and Apache-2.0, in Debian copyright format |
 
 `/usr/bin` is where package-managed commands go; `/usr/local/bin` is for
 software installed outside the package manager. Upstream
@@ -49,8 +51,21 @@ software installed outside the package manager. Upstream
 the four binaries, so each package copies them and sets mode `755`.
 
 miniupnpc and parallel-hashmap are compiled into the binaries, which is why
-their licenses ship too. Arch metadata is `license=('MIT' 'BSD-3-Clause'
-'Apache-2.0')`.
+their licenses ship too.
+
+32 files under `src/` are LGPL-3.0-or-later: CryptoNote/Bytecoin, Karbo,
+and the optimizer code, including `src/Platform/Linux/System/*`, `src/Rpc/*`,
+`src/Common/*`, and `src/Wallet/WalletSerializationV2.*`. They are compiled
+into every binary; `optimizer --help` prints a GNU license notice.
+
+- **Arch:** `license=('MIT' 'LGPL-3.0-or-later' 'BSD-3-Clause' 'Apache-2.0')`.
+  The LGPL text comes from Arch's shared SPDX license directory, so it is not
+  copied.
+- **Debian:** `copyright` lists the LGPL files in their own stanza. It points
+  to `/usr/share/common-licenses/LGPL-3` and `GPL-3`.
+
+This LGPL entry corrects the first version of these packages (2026-10-29),
+which declared only MIT, BSD-3-Clause, and Apache-2.0.
 
 Nothing else is installed. Installing, upgrading, or removing a package does
 not start or enable a service, create or import a wallet, download blockchain
@@ -169,7 +184,7 @@ sudo apt-get install -y build-essential python3-dev gcc g++ git cmake libboost-a
 
 | Release | Toolchain | Generated `Depends` |
 | --- | --- | --- |
-| 22.04 | GCC 11.4, CMake 3.22.1, Boost 1.74 | `libboost-filesystem1.74.0, libboost-program-options1.74.0, libc6 (>= 2.34), libgcc-s1 (>= 3.0), libstdc++6 (>= 12)` |
+| 22.04 | GCC 11.4, CMake 3.22.1 (apt; the GitHub runner's preinstalled 3.31.6 takes precedence there), Boost 1.74 | `libboost-filesystem1.74.0, libboost-program-options1.74.0, libc6 (>= 2.34), libgcc-s1 (>= 3.0), libstdc++6 (>= 12)` |
 | 24.04 | GCC 13.3, CMake 3.28.3, Boost 1.83 | `libboost-filesystem1.83.0, libboost-program-options1.83.0, libc6 (>= 2.38), libgcc-s1 (>= 3.0), libstdc++6 (>= 13.1)` |
 
 `lintian` reports no errors. Its warnings:
@@ -286,7 +301,7 @@ Every container job runs on an `ubuntu-24.04` host. It is pinned because
 | `conceal-core-arch-x86_64` | `.pkg.tar.zst`, `SHA256SUMS`, `build-info.txt`, `namcap.txt`, `ldd.txt`, `contents.txt` |
 | `conceal-core-deb-ubuntu-2204`, `conceal-core-deb-ubuntu-2404` | `.deb`, `SHA256SUMS`, `build-info.txt`, `lintian.txt`, `ldd.txt`, `contents.txt` |
 | `*-upgrade-test` | CI-only upgrade package, kept 3 days. Not for manual testing. |
-| `*-build-logs`, `*-test-logs` | build and install logs, uploaded on failure too |
+| `*-build-logs`, `*-test-logs` | build and install logs, uploaded only when the job fails. On success, read them in the run's job log. |
 
 `build-info.txt` records the commit, version and revision, architecture,
 build time in UTC, build environment, compiler, CMake, Boost, and packaging

@@ -6,8 +6,30 @@ Source: https://github.com/ConcealNetwork/conceal-core
 Files: *
 Copyright: 2011-2017 The Cryptonote developers
            2017-2018 The Circle Foundation & Conceal Devs
-           2018-2024 Conceal Network & Conceal Devs
+           2018-2026 Conceal Network & Conceal Devs
 License: Expat
+
+Files: src/Common/Base64.*
+       src/Common/BinaryArray.hpp
+       src/Common/DnsTools.cpp
+       src/Common/FileMappedVector.*
+       src/crypto/crypto-util.h
+       src/crypto/randomize.h
+       src/Optimizer/Optimizer.cpp
+       src/Platform/*/System/Context.h
+       src/Platform/*/System/Dispatcher.*
+       src/Platform/*/System/MemoryMappedFile.*
+       src/Platform/Linux/System/TcpConnection.cpp
+       src/Platform/Linux/System/Timer.cpp
+       src/Rpc/HttpClient.*
+       src/Rpc/HttpServer.*
+       src/Rpc/JsonRpc.*
+       src/Wallet/WalletSerializationV2.*
+Copyright: 2012-2018 The CryptoNote developers, The Bytecoin developers
+           2016-2019 The Karbo developers
+           2019 Helder Garcia <helder.garcia@gmail.com>
+           2018-2026 Conceal Network & Conceal Devs
+License: LGPL-3+
 
 Files: external/miniupnpc/*
 Copyright: 2005-2023 Thomas BERNARD
@@ -63,6 +85,22 @@ License: BSD-3-clause
  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+License: LGPL-3+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+ .
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU Lesser General Public License for more details.
+ .
+ On Debian systems, the full text of the GNU Lesser General Public License
+ version 3 can be found in /usr/share/common-licenses/LGPL-3, and the GNU
+ General Public License version 3 it builds on in
+ /usr/share/common-licenses/GPL-3.
 
 License: Apache-2.0
  On Debian systems, the full text of the Apache License, Version 2.0 can be
