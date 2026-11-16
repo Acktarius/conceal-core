@@ -352,8 +352,12 @@ Manually port **Layer-1 (+ connection-context) camelCase** naming onto
 - Defer Layer-3 System/Platform private `m_` sweeps (wallet only updated Linux
   Platform).
 - Remove unused `RemoteEventLock`.
-- Follow-up: sync **conceal-desktop** vendored/in-process `NodeServer` sources
-  after this lands; guardian remains RPC/binary-only.
+- conceal-desktop does not vendor P2P sources. Its README clones conceal-core
+  into `cryptonote`. Its own code only calls unchanged `NodeServer` methods
+  (`init`, `run`, `deinit`, `sendStopSignal`) and `set_p2p_endpoint`. No desktop
+  C++ patch is required once it clones a core revision that contains this
+  rename. Guardian remains RPC/binary-only. See
+  [`docs/p2p-naming-align.md`](p2p-naming-align.md).
 - Layer 2 (2026-11-15): private members of `P2pContext` and `P2pNode` use the
   `m_` prefix. Public methods stay the same. Checklist for desktop is
   [`docs/p2p-naming-align.md`](p2p-naming-align.md).
@@ -368,7 +372,7 @@ breaking on-disk peer state the way wallet’s `KV_MEMBER` rename did.
 
 - Core call sites (`CryptoNoteProtocolHandler`, Daemon commands, RpcServer)
   updated to the new `IP2pEndpoint` / `NodeServer` names.
-- Desktop in-process node builds must be resynced separately.
+- Desktop picks up the rename by cloning that core revision into `cryptonote`; its own call sites do not use the renamed names.
 - Later wallet P2P features (auto-scale, GPU) remain staged for later tasks.
 
 #### Compatibility impact

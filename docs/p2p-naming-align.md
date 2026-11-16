@@ -1,16 +1,20 @@
-# P2P naming alignment (core → desktop handoff)
+# P2P naming alignment
 
 Status: Layer 1 and Layer 2 landed on branch `ack/p2p-naming-align` (not yet merged to `development`).
-Last updated: 2026-11-15, because Layer 2 `P2pContext` / `P2pNode` members were given the `m_` prefix.
-Audience: Conceal Core, and later **conceal-desktop** when it resyncs vendored `cryptonote/src/P2p`.
+Last updated: 2026-11-16, because desktop builds by cloning conceal-core into `cryptonote`, not by vendoring P2P sources.
+Audience: Conceal Core. Forward to conceal-desktop only as a build note: clone a core revision that contains this rename.
 
-This note is the forwardable checklist. Wire protocol, handshake, and timed-sync payloads are unchanged.
+This note records the rename. Wire protocol, handshake, and timed-sync payloads are unchanged.
 
-## What desktop must update
+## conceal-desktop
 
-conceal-desktop embeds core P2P sources for the in-process node (`NodeServer`, `CryptoNoteProtocolHandler`). After this branch is merged, copy the renamed core files and fix desktop call sites that still use the old snake_case names. conceal-guardian does not call these C++ APIs.
+Desktop does not keep its own copy of `src/P2p`. Its README build steps delete `cryptonote` and clone conceal-core into that folder (`git clone https://github.com/ConcealNetwork/conceal-core cryptonote` on Linux, Windows, and macOS). A clone of a core revision that includes this branch already has the new names inside `cryptonote/`.
 
-### Layer 1 — public API (breaking for embedded C++)
+Desktop's own sources do not call the renamed API. The in-process node in `src/CryptoNoteWrapper.cpp` uses `NodeServer::init`, `run`, `deinit`, and `sendStopSignal`, plus `CryptoNoteProtocolHandler::set_p2p_endpoint`. Those names are unchanged. No desktop C++ patch is required for this rename.
+
+conceal-guardian does not call these C++ APIs.
+
+### Layer 1 — public API inside the cloned core tree
 
 `IP2pEndpoint` in `src/P2p/NetNodeCommon.h`:
 
@@ -74,11 +78,11 @@ s(m_netConfig, "m_net_config");
 s(m_peerId, "m_peer_id");
 ```
 
-Existing `.p2pstate` files keep loading. This differs from wallet commit `5acf6f4b`, which let `KV_MEMBER` rename the keys and required a one-time peer-list re-bootstrap. Desktop must keep these string keys if it copies `NodeServer::config::serialize`.
+Existing `.p2pstate` files keep loading, including a desktop in-process node that stores peer state under the user's data directory. This differs from wallet commit `5acf6f4b`, which let `KV_MEMBER` rename the keys and required a one-time peer-list re-bootstrap. Desktop does not reimplement `NodeServer::config::serialize`; it uses the copy that comes with the `cryptonote` clone.
 
 ## Layer 2 — private members only
 
-No desktop call-site change unless desktop code reaches into these privates (it should not).
+These members are private to `P2pContext` and `P2pNode`. Desktop does not name them.
 
 `P2pContext`: `version`, `incoming`, `remoteAddress`, `peerId`, `peerPort`, `dispatcher`, `contextGroup`, `timeStarted`, `stopped`, `lastReadTime`, `timedSyncInterval`, `timedSyncData`, `timedSyncTimer`, `timedSyncFinished`, `connection`, `writeEvent`, `readEvent` → the same names with an `m_` prefix.
 
