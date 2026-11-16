@@ -316,3 +316,70 @@ not an end-to-end update run against a transition Core build.
   Guardian docs when implementation lands
 
 ---
+
+### DEC-0003: Align P2P Layer-1 API to camelCase (manual port from ack/wallet)
+
+- Date: 2026-11-15
+- Status: Accepted
+- Owners: @Acktarius / Conceal Core maintainers
+- Related work: branch `ack/p2p-naming-align`; source checklist commit
+  `5acf6f4b` on `origin/ack/wallet`; unit test `tests/UnitTests/TestP2pNaming.cpp`;
+  handoff [`docs/p2p-naming-align.md`](p2p-naming-align.md)
+- Supersedes: none
+- Superseded by: none
+- Tags: `p2p`, `naming`, `compatibility`
+
+#### Context
+
+`development` mixed snake_case and camelCase on `IP2pEndpoint` / `NodeServer`
+while project rules and most modern modules (`Wallet`, `Transfers`, …) use
+camelCase methods. `origin/ack/wallet` already completed a style unify, but a
+cherry-pick of `5acf6f4b` onto `development` is unsafe (Daemon/RPC/Protocol
+divergence; parent tree includes auto-scale/GPU).
+
+#### Decision
+
+Manually port **Layer-1 (+ connection-context) camelCase** naming onto
+`development` using `5acf6f4b` as a rename checklist, not as a git cherry-pick.
+
+- Methods / context fields: snake_case → camelCase (and fix
+  `state_befor_handshake` → `stateBeforeHandshake`).
+- `.p2pstate` config members may use camelCase C++ names, but **serialize with
+  stable legacy keys** (`"m_net_config"`, `"m_peer_id"`) so existing peer-state
+  files keep loading.
+- Exclude P2P auto-scale, GPU prefetch, MDBX, and PeerlistManager public API
+  renames.
+- Defer Layer-3 System/Platform private `m_` sweeps (wallet only updated Linux
+  Platform).
+- Remove unused `RemoteEventLock`.
+- Follow-up: sync **conceal-desktop** vendored/in-process `NodeServer` sources
+  after this lands; guardian remains RPC/binary-only.
+- Layer 2 (2026-11-15): private members of `P2pContext` and `P2pNode` use the
+  `m_` prefix. Public methods stay the same. Checklist for desktop is
+  [`docs/p2p-naming-align.md`](p2p-naming-align.md).
+
+#### Rationale
+
+Matches [`.cursor/rules/main-rule.mdc`](../.cursor/rules/main-rule.mdc) and the
+repo’s camelCase-dominant modules without pulling unrelated wallet features or
+breaking on-disk peer state the way wallet’s `KV_MEMBER` rename did.
+
+#### Consequences
+
+- Core call sites (`CryptoNoteProtocolHandler`, Daemon commands, RpcServer)
+  updated to the new `IP2pEndpoint` / `NodeServer` names.
+- Desktop in-process node builds must be resynced separately.
+- Later wallet P2P features (auto-scale, GPU) remain staged for later tasks.
+
+#### Compatibility impact
+
+- Wire protocol / handshake semantics unchanged.
+- `.p2pstate` file format keys unchanged (intentional divergence from wallet).
+- No daemon binary rename; no RPC method rename required for this task.
+
+#### Evidence
+
+`rg`-driven rename checklist; `TestP2pNaming` covers stub camelCase API and
+stable KV keys; full daemon/unit build on branch `ack/p2p-naming-align`.
+
+---
