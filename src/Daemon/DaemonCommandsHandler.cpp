@@ -120,7 +120,7 @@ bool DaemonCommandsHandler::print_pl(const std::vector<std::string> &args)
   }
   logger(logging::DEBUGGING) << "Attempting: print_pl";
 
-  m_srv.log_peerlist();
+  m_srv.logPeerlist();
 
   logger(logging::DEBUGGING) << "Finished: print_pl";
   return true;
@@ -168,7 +168,7 @@ bool DaemonCommandsHandler::print_cn(const std::vector<std::string> &args)
   }
   logger(logging::DEBUGGING) << "Attempting: print_cn";
 
-  m_srv.get_payload_object().log_connections();
+  m_srv.getPayloadObject().log_connections();
 
   logger(logging::DEBUGGING) << "Finished: print_cn";
   return true;
