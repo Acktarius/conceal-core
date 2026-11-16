@@ -6,6 +6,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "LevinProtocol.h"
+#include "AiDiscoveryLimits.h"
 #include <System/TcpConnection.h>
 
 using namespace cn;
@@ -70,6 +71,12 @@ bool LevinProtocol::readCommand(Command& cmd) {
 
   if (head.m_signature != LEVIN_SIGNATURE) {
     throw std::runtime_error("Levin signature mismatch");
+  }
+
+  // Discovery bodies are rejected before allocation. Other commands keep the existing cap.
+  // packet_max_size is not an incoming-body limit.
+  if (aiDiscoveryBodyExceedsCap(head.m_command, head.m_cb)) {
+    throw std::runtime_error("AI discovery packet exceeds receive cap");
   }
 
   if (head.m_cb > LEVIN_DEFAULT_MAX_PACKET_SIZE) {

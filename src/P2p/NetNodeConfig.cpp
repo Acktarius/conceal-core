@@ -28,6 +28,10 @@ const command_line::arg_descriptor<std::vector<std::string> > arg_p2p_add_exclus
       " If this option is given the options add-priority-node and seed-node are ignored"};
 const command_line::arg_descriptor<std::vector<std::string> > arg_p2p_seed_node   = {"seed-node", "Connect to a node to retrieve peer addresses, and disconnect"};
 const command_line::arg_descriptor<bool> arg_p2p_hide_my_port   =    {"hide-my-port", "Do not announce yourself as peerlist candidate", false, true};
+const command_line::arg_descriptor<bool> arg_enable_ai_discovery = {
+    "enable-ai-discovery",
+    "Enable AI provider discovery on the existing P2P port. Off unless set with --enable-ai-discovery or enable-ai-discovery=TRUE in the config file. Registration stays loopback-only.",
+    false};
 
 bool parsePeerFromString(NetworkAddress& pe, const std::string& node_addr) {
   return common::parseIpAddressAndPort(pe.ip, pe.port, node_addr);
@@ -61,6 +65,11 @@ void NetNodeConfig::initOptions(boost::program_options::options_description& des
   command_line::add_arg(desc, arg_p2p_add_exclusive_node);
   command_line::add_arg(desc, arg_p2p_seed_node);
   command_line::add_arg(desc, arg_p2p_hide_my_port);
+  // value<bool> accepts the bare CLI flag and enable-ai-discovery=TRUE in the config file.
+  // add_arg for bool is a switch and rejects a config-file value.
+  desc.add_options()(arg_enable_ai_discovery.name,
+                     boost::program_options::value<bool>()->default_value(false)->implicit_value(true),
+                     arg_enable_ai_discovery.description);
 }
 
 NetNodeConfig::NetNodeConfig() {
@@ -69,6 +78,7 @@ NetNodeConfig::NetNodeConfig() {
   externalPort = 0;
   allowLocalIp = false;
   hideMyPort = false;
+  enableAiDiscovery = false;
   configFolder = tools::getDefaultDataDirectory();
   testnet = false;
 }
@@ -132,6 +142,10 @@ bool NetNodeConfig::init(const boost::program_options::variables_map& vm)
     hideMyPort = true;
   }
 
+  if (vm.count(arg_enable_ai_discovery.name) != 0) {
+    enableAiDiscovery = command_line::get_arg(vm, arg_enable_ai_discovery);
+  }
+
   return true;
 }
 
@@ -183,6 +197,10 @@ bool NetNodeConfig::getHideMyPort() const {
   return hideMyPort;
 }
 
+bool NetNodeConfig::getEnableAiDiscovery() const {
+  return enableAiDiscovery;
+}
+
 std::string NetNodeConfig::getConfigFolder() const {
   return configFolder;
 }
@@ -225,6 +243,10 @@ void NetNodeConfig::setSeedNodes(const std::vector<NetworkAddress>& addresses) {
 
 void NetNodeConfig::setHideMyPort(bool hide) {
   hideMyPort = hide;
+}
+
+void NetNodeConfig::setEnableAiDiscovery(bool enabled) {
+  enableAiDiscovery = enabled;
 }
 
 void NetNodeConfig::setConfigFolder(const std::string& folder) {

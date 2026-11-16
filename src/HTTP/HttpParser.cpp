@@ -8,8 +8,10 @@
 #include "HttpParser.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 #include "HttpParserErrorCodes.h"
+#include "P2p/AiDiscoveryLimits.h"
 
 namespace {
 
@@ -37,6 +39,10 @@ namespace cn {
     {
       return cn::HttpResponse::STATUS_401;
     }
+    else if (status.substr(0, 4) == "403 ")
+    {
+      return cn::HttpResponse::STATUS_403;
+    }
     else if (status == "404 Not Found")
     {
       return cn::HttpResponse::STATUS_404;
@@ -61,8 +67,11 @@ void HttpParser::receiveRequest(std::istream& stream, HttpRequest& request) {
 
   readHeaders(stream, request.headers);
 
-  std::string body;
   size_t bodyLen = getBodyLen(request.headers);
+  size_t discoveryCap = 0;
+  if (aiDiscoveryRpcBodyCap(request.url, discoveryCap) && bodyLen > discoveryCap) {
+    throw std::runtime_error("AI discovery HTTP body exceeds receive cap");
+  }
   if (bodyLen) {
     readBody(stream, request.body, bodyLen);
   }

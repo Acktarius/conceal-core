@@ -34,6 +34,7 @@
 #include "NetNodeCommon.h"
 #include "NetNodeConfig.h"
 #include "P2pProtocolDefinitions.h"
+#include "AiDiscoveryService.h"
 #include "P2pNetworks.h"
 #include "PeerListManager.h"
 
@@ -53,8 +54,8 @@ namespace cn
       NOTIFY
     };
 
-    P2pMessage(Type type, uint32_t command, const BinaryArray& buffer, int32_t returnCode = 0) :
-      type(type), command(command), buffer(buffer), returnCode(returnCode) {
+    P2pMessage(Type type, uint32_t command, const BinaryArray& buffer, int32_t returnCode = 0, bool discoveryMessage = false) :
+      type(type), command(command), buffer(buffer), returnCode(returnCode), discovery(discoveryMessage) {
     }
 
     size_t size() const {
@@ -65,6 +66,7 @@ namespace cn
     uint32_t command;
     const BinaryArray buffer;
     int32_t returnCode;
+    bool discovery;
   };
 
   struct P2pConnectionContext : public CryptoNoteConnectionContext {
@@ -83,8 +85,12 @@ namespace cn
     }
 
     bool pushMessage(P2pMessage&& msg);
+    // Drops the message when the discovery queue budget is exhausted. Does not interrupt the connection.
+    bool pushDiscoveryMessage(P2pMessage&& msg);
     std::vector<P2pMessage> popBuffer();
     void interrupt();
+
+    AiConnectionState aiDiscovery;
 
     uint64_t writeDuration(TimePoint now) const;
 
@@ -94,6 +100,7 @@ namespace cn
     platform_system::Event queueEvent;
     std::vector<P2pMessage> writeQueue;
     size_t writeQueueSize = 0;
+    size_t m_discoveryQueuedBytes = 0;
     bool stopped = false;
   };
 
@@ -122,6 +129,11 @@ namespace cn
 
     cn::PeerlistManager& getPeerlistManager() { return m_peerlist; }
 
+    bool isAiDiscoveryEnabled() const { return m_aiDiscovery.enabled(); }
+    AiIngestResult submitAiProviderAdvertisement(const AiProviderAdvertisement& ad);
+    AiProviderPage getAiProviders(const AiProviderQuery& query) const;
+    uint64_t listedAiProviderCount() const;
+
   private:
     enum PeerType
     {
@@ -135,6 +147,10 @@ namespace cn
     int handleHandshake(int command, const COMMAND_HANDSHAKE::request& arg, COMMAND_HANDSHAKE::response& rsp, P2pConnectionContext& context);
     int handleTimedSync(int command, const COMMAND_TIMED_SYNC::request& arg, COMMAND_TIMED_SYNC::response& rsp, P2pConnectionContext& context);
     int handlePing(int command, const COMMAND_PING::request& arg, COMMAND_PING::response& rsp, const P2pConnectionContext& context) const;
+
+    bool enqueueAiDiscovery(P2pConnectionContext& context, const AiOutbound& message);
+    void relayAiProviderAdvertisements(const AiProviderAdvertisement& ad, const boost::uuids::uuid* exclude);
+    void maintainAiDiscovery();
 
 #ifdef ALLOW_DEBUG_COMMANDS
     int handleGetStatInfo(int command, COMMAND_REQUEST_STAT_INFO::request &arg, COMMAND_REQUEST_STAT_INFO::response &rsp, P2pConnectionContext &context);
@@ -241,6 +257,7 @@ namespace cn
 
     CryptoNoteProtocolHandler& m_payloadHandler;
     PeerlistManager m_peerlist;
+    AiDiscoveryService m_aiDiscovery;
 
     OnceInInterval m_connectionsMakerInterval = OnceInInterval(1);
     OnceInInterval m_peerlistStoreInterval = OnceInInterval(60 * 30, false);

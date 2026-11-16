@@ -13,6 +13,7 @@
 #include <Logging/LoggerRef.h>
 #include "Common/Math.h"
 #include "CoreRpcServerCommandsDefinitions.h"
+#include "AiProviderRpcCommands.h"
 
 namespace cn {
 
@@ -59,6 +60,8 @@ private:
 
   // json handlers
   bool on_get_info(const COMMAND_RPC_GET_INFO::request& req, COMMAND_RPC_GET_INFO::response& res);
+  bool on_register_ai_provider(const COMMAND_RPC_REGISTER_AI_PROVIDER::request& req, COMMAND_RPC_REGISTER_AI_PROVIDER::response& res);
+  bool on_get_ai_providers(const COMMAND_RPC_GET_AI_PROVIDERS::request& req, COMMAND_RPC_GET_AI_PROVIDERS::response& res);
   bool on_get_height(const COMMAND_RPC_GET_HEIGHT::request& req, COMMAND_RPC_GET_HEIGHT::response& res);
   bool on_get_peer_list(const COMMAND_RPC_GET_PEER_LIST::request& req, COMMAND_RPC_GET_PEER_LIST::response& res);
   bool on_get_transactions(const COMMAND_RPC_GET_TRANSACTIONS::request& req, COMMAND_RPC_GET_TRANSACTIONS::response& res);

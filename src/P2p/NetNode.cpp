@@ -161,6 +161,19 @@ namespace cn
     return true;
   }
 
+  bool P2pConnectionContext::pushDiscoveryMessage(P2pMessage&& msg) {
+    msg.discovery = true;
+    const size_t bytes = msg.size();
+    if (!aiDiscoveryEnqueueAllowed(m_discoveryQueuedBytes, bytes, writeQueueSize)) {
+      return false;
+    }
+    if (!pushMessage(std::move(msg))) {
+      return false;
+    }
+    m_discoveryQueuedBytes += bytes;
+    return true;
+  }
+
   std::vector<P2pMessage> P2pConnectionContext::popBuffer() {
     writeOperationStartTime = TimePoint();
 
@@ -171,6 +184,7 @@ namespace cn
     std::vector<P2pMessage> msgs(std::move(writeQueue));
     writeQueue.clear();
     writeQueueSize = 0;
+    m_discoveryQueuedBytes = 0;
     writeOperationStartTime = Clock::now();
     queueEvent.clear();
     return msgs;
@@ -252,6 +266,26 @@ namespace cn
       return 0;
     }
 
+    // Discovery replies are matched here. invokeAdaptor would treat the next bucket as a
+    // request and throw on a legacy error body, which drops the connection.
+    if (cmd.isResponse && isAiDiscoveryCommand(cmd.command))
+    {
+      const int64_t now = static_cast<int64_t>(time(nullptr));
+      AiEnqueueFn enqueue = [this, &ctx](const AiOutbound& message) { return enqueueAiDiscovery(ctx, message); };
+      AiRelayFn relay = [this, &ctx](const AiProviderAdvertisement& ad) {
+        relayAiProviderAdvertisements(ad, &ctx.m_connectionId);
+      };
+      if (cmd.command == AI_DISCOVERY_CAPABILITIES_ID)
+      {
+        m_aiDiscovery.handleCapabilityResponse(cmd.buf, ctx.aiDiscovery, now, enqueue);
+      }
+      else if (cmd.command == AI_DISCOVERY_REQUEST_PROVIDERS_ID)
+      {
+        m_aiDiscovery.handleProvidersResponse(cmd.buf, ctx.aiDiscovery, now, enqueue, relay);
+      }
+      return 0;
+    }
+
     switch (cmd.command)
     {
       INVOKE_HANDLER(COMMAND_HANDSHAKE, &NodeServer::handleHandshake)
@@ -262,6 +296,27 @@ namespace cn
       INVOKE_HANDLER(COMMAND_REQUEST_NETWORK_STATE, &NodeServer::handleGetNetworkState)
       INVOKE_HANDLER(COMMAND_REQUEST_PEER_ID, &NodeServer::handleGetPeerId)
 #endif
+    case AI_DISCOVERY_CAPABILITIES_ID:
+    {
+      const int64_t now = static_cast<int64_t>(time(nullptr));
+      ret = m_aiDiscovery.handleCapabilities(cmd.buf, out, ctx.aiDiscovery, now);
+      break;
+    }
+    case AI_DISCOVERY_ADVERTISEMENTS_ID:
+    {
+      const int64_t now = static_cast<int64_t>(time(nullptr));
+      m_aiDiscovery.handleAdvertisements(cmd.buf, ctx.aiDiscovery, now, [this, &ctx](const AiProviderAdvertisement& ad) {
+        relayAiProviderAdvertisements(ad, &ctx.m_connectionId);
+      });
+      ret = LEVIN_PROTOCOL_RETCODE_SUCCESS;
+      break;
+    }
+    case AI_DISCOVERY_REQUEST_PROVIDERS_ID:
+    {
+      const int64_t now = static_cast<int64_t>(time(nullptr));
+      ret = m_aiDiscovery.handleProvidersRequest(cmd.buf, out, ctx.aiDiscovery, now);
+      break;
+    }
     default:
     {
       handled = false;
@@ -461,6 +516,7 @@ namespace cn
     std::copy(seedNodes.begin(), seedNodes.end(), std::back_inserter(m_seedNodes));
 
     m_hideMyPort = config.getHideMyPort();
+    m_aiDiscovery.setEnabled(config.getEnableAiDiscovery());
     return true;
   }
 
@@ -513,6 +569,10 @@ namespace cn
     if (!handleConfig(config)) {
       logger(ERROR, BRIGHT_RED) << "Failed to handle command line";
       return false;
+    }
+    m_aiDiscovery.setNetworkId(m_networkId);
+    if (m_aiDiscovery.enabled()) {
+      logger(INFO) << "AI provider discovery enabled on the existing P2P port";
     }
 
     m_configFolder = config.getConfigFolder();
@@ -631,6 +691,7 @@ namespace cn
     m_stop = true;
 
     m_dispatcher.remoteSpawn([this] {
+      m_aiDiscovery.shutdown();
       m_stopEvent.set();
       m_payloadHandler.stop();
     });
@@ -1407,6 +1468,7 @@ namespace cn
 
   void NodeServer::onConnectionClose(P2pConnectionContext& context)
   {
+    m_aiDiscovery.onDisconnect(context.aiDiscovery);
 
     if (!m_stopEvent.get() && !context.m_isIncoming)
     {
@@ -1515,6 +1577,7 @@ namespace cn
             safeInterrupt(ctx);
           }
         }
+        maintainAiDiscovery();
       }
     } catch (const platform_system::InterruptedException&) {
       logger(DEBUGGING) << "NodeServer::timeoutLoop() is interrupted";
@@ -1641,6 +1704,92 @@ namespace cn
     }
 
     logger(DEBUGGING) << ctx << "NodeServer::writeHandler() finished";
+  }
+
+  AiIngestResult NodeServer::submitAiProviderAdvertisement(const AiProviderAdvertisement& ad) {
+    AiIngestResult result;
+    if (!m_dispatcher.isOwnerThread()) {
+      result.result = AiAcceptResult::invalid;
+      result.reason = "dispatcher thread required";
+      return result;
+    }
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    result = m_aiDiscovery.registerLocal(ad, now);
+    if (result.relay) {
+      relayAiProviderAdvertisements(ad, nullptr);
+    }
+    return result;
+  }
+
+  AiProviderPage NodeServer::getAiProviders(const AiProviderQuery& query) const {
+    if (!m_dispatcher.isOwnerThread()) {
+      return AiProviderPage();
+    }
+    return m_aiDiscovery.getProviders(query, static_cast<int64_t>(time(nullptr)));
+  }
+
+  uint64_t NodeServer::listedAiProviderCount() const {
+    if (!m_dispatcher.isOwnerThread() || !m_aiDiscovery.enabled()) {
+      return 0;
+    }
+    return m_aiDiscovery.listedCount(static_cast<int64_t>(time(nullptr)));
+  }
+
+  bool NodeServer::enqueueAiDiscovery(P2pConnectionContext& context, const AiOutbound& message) {
+    if (!m_dispatcher.isOwnerThread()) {
+      return false;
+    }
+    const P2pMessage::Type type = message.request ? P2pMessage::COMMAND : P2pMessage::NOTIFY;
+    return context.pushDiscoveryMessage(P2pMessage(type, message.command, message.body, 0, true));
+  }
+
+  void NodeServer::relayAiProviderAdvertisements(const AiProviderAdvertisement& ad, const boost::uuids::uuid* exclude) {
+    NOTIFY_AI_PROVIDER_ADVERTISEMENTS::request request;
+    request.protocolVersion = AI_DISCOVERY_PROTOCOL_VERSION;
+    request.advertisements.push_back(ad);
+
+    AiOutbound outbound;
+    outbound.command = NOTIFY_AI_PROVIDER_ADVERTISEMENTS::ID;
+    outbound.body = LevinProtocol::encode(request);
+    outbound.request = false;
+    if (outbound.body.empty() || outbound.body.size() > AI_DISCOVERY_MAX_MESSAGE_BYTES) {
+      return;
+    }
+
+    for (auto& kv : m_connections) {
+      P2pConnectionContext& connection = kv.second;
+      if (exclude != nullptr && connection.m_connectionId == *exclude) {
+        continue;
+      }
+      if (!m_aiDiscovery.shouldRelayTo(connection.aiDiscovery)) {
+        continue;
+      }
+      if (!enqueueAiDiscovery(connection, outbound)) {
+        logger(logging::DEBUGGING) << connection << "discovery enqueue skipped";
+      }
+    }
+  }
+
+  void NodeServer::maintainAiDiscovery() {
+    if (!m_dispatcher.isOwnerThread()) {
+      return;
+    }
+
+    std::vector<AiPeerRef> peers;
+    peers.reserve(m_connections.size());
+    for (auto it = m_connections.begin(); it != m_connections.end(); ++it) {
+      P2pConnectionContext* connection = &it->second;
+      AiPeerRef ref;
+      ref.connectionId = connection->m_connectionId;
+      ref.state = &connection->aiDiscovery;
+      ref.handshakeComplete = connection->peerId != 0 &&
+        (connection->m_state == CryptoNoteConnectionContext::stateNormal ||
+         connection->m_state == CryptoNoteConnectionContext::stateSynchronizing ||
+         connection->m_state == CryptoNoteConnectionContext::stateIdle);
+      ref.enqueue = [this, connection](const AiOutbound& message) { return enqueueAiDiscovery(*connection, message); };
+      peers.push_back(ref);
+    }
+    m_aiDiscovery.maintain(static_cast<int64_t>(time(nullptr)), peers);
   }
 
   template<typename T>

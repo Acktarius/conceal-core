@@ -82,8 +82,10 @@ void HttpServer::acceptLoop() {
 
 	//auto addr = connection.getPeerAddressAndPort();
 	auto addr = std::pair<platform_system::Ipv4Address, uint16_t>(static_cast<platform_system::Ipv4Address>(0), 0);
+	uint32_t peerValue = 0;
 	try {
 		addr = connection.getPeerAddressAndPort();
+		peerValue = addr.first.getValue();
 	} catch (std::runtime_error&) {
 		logger(WARNING) << "Could not get IP of connection";
 	}
@@ -101,6 +103,7 @@ void HttpServer::acceptLoop() {
 	  resp.addHeader("Content-Type", "application/json");
 	
       parser.receiveRequest(stream, req);
+      req.setPeerAddress(peerValue);
 				if (authenticate(req)) {
 					processRequest(req, resp);
 				}

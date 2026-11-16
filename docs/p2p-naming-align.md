@@ -1,14 +1,14 @@
 # P2P naming alignment
 
-Status: Layer 1 and Layer 2 landed on branch `ack/p2p-naming-align` (not yet merged to `development`).
-Last updated: 2026-11-16, because desktop builds by cloning conceal-core into `cryptonote`, not by vendoring P2P sources.
+Status: Layer 1 and Layer 2 are on `development` (merge `4e534e1e`, pull request #20).
+Last updated: 2026-11-16, because that merge is on `development` and the previous "not yet merged" line was stale. Desktop still builds by cloning conceal-core into `cryptonote`, not by vendoring P2P sources.
 Audience: Conceal Core. Forward to conceal-desktop only as a build note: clone a core revision that contains this rename.
 
 This note records the rename. Wire protocol, handshake, and timed-sync payloads are unchanged.
 
 ## conceal-desktop
 
-Desktop does not keep its own copy of `src/P2p`. Its README build steps delete `cryptonote` and clone conceal-core into that folder (`git clone https://github.com/ConcealNetwork/conceal-core cryptonote` on Linux, Windows, and macOS). A clone of a core revision that includes this branch already has the new names inside `cryptonote/`.
+Desktop does not keep its own copy of `src/P2p`. Its README build steps delete `cryptonote` and clone conceal-core into that folder (`git clone https://github.com/ConcealNetwork/conceal-core cryptonote` on Linux, Windows, and macOS). A clone of a core revision that includes this rename already has the new names inside `cryptonote/`.
 
 Desktop's own sources do not call the renamed API. The in-process node in `src/CryptoNoteWrapper.cpp` uses `NodeServer::init`, `run`, `deinit`, and `sendStopSignal`, plus `CryptoNoteProtocolHandler::set_p2p_endpoint`. Those names are unchanged. No desktop C++ patch is required for this rename.
 

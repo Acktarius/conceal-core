@@ -19,6 +19,8 @@ namespace {
       return "200 OK";
     case cn::HttpResponse::STATUS_401:
       return "401 Unauthorized";
+    case cn::HttpResponse::STATUS_403:
+      return "403 Forbidden";
     case cn::HttpResponse::STATUS_404:
       return "404 Not Found";
     case cn::HttpResponse::STATUS_500:
@@ -34,6 +36,8 @@ namespace {
     {
     case cn::HttpResponse::STATUS_401:
       return "Authorization required\n";
+    case cn::HttpResponse::STATUS_403:
+      return "Forbidden\n";
     case cn::HttpResponse::STATUS_404:
       return "Requested url is not found\n";
     case cn::HttpResponse::STATUS_500:

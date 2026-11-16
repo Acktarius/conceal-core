@@ -18,6 +18,7 @@ namespace cn {
     enum HTTP_STATUS {
       STATUS_200,
       STATUS_401,
+      STATUS_403,
       STATUS_404,
       STATUS_500
     };

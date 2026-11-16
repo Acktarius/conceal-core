@@ -387,3 +387,133 @@ breaking on-disk peer state the way wallet’s `KV_MEMBER` rename did.
 stable KV keys; full daemon/unit build on branch `ack/p2p-naming-align`.
 
 ---
+
+### DEC-0004: Keep discovery on TCP/Levin; defer QUIC and any transport abstraction
+
+- Date: 2026-11-16
+- Status: Accepted (deferral). The proof of concept is proposed and is not approved.
+- Owners: @Acktarius / Conceal Core maintainers
+- Related work: [`docs/quic-transport-evaluation.md`](quic-transport-evaluation.md)
+- Supersedes: none
+- Superseded by: none
+- Tags: `p2p`, `rollout`, `compatibility`, `security`
+
+#### Context
+
+AI discovery needs a place to run before anyone reworks the peer transport.
+The production listener is `NodeServer` on TCP with Levin framing. `P2pNode`
+is a second stack that the daemon never constructs, and it is still tied to
+`TcpConnection`. QUIC would add UDP reachability, a TLS stack this tree does
+not link, and a session model the current read loop does not have.
+
+#### Decision
+
+- Do not replace the TCP listener, do not add a transport interface to the
+  daemon, and do not make discovery depend on QUIC.
+- Implement discovery on the existing Levin command path (`NodeServer`,
+  `LevinProtocol`, `CryptoNoteProtocolHandler` or a sibling command range).
+- A separate opt-in QUIC proof of concept may be written only after a
+  maintainer approves that experiment. It stays out of `conceal-daemon`.
+- Do not describe QUIC as faster or as the discovery transport until the
+  measurements in `docs/quic-transport-evaluation.md` exist.
+
+#### Rationale
+
+Payload serialization is already separate from sockets. The live coupling is
+small (Levin's `TcpConnection` reference and one ordered session per peer) but
+the feature that would justify cutting it — independent sessions under load —
+is unmeasured. A second TCP connection, which back-ping already uses, is the
+closer isolation tool. Introducing an interface first would edit the production
+path for a single implementation.
+
+#### Consequences
+
+- Discovery work continues against TCP port 15000, the current handshake, and
+  the current write queue.
+- No OpenSSL/BoringSSL/MsQuic/ngtcp2 dependency is added to the daemon.
+- Desktop's cloned `NodeServer` API is unchanged.
+- The evaluation doc is the source for a later experiment. That experiment is
+  not scheduled by this decision.
+
+#### Compatibility impact
+
+None. Wire protocol, peerlist, UPnP (TCP), seeds, and sync are unchanged.
+
+#### Evidence
+
+Code inspection recorded in [`docs/quic-transport-evaluation.md`](quic-transport-evaluation.md).
+No benchmark was run. Library notes are from upstream documentation retrieved
+2026-11-16 (ngtcp2 MIT C API and experimental OpenSSL helper, MsQuic 2.6.4 MIT,
+OpenSSL 3.5 server-side QUIC, quiche BSD-2-Clause requiring a Rust toolchain,
+LSQUIC MIT). They are selection constraints, not performance results.
+
+#### Open questions
+
+- Whether a second TCP connection is enough for discovery isolation.
+- Which TLS backend a future PoC would pin, if a maintainer approves one.
+- UDP/15000 reachability for current operators.
+- concealed-ai crate and ALPN choices. That client is not in this repository.
+
+#### Documentation impact
+
+- [`docs/quic-transport-evaluation.md`](quic-transport-evaluation.md) — evaluation,
+  coupling map, library constraints, and the unapproved benchmark plan.
+- This entry.
+- [`docs/ai-provider-discovery.md`](ai-provider-discovery.md) — discovery as implemented on TCP/Levin. It does not change this decision. The proof of concept remains unapproved and unstarted, and QUIC remains unmeasured.
+
+---
+
+### DEC-0005: AI provider discovery on the existing TCP/Levin session
+
+- Date: 2026-11-16
+- Status: Proposed
+- Owners: @Acktarius / Conceal Core maintainers
+- Related work: [`docs/ai-provider-discovery.md`](ai-provider-discovery.md), [DEC-0004](DECISIONS.md)
+- Supersedes: none
+- Superseded by: none
+- Tags: `p2p`, `rpc`, `security`, `rollout`
+
+#### Context
+
+conceal-ai-miner needs to publish an expiring compute advertisement, and concealed-ai needs to read those advertisements from a daemon. The daemon must not run models or hold wallet spend keys. DEC-0004 already keeps this work on `NodeServer` TCP/Levin and leaves the QUIC proof of concept unapproved.
+
+#### Decision
+
+- Add a disabled-by-default discovery command family on the existing session: capability request 3001, advertisement notify 3002, directory request 3003.
+- Keep validation, the in-memory registry, and relay in dedicated P2P components. Do not persist the registry in `.p2pstate`.
+- Relay only a newly accepted record, and only to peers that answered the capability request. Do not broadcast to legacy peers.
+- Expose `POST /registeraiprovider` only to a loopback TCP peer, and `POST /getaiproviders` as a bounded read while the flag is on.
+- Treat the directory as an incomplete, untrusted cache. A provider signature does not prove hardware, reachability, or ownership of a contact string.
+
+#### Rationale
+
+Legacy peers answer an unknown request with `ERROR_CONNECTION_HANDLER_NOT_DEFINED` and stay connected, so one capability request is a compatible probe. `LevinProtocol::invoke` cannot share the long-lived read loop. The daemon has no working RPC restriction flag, so registration checks the accepted socket address instead of a header. The feature stays off until an operator passes `--enable-ai-discovery` or sets `enable-ai-discovery=TRUE` in the daemon config file.
+
+#### Consequences
+
+- Operators who leave the option unset see no discovery traffic and both new RPC paths return 404.
+- Operators who enable it from the command line or the config file still speak plaintext TCP. Advertisements are public data.
+- Miners must store their own sequence counter. A daemon restart forgets the registry and can accept an older advertisement that has not yet expired.
+- QUIC is not measured and is not a dependency. DEC-0004 is unchanged.
+
+#### Compatibility impact
+
+Low while the flag is off: handshake, timed sync, wire-field names, and `.p2pstate` keys are unchanged. With the flag on, new command ids are used only toward peers that support them. A legacy peer that receives one capability request gets the existing unknown-command error and is not probed again.
+
+#### Evidence
+
+`AiProviderDiscovery.*` passed in `./tests/unit_tests` (6 tests) after an out-of-source build with `-DBUILD_TESTS=ON`. `conceal-daemon` linked. No two-daemon TCP run and no legacy peer binary were executed.
+
+#### Open questions
+
+- Whether operators want an authenticated non-loopback registration path.
+- How a restarted daemon should remember sequence high-water marks without putting the registry in `.p2pstate`.
+- Whether best-effort pagination is enough once more than one daemon is in regular use.
+
+#### Documentation impact
+
+- [`docs/ai-provider-discovery.md`](ai-provider-discovery.md) — format, ids, RPC, limits, and limitations.
+- [`docs/README.md`](README.md) — link from the engineering notes.
+- [`docs/quic-transport-evaluation.md`](quic-transport-evaluation.md) — pointer only. The evaluation conclusion is unchanged.
+
+---

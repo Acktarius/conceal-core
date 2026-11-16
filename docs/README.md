@@ -22,3 +22,14 @@ This wiki is the main source of documentation for users of Conceal.Network. For 
 Email: <ccx@conceal.network>\\
 Discord: https://discord.conceal.network \\
 Twitter: https://twitter.com/ConcealNetwork\\
+
+=== Engineering notes ===
+
+These notes are for conceal-core development. They are separate from the wiki text above.
+
+- [[ai-provider-discovery.md|AI provider discovery]] — DEC-0005. Disabled by default. Existing TCP/Levin port only.
+- [[DECISIONS.md|Decisions]]
+- [[quic-transport-evaluation.md|QUIC transport evaluation]] — DEC-0004. Not a production transport. The proof of concept is not started, and QUIC is unmeasured.
+- [[p2p-naming-align.md|P2P naming alignment]]
+
+Last updated: 2026-11-16, because AI provider discovery was added on the existing P2P path.

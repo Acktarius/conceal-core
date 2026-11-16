@@ -23,6 +23,7 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteProtocol/ICryptoNoteProtocolQuery.h"
 
+#include "P2p/AiDiscoveryLimits.h"
 #include "P2p/NetNode.h"
 
 #include "CoreRpcServerErrorCodes.h"
@@ -99,6 +100,8 @@ std::unordered_map<std::string, RpcServer::RpcHandler<RpcServer::HandlerFunction
 
   // json handlers
   { "/getinfo", { jsonMethod<COMMAND_RPC_GET_INFO>(&RpcServer::on_get_info), true } },
+  { "/registeraiprovider", { jsonMethod<COMMAND_RPC_REGISTER_AI_PROVIDER>(&RpcServer::on_register_ai_provider), true } },
+  { "/getaiproviders", { jsonMethod<COMMAND_RPC_GET_AI_PROVIDERS>(&RpcServer::on_get_ai_providers), true } },
   { "/getheight", { jsonMethod<COMMAND_RPC_GET_HEIGHT>(&RpcServer::on_get_height), true } },
   { "/gettransactions", { jsonMethod<COMMAND_RPC_GET_TRANSACTIONS>(&RpcServer::on_get_transactions), false } },
   { "/sendrawtransaction", { jsonMethod<COMMAND_RPC_SEND_RAW_TX>(&RpcServer::on_send_raw_tx), false } },
@@ -123,6 +126,25 @@ void RpcServer::processRequest(const HttpRequest& request, HttpResponse& respons
   auto it = s_handlers.find(url);
   if (it == s_handlers.end()) {
     response.setStatus(HttpResponse::STATUS_404);
+    return;
+  }
+
+  if (url == "/registeraiprovider" || url == "/getaiproviders") {
+    if (!m_p2p.isAiDiscoveryEnabled()) {
+      response.setStatus(HttpResponse::STATUS_404);
+      return;
+    }
+  }
+  if (url == "/registeraiprovider") {
+    const AiRegistrationAccess access = aiRegistrationAccess(true, request.getPeerAddress());
+    if (access != aiRegistrationAllowed) {
+      response.setStatus(HttpResponse::STATUS_403);
+      return;
+    }
+  }
+  if (request.getBody().size() > AI_DISCOVERY_MAX_MESSAGE_BYTES &&
+      (url == "/registeraiprovider" || url == "/getaiproviders")) {
+    response.setStatus(HttpResponse::STATUS_403);
     return;
   }
 
@@ -1008,6 +1030,44 @@ bool RpcServer::on_get_info(const COMMAND_RPC_GET_INFO::request&, COMMAND_RPC_GE
   m_core.getBlockDifficulty(last_block_height, res.last_block_difficulty);
 
   res.connections = m_p2p.getPayloadObject().all_connections();
+  res.ai_discovery_enabled = m_p2p.isAiDiscoveryEnabled();
+  res.ai_provider_count = m_p2p.listedAiProviderCount();
+  return true;
+}
+
+bool RpcServer::on_register_ai_provider(const COMMAND_RPC_REGISTER_AI_PROVIDER::request& req,
+                                        COMMAND_RPC_REGISTER_AI_PROVIDER::response& res) {
+  if (!m_dispatcher.isOwnerThread()) {
+    res.status = "invalid";
+    res.reason = "dispatcher thread required";
+    return true;
+  }
+  const AiIngestResult ingested = m_p2p.submitAiProviderAdvertisement(req.advertisement);
+  res.status = aiAcceptResultName(ingested.result);
+  res.reason = ingested.reason;
+  return true;
+}
+
+bool RpcServer::on_get_ai_providers(const COMMAND_RPC_GET_AI_PROVIDERS::request& req, COMMAND_RPC_GET_AI_PROVIDERS::response& res) {
+  if (!m_dispatcher.isOwnerThread()) {
+    res.status = "invalid";
+    res.directoryComplete = false;
+    return true;
+  }
+
+  AiProviderQuery query;
+  query.modelId = req.modelId;
+  query.status = req.status;
+  query.minContextTokens = req.minContextTokens;
+  query.billingUnit = req.billingUnit;
+  query.cursor = req.cursor;
+  query.limit = req.limit;
+  const AiProviderPage page = m_p2p.getAiProviders(query);
+  res.status = CORE_RPC_STATUS_OK;
+  res.nextCursor = page.nextCursor;
+  res.pageDone = page.done;
+  res.directoryComplete = false;
+  res.providers = page.providers;
   return true;
 }
 

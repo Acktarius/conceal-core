@@ -33,6 +33,7 @@ public:
   std::vector<NetworkAddress> getExclusiveNodes() const;
   std::vector<NetworkAddress> getSeedNodes() const;
   bool getHideMyPort() const;
+  bool getEnableAiDiscovery() const;
   std::string getConfigFolder() const;
 
   void setP2pStateFilename(const std::string& filename);
@@ -46,6 +47,7 @@ public:
   void setExclusiveNodes(const std::vector<NetworkAddress>& addresses);
   void setSeedNodes(const std::vector<NetworkAddress>& addresses);
   void setHideMyPort(bool hide);
+  void setEnableAiDiscovery(bool enabled);
   void setConfigFolder(const std::string& folder);
 
 private:
@@ -58,6 +60,7 @@ private:
   std::vector<NetworkAddress> exclusiveNodes;
   std::vector<NetworkAddress> seedNodes;
   bool hideMyPort;
+  bool enableAiDiscovery;
   std::string configFolder;
   std::string p2pStateFilename;
   bool testnet;

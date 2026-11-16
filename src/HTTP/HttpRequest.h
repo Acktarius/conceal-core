@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <string>
@@ -24,6 +25,8 @@ namespace cn {
     void addHeader(const std::string& name, const std::string& value);
     void setBody(const std::string& b);
     void setUrl(const std::string& uri);
+    void setPeerAddress(uint32_t hostOrderIpv4);
+    uint32_t getPeerAddress() const;
 
   private:
     friend class HttpParser;
@@ -32,6 +35,7 @@ namespace cn {
     std::string url;
     Headers headers;
     std::string body;
+    uint32_t peerAddress = 0;
 
     friend std::ostream& operator<<(std::ostream& os, const HttpRequest& resp);
     std::ostream& printHttpRequest(std::ostream& os) const;
