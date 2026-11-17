@@ -354,6 +354,7 @@ struct COMMAND_RPC_GET_INFO {
     std::vector<std::string> connections;
     bool ai_discovery_enabled;
     uint64_t ai_provider_count;
+    uint64_t ai_discovery_peers;
 
     void serialize(ISerializer &s) {
       KV_MEMBER(status)
@@ -379,6 +380,7 @@ struct COMMAND_RPC_GET_INFO {
       KV_MEMBER(connections)
       KV_MEMBER(ai_discovery_enabled)
       KV_MEMBER(ai_provider_count)
+      KV_MEMBER(ai_discovery_peers)
     }
   };
 };

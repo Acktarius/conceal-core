@@ -277,7 +277,8 @@ namespace cn
       };
       if (cmd.command == AI_DISCOVERY_CAPABILITIES_ID)
       {
-        m_aiDiscovery.handleCapabilityResponse(cmd.buf, ctx.aiDiscovery, now, enqueue);
+        m_aiDiscovery.handleCapabilityResponse(cmd.buf, ctx.aiDiscovery, now, enqueue, cmd.returnCode);
+        observeAiDiscoveryPeers();
       }
       else if (cmd.command == AI_DISCOVERY_REQUEST_PROVIDERS_ID)
       {
@@ -300,6 +301,7 @@ namespace cn
     {
       const int64_t now = static_cast<int64_t>(time(nullptr));
       ret = m_aiDiscovery.handleCapabilities(cmd.buf, out, ctx.aiDiscovery, now);
+      observeAiDiscoveryPeers();
       break;
     }
     case AI_DISCOVERY_ADVERTISEMENTS_ID:
@@ -1469,6 +1471,7 @@ namespace cn
   void NodeServer::onConnectionClose(P2pConnectionContext& context)
   {
     m_aiDiscovery.onDisconnect(context.aiDiscovery);
+    observeAiDiscoveryPeers();
 
     if (!m_stopEvent.get() && !context.m_isIncoming)
     {
@@ -1790,6 +1793,33 @@ namespace cn
       peers.push_back(ref);
     }
     m_aiDiscovery.maintain(static_cast<int64_t>(time(nullptr)), peers);
+    observeAiDiscoveryPeers();
+  }
+
+  uint64_t NodeServer::aiDiscoveryPeerCount() const {
+    if (!m_dispatcher.isOwnerThread() || !m_aiDiscovery.enabled()) {
+      return 0;
+    }
+    uint64_t count = 0;
+    for (ConnectionContainer::const_iterator it = m_connections.begin(); it != m_connections.end(); ++it) {
+      if (it->second.aiDiscovery.capability == AI_PEER_SUPPORTED) {
+        ++count;
+      }
+    }
+    return count;
+  }
+
+  void NodeServer::observeAiDiscoveryPeers() {
+    if (!m_dispatcher.isOwnerThread() || !m_aiDiscovery.enabled()) {
+      return;
+    }
+    const uint64_t count = aiDiscoveryPeerCount();
+    const bool nonZero = count > 0;
+    if (nonZero == m_aiDiscoveryPeersNonZero) {
+      return;
+    }
+    logger(INFO) << "AI discovery peer count changed to " << count;
+    m_aiDiscoveryPeersNonZero = nonZero;
   }
 
   template<typename T>

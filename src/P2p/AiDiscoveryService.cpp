@@ -21,6 +21,12 @@ void finishRound(AiConnectionState& state, int64_t now) {
   state.nextSyncAt = now + AI_SYNC_ROUND_INTERVAL_SECONDS;
 }
 
+void pauseRound(AiConnectionState& state, int64_t now) {
+  state.pagesThisRound = 0;
+  state.bytesThisRound = 0;
+  state.nextSyncAt = now + AI_SYNC_CONTINUATION_INTERVAL_SECONDS;
+}
+
 }
 
 AiDiscoveryService::AiDiscoveryService()
@@ -137,12 +143,22 @@ void AiDiscoveryService::maybeProbe(AiConnectionState& state, int64_t now, bool 
     return;
   }
   if (state.capability == AI_PEER_PROBE_SENT) {
-    if (now >= state.probeDeadline) {
-      state.capability = AI_PEER_UNSUPPORTED;
+    if (now < state.probeDeadline) {
+      return;
     }
+    if (state.probeSends >= AI_MAX_CAPABILITY_PROBES) {
+      state.capability = AI_PEER_UNSUPPORTED;
+      return;
+    }
+    state.capability = AI_PEER_UNKNOWN;
+    state.probeDeadline = now + AI_PROBE_RETRY_BACKOFF_SECONDS;
     return;
   }
-  if (state.probeSends >= 1) {
+  if (now < state.probeDeadline) {
+    return;
+  }
+  if (state.probeSends >= AI_MAX_CAPABILITY_PROBES) {
+    state.capability = AI_PEER_UNSUPPORTED;
     return;
   }
 
@@ -160,14 +176,19 @@ void AiDiscoveryService::maybeProbe(AiConnectionState& state, int64_t now, bool 
     return;
   }
 
-  state.probeSends = 1;
+  ++state.probeSends;
   state.capability = AI_PEER_PROBE_SENT;
   state.probeDeadline = now + AI_REQUEST_TIMEOUT_SECONDS;
 }
 
 void AiDiscoveryService::handleCapabilityResponse(const BinaryArray& in, AiConnectionState& state, int64_t now,
-                                                  const AiEnqueueFn& enqueue) {
+                                                  const AiEnqueueFn& enqueue, int32_t returnCode) {
   if (m_stopped || state.capability != AI_PEER_PROBE_SENT) {
+    return;
+  }
+
+  if (returnCode == static_cast<int32_t>(LevinError::ERROR_CONNECTION_HANDLER_NOT_DEFINED)) {
+    state.capability = AI_PEER_UNSUPPORTED;
     return;
   }
 
@@ -180,6 +201,80 @@ void AiDiscoveryService::handleCapabilityResponse(const BinaryArray& in, AiConne
   noteSupported(state, now);
   state.nextSyncAt = now;
   requestAiProviderPage(state, now, enqueue);
+}
+
+bool AiDiscoveryService::ingestPeerBatch(const std::vector<AiProviderAdvertisement>& advertisements,
+                                         AiConnectionState& state, int64_t now, const AiRelayFn& relay) {
+  struct Prepared {
+    AiProviderAdvertisement advertisement;
+    AiRecordAssessment assessment;
+    std::vector<uint8_t> canonical;
+  };
+
+  std::vector<Prepared> prepared;
+  prepared.reserve(advertisements.size());
+  for (size_t i = 0; i < advertisements.size(); ++i) {
+    Prepared item;
+    item.advertisement = advertisements[i];
+    item.assessment = m_registry.assess(item.advertisement, now);
+    if (item.assessment.kind == AiRecordClass::timeSkipped) {
+      continue;
+    }
+    if (item.assessment.kind == AiRecordClass::structuralInvalid) {
+      return false;
+    }
+    prepared.push_back(item);
+  }
+  if (prepared.empty()) {
+    return true;
+  }
+
+  if (!charge(state.updateWindowStart, state.updatesInWindow, now, static_cast<uint32_t>(prepared.size()),
+              AI_MAX_UPDATES_PER_PEER_PER_MINUTE)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < prepared.size(); ++i) {
+    Prepared& item = prepared[i];
+    if (item.assessment.kind != AiRecordClass::needsVerification) {
+      continue;
+    }
+    if (!charge(state.signatureWindowStart, state.signaturesInWindow, now, item.assessment.signatureCount,
+                AI_MAX_SIGNATURES_PER_PEER_PER_MINUTE)) {
+      return false;
+    }
+    if (!m_registry.verifyRecord(item.advertisement, item.canonical, item.assessment.reason)) {
+      return false;
+    }
+  }
+
+  bool spoke = false;
+  for (size_t i = 0; i < prepared.size(); ++i) {
+    const Prepared& item = prepared[i];
+    AiIngestResult ingested;
+    if (item.assessment.kind == AiRecordClass::needsVerification) {
+      ingested = m_registry.acceptVerified(item.advertisement, item.canonical, now, AI_SOURCE_PEER);
+    } else if (item.assessment.kind == AiRecordClass::stale) {
+      ingested.result = AiAcceptResult::stale;
+      ingested.reason = item.assessment.reason;
+    } else if (item.assessment.kind == AiRecordClass::duplicate) {
+      ingested.result = AiAcceptResult::duplicate;
+      ingested.reason = item.assessment.reason;
+    } else {
+      ingested.result = AiAcceptResult::invalid;
+      ingested.reason = item.assessment.reason;
+    }
+    if (ingested.result != AiAcceptResult::invalid) {
+      spoke = true;
+    }
+    if (ingested.relay && relay) {
+      relay(item.advertisement);
+    }
+  }
+  if (spoke) {
+    noteSupported(state, now);
+  }
+  return true;
 }
 
 void AiDiscoveryService::handleAdvertisements(const BinaryArray& in, AiConnectionState& state, int64_t now, const AiRelayFn& relay) {
@@ -196,31 +291,7 @@ void AiDiscoveryService::handleAdvertisements(const BinaryArray& in, AiConnectio
     return;
   }
 
-  const uint32_t count = static_cast<uint32_t>(req.advertisements.size());
-  for (uint32_t i = 0; i < count; ++i) {
-    std::string reason;
-    if (!inspectAiAdvertisement(req.advertisements[i], m_registry.networkId(), now, reason)) {
-      return;
-    }
-  }
-  if (!charge(state.updateWindowStart, state.updatesInWindow, now, count, AI_MAX_UPDATES_PER_PEER_PER_MINUTE) ||
-      !charge(state.signatureWindowStart, state.signaturesInWindow, now, count, AI_MAX_SIGNATURES_PER_PEER_PER_MINUTE)) {
-    return;
-  }
-
-  bool spoke = false;
-  for (uint32_t i = 0; i < count; ++i) {
-    AiIngestResult ingested = m_registry.accept(req.advertisements[i], now, AI_SOURCE_PEER);
-    if (ingested.result != AiAcceptResult::invalid) {
-      spoke = true;
-    }
-    if (ingested.relay && relay) {
-      relay(req.advertisements[i]);
-    }
-  }
-  if (spoke) {
-    noteSupported(state, now);
-  }
+  ingestPeerBatch(req.advertisements, state, now, relay);
 }
 
 int AiDiscoveryService::handleProvidersRequest(const BinaryArray& in, BinaryArray& out, AiConnectionState& state, int64_t now) {
@@ -314,25 +385,9 @@ void AiDiscoveryService::handleProvidersResponse(const BinaryArray& in, AiConnec
     return;
   }
 
-  const uint32_t count = static_cast<uint32_t>(rsp.advertisements.size());
-  if (count > 0) {
-    for (uint32_t i = 0; i < count; ++i) {
-      std::string reason;
-      if (!inspectAiAdvertisement(rsp.advertisements[i], m_registry.networkId(), now, reason)) {
-        backoff(state, now);
-        return;
-      }
-    }
-    if (!charge(state.signatureWindowStart, state.signaturesInWindow, now, count, AI_MAX_SIGNATURES_PER_PEER_PER_MINUTE)) {
-      backoff(state, now);
-      return;
-    }
-    for (uint32_t i = 0; i < count; ++i) {
-      AiIngestResult ingested = m_registry.accept(rsp.advertisements[i], now, AI_SOURCE_PEER);
-      if (ingested.relay && relay) {
-        relay(rsp.advertisements[i]);
-      }
-    }
+  if (!rsp.advertisements.empty() && !ingestPeerBatch(rsp.advertisements, state, now, relay)) {
+    backoff(state, now);
+    return;
   }
 
   if (in.size() > 0 && state.bytesThisRound <= AI_MAX_SYNC_BYTES) {
@@ -360,7 +415,7 @@ bool AiDiscoveryService::requestAiProviderPage(AiConnectionState& state, int64_t
     return false;
   }
   if (state.pagesThisRound >= AI_MAX_SYNC_PAGES || state.bytesThisRound >= AI_MAX_SYNC_BYTES) {
-    finishRound(state, now);
+    pauseRound(state, now);
     return false;
   }
   if (m_activeSyncs >= AI_MAX_CONCURRENT_SYNCS) {

@@ -133,6 +133,7 @@ namespace cn
     AiIngestResult submitAiProviderAdvertisement(const AiProviderAdvertisement& ad);
     AiProviderPage getAiProviders(const AiProviderQuery& query) const;
     uint64_t listedAiProviderCount() const;
+    uint64_t aiDiscoveryPeerCount() const;
 
   private:
     enum PeerType
@@ -151,6 +152,7 @@ namespace cn
     bool enqueueAiDiscovery(P2pConnectionContext& context, const AiOutbound& message);
     void relayAiProviderAdvertisements(const AiProviderAdvertisement& ad, const boost::uuids::uuid* exclude);
     void maintainAiDiscovery();
+    void observeAiDiscoveryPeers();
 
 #ifdef ALLOW_DEBUG_COMMANDS
     int handleGetStatInfo(int command, COMMAND_REQUEST_STAT_INFO::request &arg, COMMAND_REQUEST_STAT_INFO::response &rsp, P2pConnectionContext &context);
@@ -258,6 +260,7 @@ namespace cn
     CryptoNoteProtocolHandler& m_payloadHandler;
     PeerlistManager m_peerlist;
     AiDiscoveryService m_aiDiscovery;
+    bool m_aiDiscoveryPeersNonZero = false;
 
     OnceInInterval m_connectionsMakerInterval = OnceInInterval(1);
     OnceInInterval m_peerlistStoreInterval = OnceInInterval(60 * 30, false);

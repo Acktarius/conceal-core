@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -60,9 +61,15 @@ const uint8_t AI_STATUS_OFFLINE = 3;
 
 const uint8_t AI_BILLING_PER_REQUEST = 1;
 const uint8_t AI_BILLING_PER_THOUSAND_TOKENS = 2;
+const uint8_t AI_BILLING_PER_SECOND = 3;
 
 const uint8_t AI_CONTACT_NONE = 0;
 const uint8_t AI_CONTACT_ENDPOINT = 1;
+const uint8_t AI_CONTACT_CCX_ADDRESS = 2;
+
+const uint8_t AI_DIGEST_NONE = 0;
+const uint8_t AI_DIGEST_SHA256 = 1;
+const size_t AI_MODEL_DIGEST_BYTES = 32;
 
 const uint8_t AI_SOURCE_LOCAL = 1;
 const uint8_t AI_SOURCE_PEER = 2;
@@ -79,6 +86,16 @@ const uint8_t AI_PEER_UNSUPPORTED = 3;
 
 enum class AiAcceptResult { accepted, duplicate, stale, invalid, capacityRejected, rateLimited };
 
+enum class AiRecordClass { timeSkipped, structuralInvalid, stale, duplicate, conflict, needsVerification };
+
+struct AiRecordAssessment {
+  AiRecordClass kind;
+  uint32_t signatureCount;
+  std::string reason;
+
+  AiRecordAssessment() : kind(AiRecordClass::structuralInvalid), signatureCount(0) {}
+};
+
 struct AiIngestResult {
   AiAcceptResult result;
   bool relay;
@@ -94,8 +111,12 @@ struct AiModelOffer {
   uint32_t maxContextTokens;
   uint64_t priceAtomicUnits;
   uint8_t billingUnit;
+  uint8_t modelDigestType;
+  std::array<uint8_t, AI_MODEL_DIGEST_BYTES> modelDigest;
 
-  AiModelOffer() : maxContextTokens(0), priceAtomicUnits(0), billingUnit(0) {}
+  AiModelOffer() : maxContextTokens(0), priceAtomicUnits(0), billingUnit(0), modelDigestType(AI_DIGEST_NONE) {
+    modelDigest.fill(0);
+  }
 
   void serialize(ISerializer& s) {
     s(modelId, "modelId");
@@ -103,6 +124,8 @@ struct AiModelOffer {
     s(maxContextTokens, "maxContextTokens");
     s(priceAtomicUnits, "priceAtomicUnits");
     s(billingUnit, "billingUnit");
+    s(modelDigestType, "modelDigestType");
+    s(modelDigest, "modelDigest");
   }
 };
 
@@ -118,12 +141,14 @@ struct AiProviderAdvertisement {
   std::vector<AiModelOffer> models;
   uint8_t contactType;
   std::string contactValue;
+  crypto::Signature addressBindingSignature;
   crypto::Signature signature;
 
   AiProviderAdvertisement()
       : protocolVersion(0), sequence(0), issuedAt(0), expiresAt(0), status(0), availableSlots(0), contactType(0) {
     memset(networkId.data, 0, sizeof(networkId.data));
     memset(providerPublicKey.data, 0, sizeof(providerPublicKey.data));
+    memset(addressBindingSignature.data, 0, sizeof(addressBindingSignature.data));
     memset(signature.data, 0, sizeof(signature.data));
   }
 
@@ -140,6 +165,7 @@ struct AiProviderAdvertisement {
     s(contactType, "contactType");
     s(contactValue, "contactValue");
     rejectOversizedDiscoveryString(s, contactValue, AI_MAX_CONTACT_LENGTH);
+    s(addressBindingSignature, "addressBindingSignature");
     s(signature, "signature");
   }
 };
@@ -237,11 +263,30 @@ struct AiOutbound {
   AiOutbound() : command(0), request(false) {}
 };
 
+struct AiVerificationStats {
+  uint32_t providerSignatures;
+  uint32_t bindingSignatures;
+
+  AiVerificationStats() : providerSignatures(0), bindingSignatures(0) {}
+};
+
+void resetAiVerificationStats();
+AiVerificationStats aiVerificationStats();
+
 // Canonical signing bytes. Little-endian integers, length-prefixed strings, domain separated.
-// Excludes the signature. Does not use C++ layout or JSON field order.
+// Excludes the provider signature. Includes addressBindingSignature. Does not use C++ layout or JSON field order.
 bool buildAiAdvertisementCanonical(const AiProviderAdvertisement& ad, std::vector<uint8_t>& out);
 crypto::Hash aiAdvertisementSigningHash(const std::vector<uint8_t>& canonical);
 bool signAiAdvertisement(AiProviderAdvertisement& ad, const crypto::SecretKey& secret);
 bool verifyAiAdvertisementSignature(const AiProviderAdvertisement& ad, std::vector<uint8_t>& canonicalOut);
+
+// Binding covers the service key and the address only. The miner can build it once, offline.
+bool buildAiAddressBindingCanonical(const boost::uuids::uuid& networkId, const crypto::PublicKey& providerPublicKey,
+                                    const std::string& address, std::vector<uint8_t>& out);
+bool signAiAddressBinding(const boost::uuids::uuid& networkId, const crypto::PublicKey& providerPublicKey,
+                          const std::string& address, const crypto::PublicKey& spendPublicKey,
+                          const crypto::SecretKey& spendSecretKey, crypto::Signature& out);
+bool verifyAiAddressBinding(const boost::uuids::uuid& networkId, const crypto::PublicKey& providerPublicKey,
+                            const std::string& address, const crypto::Signature& signature);
 
 }

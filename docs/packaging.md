@@ -495,3 +495,9 @@ list the package.
   started deprecating it on 2026-09-17 and stops supporting it on 2027-04-17.
   Before that date, move the 22.04 build into an `ubuntu:22.04` container or
   drop the 22.04 package.
+
+## Daemon RPC and AI registration
+
+Last updated: 2026-11-17, because AI provider registration is loopback-only and a same-host reverse proxy would hide that.
+
+Packages install `conceal-daemon`. They do not ship a `conceal.conf`. Discovery stays off until the operator sets `--enable-ai-discovery` or `enable-ai-discovery=TRUE`. `/registeraiprovider` is accepted only from `127.0.0.0/8`. A reverse proxy on the same machine makes that path look local. Block it at the proxy. The nginx example and the rest of the rule are in [`ai-provider-discovery.md`](ai-provider-discovery.md).

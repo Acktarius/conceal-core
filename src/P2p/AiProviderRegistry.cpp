@@ -22,28 +22,123 @@ void AiProviderRegistry::setNetworkId(const boost::uuids::uuid& networkId) {
   m_networkId = networkId;
 }
 
-AiIngestResult AiProviderRegistry::accept(const AiProviderAdvertisement& ad, int64_t now, uint8_t source) {
-  AiIngestResult result;
-  if (!inspectAiAdvertisement(ad, m_networkId, now, result.reason)) {
-    result.result = AiAcceptResult::invalid;
-    return result;
+uint32_t AiProviderRegistry::peerSlotLimit() const {
+  if (m_maxEntries > AI_LOCAL_RESERVED_ENTRIES) {
+    return m_maxEntries - AI_LOCAL_RESERVED_ENTRIES;
+  }
+  if (m_maxEntries <= 1) {
+    return m_maxEntries;
+  }
+  return m_maxEntries - 1;
+}
+
+uint32_t AiProviderRegistry::peerRecordCount() const {
+  uint32_t count = 0;
+  for (std::map<crypto::PublicKey, Record, AiPublicKeyLess>::const_iterator it = m_records.begin(); it != m_records.end();
+       ++it) {
+    if (it->second.observation.source == AI_SOURCE_PEER) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+bool AiProviderRegistry::evictClosestPeerRecord(int64_t now) {
+  std::map<crypto::PublicKey, Record, AiPublicKeyLess>::iterator best = m_records.end();
+  for (std::map<crypto::PublicKey, Record, AiPublicKeyLess>::iterator it = m_records.begin(); it != m_records.end();
+       ++it) {
+    const Record& record = it->second;
+    if (record.observation.source != AI_SOURCE_PEER || record.advertisement.status == AI_STATUS_OFFLINE) {
+      continue;
+    }
+    if (record.advertisement.expiresAt <= now) {
+      continue;
+    }
+    if (best == m_records.end() || record.advertisement.expiresAt < best->second.advertisement.expiresAt ||
+        (record.advertisement.expiresAt == best->second.advertisement.expiresAt &&
+         AiPublicKeyLess()(it->first, best->first))) {
+      best = it;
+    }
+  }
+  if (best == m_records.end()) {
+    return false;
+  }
+  m_records.erase(best);
+  return true;
+}
+
+AiRecordAssessment AiProviderRegistry::assess(const AiProviderAdvertisement& ad, int64_t now) const {
+  AiRecordAssessment assessment;
+  if (!inspectAiAdvertisement(ad, m_networkId, now, assessment.reason)) {
+    assessment.kind = aiAdvertisementFailureIsTimeOnly(assessment.reason) ? AiRecordClass::timeSkipped
+                                                                           : AiRecordClass::structuralInvalid;
+    return assessment;
   }
 
-  std::vector<uint8_t> canonical;
+  std::map<crypto::PublicKey, Record, AiPublicKeyLess>::const_iterator it = m_records.find(ad.providerPublicKey);
+  if (it != m_records.end() && it->second.advertisement.expiresAt > now) {
+    const Record& current = it->second;
+    if (ad.sequence < current.advertisement.sequence) {
+      assessment.kind = AiRecordClass::stale;
+      assessment.reason = "stale sequence";
+      return assessment;
+    }
+    if (ad.sequence == current.advertisement.sequence) {
+      std::vector<uint8_t> canonical;
+      if (buildAiAdvertisementCanonical(ad, canonical) && canonical == current.canonical &&
+          sameSignature(ad.signature, current.advertisement.signature)) {
+        assessment.kind = AiRecordClass::duplicate;
+        assessment.reason = "duplicate";
+        return assessment;
+      }
+      assessment.kind = AiRecordClass::conflict;
+      assessment.reason = "conflicting record at the same sequence";
+      return assessment;
+    }
+  }
+
+  assessment.kind = AiRecordClass::needsVerification;
+  assessment.signatureCount = ad.contactType == AI_CONTACT_CCX_ADDRESS ? 2 : 1;
+  assessment.reason = "needs verification";
+  return assessment;
+}
+
+bool AiProviderRegistry::verifyRecord(const AiProviderAdvertisement& ad, std::vector<uint8_t>& canonical,
+                                      std::string& reason) const {
   if (!verifyAiAdvertisementSignature(ad, canonical)) {
-    result.result = AiAcceptResult::invalid;
-    result.reason = "invalid signature";
-    return result;
+    reason = "invalid signature";
+    if (ad.contactType == AI_CONTACT_CCX_ADDRESS) {
+      verifyAiAddressBinding(ad.networkId, ad.providerPublicKey, ad.contactValue, ad.addressBindingSignature);
+    }
+    return false;
   }
+  if (ad.contactType == AI_CONTACT_CCX_ADDRESS &&
+      !verifyAiAddressBinding(ad.networkId, ad.providerPublicKey, ad.contactValue, ad.addressBindingSignature)) {
+    reason = "invalid address binding";
+    return false;
+  }
+  reason = "verified";
+  return true;
+}
 
+AiIngestResult AiProviderRegistry::acceptVerified(const AiProviderAdvertisement& ad, const std::vector<uint8_t>& canonical,
+                                                  int64_t now, uint8_t source) {
+  AiIngestResult result;
   expire(now);
 
   std::map<crypto::PublicKey, Record, AiPublicKeyLess>::iterator it = m_records.find(ad.providerPublicKey);
   if (it == m_records.end()) {
-    if (m_records.size() >= m_maxEntries) {
+    if (source == AI_SOURCE_PEER && (peerRecordCount() >= peerSlotLimit() || m_records.size() >= m_maxEntries)) {
       result.result = AiAcceptResult::capacityRejected;
       result.reason = "registry full";
       return result;
+    }
+    if (m_records.size() >= m_maxEntries) {
+      if (source != AI_SOURCE_LOCAL || !evictClosestPeerRecord(now)) {
+        result.result = AiAcceptResult::capacityRejected;
+        result.reason = "registry full";
+        return result;
+      }
     }
 
     Record record;
@@ -86,6 +181,34 @@ AiIngestResult AiProviderRegistry::accept(const AiProviderAdvertisement& ad, int
   result.relay = true;
   result.reason = "accepted";
   return result;
+}
+
+AiIngestResult AiProviderRegistry::accept(const AiProviderAdvertisement& ad, int64_t now, uint8_t source) {
+  AiIngestResult result;
+  const AiRecordAssessment assessment = assess(ad, now);
+  if (assessment.kind == AiRecordClass::timeSkipped || assessment.kind == AiRecordClass::structuralInvalid ||
+      assessment.kind == AiRecordClass::conflict) {
+    result.result = AiAcceptResult::invalid;
+    result.reason = assessment.reason;
+    return result;
+  }
+  if (assessment.kind == AiRecordClass::stale) {
+    result.result = AiAcceptResult::stale;
+    result.reason = assessment.reason;
+    return result;
+  }
+  if (assessment.kind == AiRecordClass::duplicate) {
+    result.result = AiAcceptResult::duplicate;
+    result.reason = assessment.reason;
+    return result;
+  }
+
+  std::vector<uint8_t> canonical;
+  if (!verifyRecord(ad, canonical, result.reason)) {
+    result.result = AiAcceptResult::invalid;
+    return result;
+  }
+  return acceptVerified(ad, canonical, now, source);
 }
 
 void AiProviderRegistry::expire(int64_t now) {
@@ -206,18 +329,12 @@ void AiProviderRegistry::directoryPage(uint64_t cursor, uint16_t limit, int64_t 
 }
 
 uint64_t AiProviderRegistry::listedCount(int64_t now) const {
-  AiProviderQuery query;
-  AiProviderPage page = this->query(query, now);
-  uint64_t count = page.providers.size();
-  uint32_t guard = 0;
-  while (!page.done && guard < m_maxEntries) {
-    ++guard;
-    query.cursor = page.nextCursor;
-    const uint64_t previous = query.cursor;
-    page = this->query(query, now);
-    count += page.providers.size();
-    if (page.nextCursor == previous && !page.done) {
-      break;
+  uint64_t count = 0;
+  for (std::map<crypto::PublicKey, Record, AiPublicKeyLess>::const_iterator it = m_records.begin(); it != m_records.end();
+       ++it) {
+    const AiProviderAdvertisement& ad = it->second.advertisement;
+    if (ad.expiresAt > now && ad.status != AI_STATUS_OFFLINE) {
+      ++count;
     }
   }
   return count;

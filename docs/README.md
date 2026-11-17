@@ -27,9 +27,9 @@ Twitter: https://twitter.com/ConcealNetwork\\
 
 These notes are for conceal-core development. They are separate from the wiki text above.
 
-- [[ai-provider-discovery.md|AI provider discovery]] — DEC-0005. Disabled by default. Existing TCP/Levin port only.
+- [[ai-provider-discovery.md|AI provider discovery]] — DEC-0005. Disabled by default. Existing TCP/Levin port only. CCX address binding, per-second billing, and model digests are part of protocol v1.
 - [[DECISIONS.md|Decisions]]
 - [[quic-transport-evaluation.md|QUIC transport evaluation]] — DEC-0004. Not a production transport. The proof of concept is not started, and QUIC is unmeasured.
 - [[p2p-naming-align.md|P2P naming alignment]]
 
-Last updated: 2026-11-16, because AI provider discovery was added on the existing P2P path.
+Last updated: 2026-11-17, because the discovery note now includes the address binding and the other v1 field changes.

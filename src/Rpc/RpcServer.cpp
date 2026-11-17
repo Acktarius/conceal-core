@@ -1032,6 +1032,7 @@ bool RpcServer::on_get_info(const COMMAND_RPC_GET_INFO::request&, COMMAND_RPC_GE
   res.connections = m_p2p.getPayloadObject().all_connections();
   res.ai_discovery_enabled = m_p2p.isAiDiscoveryEnabled();
   res.ai_provider_count = m_p2p.listedAiProviderCount();
+  res.ai_discovery_peers = m_p2p.aiDiscoveryPeerCount();
   return true;
 }
 

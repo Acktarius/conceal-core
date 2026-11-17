@@ -12,6 +12,7 @@
 #include "AiDiscoveryProtocolDefinitions.h"
 #include "AiProviderRegistry.h"
 #include "AiProviderValidation.h"
+#include "LevinProtocol.h"
 
 namespace cn {
 
@@ -45,7 +46,8 @@ public:
   bool shouldRelayTo(const AiConnectionState& state) const;
 
   int handleCapabilities(const BinaryArray& in, BinaryArray& out, AiConnectionState& state, int64_t now);
-  void handleCapabilityResponse(const BinaryArray& in, AiConnectionState& state, int64_t now, const AiEnqueueFn& enqueue);
+  void handleCapabilityResponse(const BinaryArray& in, AiConnectionState& state, int64_t now, const AiEnqueueFn& enqueue,
+                               int32_t returnCode = LEVIN_PROTOCOL_RETCODE_SUCCESS);
   void handleAdvertisements(const BinaryArray& in, AiConnectionState& state, int64_t now, const AiRelayFn& relay);
   int handleProvidersRequest(const BinaryArray& in, BinaryArray& out, AiConnectionState& state, int64_t now);
   void handleProvidersResponse(const BinaryArray& in, AiConnectionState& state, int64_t now, const AiEnqueueFn& enqueue,
@@ -59,6 +61,8 @@ private:
   void clearOutstanding(AiConnectionState& state);
   void backoff(AiConnectionState& state, int64_t now);
   bool charge(int64_t& windowStart, uint32_t& count, int64_t now, uint32_t amount, uint32_t limit);
+  bool ingestPeerBatch(const std::vector<AiProviderAdvertisement>& advertisements, AiConnectionState& state, int64_t now,
+                       const AiRelayFn& relay);
   void noteSupported(AiConnectionState& state, int64_t now);
   void maybeProbe(AiConnectionState& state, int64_t now, bool handshakeComplete, const AiEnqueueFn& enqueue);
 

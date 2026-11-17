@@ -26,6 +26,9 @@ const size_t AI_MAX_MODELS_PER_PROVIDER = 8;
 const size_t AI_MAX_MODEL_ID_LENGTH = 64;
 const size_t AI_MAX_CONTACT_LENGTH = 128;
 const uint32_t AI_MAX_REGISTRY_ENTRIES = 1024;
+// Kept free of new peer records so a local miner can still register.
+// A registry smaller than this still keeps one slot away from peers when it holds more than one record.
+const uint32_t AI_LOCAL_RESERVED_ENTRIES = 64;
 const uint32_t AI_MAX_AVAILABLE_SLOTS = 1024;
 const int64_t AI_MAX_ADVERTISEMENT_LIFETIME_SECONDS = 30 * 60;
 const int64_t AI_MAX_CLOCK_SKEW_SECONDS = 2 * 60;
@@ -39,6 +42,10 @@ const uint32_t AI_MAX_CONCURRENT_SYNCS = 4;
 const int64_t AI_REQUEST_TIMEOUT_SECONDS = 20;
 const int64_t AI_SYNC_BACKOFF_SECONDS = 60;
 const int64_t AI_SYNC_ROUND_INTERVAL_SECONDS = 5 * 60;
+// A round that stops on the page or byte budget waits this long and keeps its cursor.
+const int64_t AI_SYNC_CONTINUATION_INTERVAL_SECONDS = AI_SYNC_ROUND_INTERVAL_SECONDS;
+const int64_t AI_PROBE_RETRY_BACKOFF_SECONDS = AI_SYNC_BACKOFF_SECONDS;
+const uint8_t AI_MAX_CAPABILITY_PROBES = 2;
 const int64_t AI_RATE_WINDOW_SECONDS = 60;
 
 const uint32_t AI_MAX_LOCAL_REGISTRATIONS_PER_MINUTE = 30;

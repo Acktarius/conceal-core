@@ -483,7 +483,12 @@ conceal-ai-miner needs to publish an expiring compute advertisement, and conceal
 - Keep validation, the in-memory registry, and relay in dedicated P2P components. Do not persist the registry in `.p2pstate`.
 - Relay only a newly accepted record, and only to peers that answered the capability request. Do not broadcast to legacy peers.
 - Expose `POST /registeraiprovider` only to a loopback TCP peer, and `POST /getaiproviders` as a bounded read while the flag is on.
-- Treat the directory as an incomplete, untrusted cache. A provider signature does not prove hardware, reachability, or ownership of a contact string.
+- Treat the directory as an incomplete, untrusted cache. A provider signature does not prove hardware or reachability. Contact type 2 adds an offline spend-key binding from the CCX address to the service key. The daemon only verifies that binding.
+- Accept billing unit 3 (CCX atomic units per second) and an optional SHA-256 model digest. The daemon does not hash model files.
+- Keep 64 registry slots for local records. A full map may evict the peer record closest to expiry for a new local key, never a local record, and never an offline withdrawal before expiry.
+- When a directory round hits its page or byte budget, keep the cursor and wait 300 seconds. Reset the cursor only when the peer reports `done`.
+- On a capability timeout, probe once more after 60 seconds, at most twice per connection. Return code -6, or an empty or undecodable reply, still marks the peer unsupported with no retry.
+- Do not add authenticated remote registration. The daemon RPC server has no configured credentials. Registration stays loopback-only. Announcing discovery in the handshake or peer list is unscheduled and is not part of this decision.
 
 #### Rationale
 
@@ -502,13 +507,18 @@ Low while the flag is off: handshake, timed sync, wire-field names, and `.p2psta
 
 #### Evidence
 
-`AiProviderDiscovery.*` passed in `./tests/unit_tests` (6 tests) after an out-of-source build with `-DBUILD_TESTS=ON`. `conceal-daemon` linked. No two-daemon TCP run and no legacy peer binary were executed.
+`AiProviderDiscovery.*` passed in `./tests/unit_tests` (14 tests) after an out-of-source build with `-DBUILD_TESTS=ON` on 2026-11-17. `conceal-daemon` linked. No two-daemon TCP run and no legacy peer binary were executed. The full `unit_tests` binary was run the same day. Three transaction-pool fusion tests failed; the diff does not touch the pool. A sandboxed run also left `build/path`, which made later `WalletApi` cases throw `MemoryMappedFile::create: File exists` until that file was removed. `WalletApi.emptyBalance` passed after the leftover file was deleted. Those failures are outside this decision.
 
 #### Open questions
 
-- Whether operators want an authenticated non-loopback registration path.
 - How a restarted daemon should remember sequence high-water marks without putting the registry in `.p2pstate`.
 - Whether best-effort pagination is enough once more than one daemon is in regular use.
+- Authenticated remote registration stays closed: `conceal-daemon` never configures `HttpServer` credentials. Revisit only if daemon RPC authentication is added on purpose.
+- Announcing discovery support in the handshake or the peer list. Unscheduled. Not implemented.
+
+#### Update 2026-11-17
+
+Protocol v1 was still unreleased (`git tag --contains 68b39f8` printed nothing), so the signed fields above were redefined in place. DEC-0004 is unchanged.
 
 #### Documentation impact
 

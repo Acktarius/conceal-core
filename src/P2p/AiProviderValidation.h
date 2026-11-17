@@ -23,8 +23,9 @@ struct AiRateWindow {
   bool allowMany(int64_t now, uint32_t amount, uint32_t limit, int64_t windowSeconds);
 };
 
-// Cheap structural checks. Does not verify the signature.
+// Cheap structural checks. Does not verify the provider signature or the address binding.
 bool inspectAiAdvertisement(const AiProviderAdvertisement& ad, const boost::uuids::uuid& expectedNetwork, int64_t now,
                             std::string& reason);
+bool aiAdvertisementFailureIsTimeOnly(const std::string& reason);
 
 }

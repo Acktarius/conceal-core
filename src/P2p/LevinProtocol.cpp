@@ -96,6 +96,7 @@ bool LevinProtocol::readCommand(Command& cmd) {
   cmd.buf = std::move(buf);
   cmd.isNotify = !head.m_have_to_return_data;
   cmd.isResponse = (head.m_flags & LEVIN_PACKET_RESPONSE) == LEVIN_PACKET_RESPONSE;
+  cmd.returnCode = head.m_return_code;
 
   return true;
 }

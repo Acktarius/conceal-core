@@ -61,6 +61,7 @@ public:
     bool isNotify;
     bool isResponse;
     BinaryArray buf;
+    int32_t returnCode = 0;
 
     bool needReply() const;
   };

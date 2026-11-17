@@ -28,7 +28,12 @@ public:
   void setNetworkId(const boost::uuids::uuid& networkId);
   const boost::uuids::uuid& networkId() const { return m_networkId; }
 
-  // Signature is verified inside. Callers that rate-limit must do so before this call.
+  // Classifies without verifying signatures. A same-sequence conflict is rejected here:
+  // the stored record was already verified, so another body at that sequence cannot be accepted.
+  AiRecordAssessment assess(const AiProviderAdvertisement& ad, int64_t now) const;
+  bool verifyRecord(const AiProviderAdvertisement& ad, std::vector<uint8_t>& canonical, std::string& reason) const;
+  AiIngestResult acceptVerified(const AiProviderAdvertisement& ad, const std::vector<uint8_t>& canonical, int64_t now,
+                                uint8_t source);
   AiIngestResult accept(const AiProviderAdvertisement& ad, int64_t now, uint8_t source);
 
   void expire(int64_t now);
@@ -48,6 +53,9 @@ private:
 
   bool listingVisible(const AiProviderAdvertisement& ad, const AiProviderQuery& query, int64_t now) const;
   static bool offerMatches(const AiProviderAdvertisement& ad, const AiProviderQuery& query);
+  uint32_t peerSlotLimit() const;
+  uint32_t peerRecordCount() const;
+  bool evictClosestPeerRecord(int64_t now);
 
   boost::uuids::uuid m_networkId;
   uint32_t m_maxEntries;
