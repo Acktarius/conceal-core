@@ -40,3 +40,5 @@ external/FTXUI/
 .repo-kit/
 
 security/
+# repo-kit py-indexer
+.repo-kit/tools/py-indexer/repos.json
